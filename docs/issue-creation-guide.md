@@ -8,8 +8,7 @@ Do not rely on memory for shared implementation context.
 
 If a rule matters in more than one issue, put it in:
 
-- `docs/project-context.md` for stable project-wide rules
-- `docs/decision-log.md` for decisions the team has made
+- `docs/project-context.md`
 
 ## What should live where
 
@@ -19,7 +18,7 @@ Use `docs/project-context.md` for stable constraints such as:
 - server-authoritative gameplay
 - which app owns which responsibility
 
-Use `docs/decision-log.md` for choices such as:
+It should also hold key project decisions such as:
 
 - "players are guests, not Django users"
 - "room host can start the game only when at least 2 players are present"
@@ -38,9 +37,8 @@ Do not try to write every technical detail from scratch each time.
 
 Instead, split the information into layers:
 
-- Layer 1: project-wide context in `docs/project-context.md`
-- Layer 2: reusable decisions in `docs/decision-log.md`
-- Layer 3: issue-specific instructions in the GitHub issue
+- Layer 1: project-wide context and decisions in `docs/project-context.md`
+- Layer 2: issue-specific instructions in the GitHub issue
 
 That means the issue only needs to explain what is unique about that task.
 
@@ -72,9 +70,9 @@ Good issue shape:
 - mid-week async check-in in GitHub comments or chat
 - short review pass before merge
 
-## When to stop and write a decision down to decision-log
+## When to stop and write a decision into project-context
 
-Write to the decision log when:
+Update `project-context.md` when:
 
 - the answer will likely matter again and needs to be known by an LLM
 - someone asked a question that revealed important hidden context for implementation

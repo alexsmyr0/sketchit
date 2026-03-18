@@ -17,7 +17,6 @@ Explain the user or system need this task supports.
 ## Read first
 
 - [ ] `docs/project-context.md`
-- [ ] `docs/decision-log.md`
 - [ ] Relevant existing code/files: `...`
 
 ## Scope

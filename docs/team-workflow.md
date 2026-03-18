@@ -10,8 +10,7 @@ Do not rely on memory for shared implementation context.
 
 If a rule matters in more than one issue, put it in:
 
-- `docs/project-context.md` for stable project-wide rules
-- `docs/decision-log.md` for decisions the team has made
+- `docs/project-context.md`
 
 ## Shared context to read before coding
 
@@ -21,7 +20,7 @@ Use `docs/project-context.md` for stable constraints such as:
 - server-authoritative gameplay
 - which app owns which responsibility
 
-Use `docs/decision-log.md` for choices such as:
+It also contains important project decisions such as:
 
 - "players are guests, not Django users"
 - "room host can start the game only when at least 2 players are present"
@@ -29,14 +28,14 @@ Use `docs/decision-log.md` for choices such as:
 
 ## Workflow for implementing an issue
 
-1. Read `docs/project-context.md`, `docs/decision-log.md`, and the issue.
+1. Read `docs/project-context.md` and the issue.
 2. Leave a short comment before coding:
    - what you think the task means
    - what files you expect to touch
    - any missing decision that blocks you from full implementation
 3. Only then start implementation.
 4. Open a small PR and use the PR template.
-5. If a new project-level rule is discovered, add it to the decision log before merge.
+5. If a new project-level rule is discovered, add it to `docs/project-context.md` before merge.
 
 This short comment step is important. It catches misunderstandings before code is written.
 
@@ -44,18 +43,18 @@ This short comment step is important. It catches misunderstandings before code i
 
 - AI can help draft code, tests, and refactors.
 - AI should not make product-scope decisions on its own.
-- You MUST give AI proper context before letting it assist you in implementation (This means giving it project-context.md & decision-log.md files along with the issue at hand and any conversation had about it)
+- You MUST give AI proper context before letting it assist you in implementation. This means giving it `project-context.md` along with the issue at hand and any conversation about it.
 
 Minimum context to include in any AI prompt:
 
-- Project-Context.md & decision-log.md file
+- `project-context.md`
 - Issue at hand along with any conversation in that issue
 
 If you do not include those points, the AI will often generate/guess its own rules and implementation.
 
-## When to stop and write a decision down to decision-log
+## When to stop and write a decision into project-context
 
-Write to the decision log when:
+Update `project-context.md` when:
 
 - the answer will likely matter again and needs to be known by an LLM
 - someone asked a question that revealed important hidden context for implementation
