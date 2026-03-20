@@ -102,3 +102,113 @@ If those are missing, the issue is not ready to assign.
 - Implications:
   - When borrowing from the reference code, verify it matches current scope before implementing it.
   - AI prompts should explicitly state current project constraints so copied patterns do not drift toward the reference project.
+
+## Additional MVP decisions
+
+These decisions were clarified after the initial project context and should be treated as part of the current source of truth for implementation planning.
+
+### Scope
+
+- The project should define both a persistent Django-model ERD and a separate runtime-state design for Redis, Channels, or in-memory data.
+- Persistent data and temporary runtime state should stay clearly separated.
+- The MVP only supports live and current games.
+- Historical match storage is out of scope for now.
+- Guess or chat history should not be kept after a game ends.
+- Drawing stroke or canvas history should not be persisted and should stay out of the persistent ERD.
+
+### Terminology
+
+- All players are guests.
+- A player is treated as a temporary participant, not a persistent account.
+- `round` means one drawing turn.
+- `cycle` means one full pass where each eligible drawer draws once.
+- `game` is the term used for one full cycle with fresh scores.
+- A room can host multiple games over time.
+- The current preference for the MVP is a single participant concept with role or state flags such as `playing` and `spectating`, rather than separate lobby and game participant concepts.
+
+### Room
+
+- A room has a `name` and a unique random `join_code`.
+- The full join URL is built by the application and should not be stored in the database.
+- The `join_code` is an access code in the URL, not a password.
+- Rooms have `public` or `private` visibility.
+- Public rooms appear on the room list and are also accessible by URL.
+- Private rooms are not listed and are only accessible by URL.
+- The room creator becomes the initial host.
+- If the host leaves at any point, another random remaining player becomes the new host.
+- The MVP does not include host powers such as kicking players or manually transferring host.
+- Room capacity is limited to `6` total participants, including spectators.
+- Each room is associated with one word list.
+- Host-editable room settings in the MVP are only `name` and `visibility`.
+- Room settings should only be editable while the room is in `lobby`.
+- If a room becomes empty, it stays joinable for `10` minutes and is then hard-deleted.
+- Public room lists should show all rooms, including rooms already in progress.
+
+### Guest / Participant
+
+- Guest re-identification and reconnect behavior should use the Django session.
+- The MVP does not need a separate persistent guest identity model.
+- Nicknames do not need to be unique within a room.
+- Nicknames cannot be changed after joining.
+- A guest can only be in one room at a time.
+- Participant-related states needed in the MVP include `connected`, `disconnected`, `playing`, and `spectating`.
+- There is no ready-check or ready-state system in the MVP.
+- If a non-drawer disconnects and reconnects during the same game, they should reclaim their place and score.
+- Temporary participant and game data may stay in Redis during the active game and should be cleared when that game ends.
+
+### Game / Turn flow
+
+- A room starts in `lobby` when first created and stays there until the host presses Play.
+- The minimum number of players required to start a game is `2`.
+- Game states are `lobby`, `in_progress`, `finished`, and `cancelled`.
+- If all players leave mid-game, the game is cancelled.
+- When a cycle ends, the leaderboard is shown for `20` seconds.
+- If players remain in the room, a new game starts automatically after that cooldown.
+- Each new game starts with fresh scores.
+- Game-relevant room defaults should be copied into each new game as a snapshot when that game starts.
+- Each turn has exactly one drawer and one chosen word.
+- Words are selected automatically from the room's selected word list.
+- The same word must not appear twice within the same game or cycle.
+- Drawer selection is server-controlled.
+- The server should track the pool of eligible drawers still left to draw in the current cycle.
+- Once a player has drawn in the current cycle, they must not be selected again in that same cycle.
+- A player who joins mid-game spectates the current turn and cannot guess during that turn.
+- On the next turn, a mid-game joiner is added to the current cycle's remaining eligible drawer pool.
+- If the active drawer disconnects, the turn waits `15` seconds before ending as `drawer_disconnected`.
+- Turn outcomes should be stored on the turn record.
+- Confirmed turn outcome values include `completed` and `drawer_disconnected`.
+- The countdown between turns is `10` seconds.
+- Live ticking timer state should stay in runtime state rather than persisted timer records.
+
+### Guesses / Chat / Scoring
+
+- All chat messages are guesses. There is no separate chat system in the MVP.
+- All submitted guesses should be tracked during the live game.
+- Guess handling needed in live gameplay includes `correct`, `incorrect`, `near_match`, and `duplicate`.
+- `too_late` is not needed as a guess status.
+- Guesses are runtime-only and should not be persisted after the game ends.
+- Scores are only the current game totals.
+- Scores reset when a new game starts.
+- Persisted per-event score history is out of scope.
+- The winner should be derived from scores when needed and should not be stored directly.
+
+### Words
+
+- Word lists are developer-managed only in the MVP.
+- Multiple word lists are supported.
+- Each room uses one word list.
+- Words can belong to multiple lists.
+- Duplicate words are allowed for simplicity.
+- Word lists only need a `name` in the MVP.
+- The active game should use a snapshot or copy of the selected word list during gameplay.
+
+### Technical
+
+- Use integer primary keys.
+- Add `created_at` and `updated_at` fields.
+- Use hard delete, not soft delete, for the MVP.
+- Keep app responsibilities split by domain:
+  - `rooms` for room and access concerns.
+  - `games` for game flow and turns.
+  - `words` for words and word lists.
+  - `core` for shared abstractions and utilities only.
