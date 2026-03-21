@@ -17,7 +17,7 @@ class GameStatus(models.TextChoices):
     CANCELLED = "cancelled", "Cancelled"
 
 
-class TurnStatus(models.TextChoices):
+class RoundStatus(models.TextChoices):
     COMPLETED = "completed", "Completed"
     DRAWER_DISCONNECTED = "drawer_disconnected", "Drawer disconnected"
     CANCELLED = "cancelled", "Cancelled"
@@ -82,16 +82,16 @@ class GameWord(TimestampedModel):
         return self.text
 
 
-class Turn(TimestampedModel):
+class Round(TimestampedModel):
     game = models.ForeignKey(
         Game,
         on_delete=models.CASCADE,
-        related_name="turns",
+        related_name="rounds",
     )
     drawer_participant = models.ForeignKey(
         "rooms.RoomParticipant",
         on_delete=models.SET_NULL,
-        related_name="drawn_turns",
+        related_name="drawn_rounds",
         blank=True,
         null=True,
     )
@@ -99,13 +99,13 @@ class Turn(TimestampedModel):
     selected_game_word = models.OneToOneField(
         GameWord,
         on_delete=models.PROTECT,
-        related_name="turn",
+        related_name="round",
     )
     sequence_number = models.PositiveIntegerField()
-    # Active turns are represented by ended_at=None and status=None.
+    # Active rounds are represented by ended_at=None and status=None.
     status = models.CharField(
         max_length=24,
-        choices=TurnStatus,
+        choices=RoundStatus,
         blank=True,
         null=True,
     )
@@ -117,7 +117,7 @@ class Turn(TimestampedModel):
         constraints = [
             models.UniqueConstraint(
                 fields=("game", "sequence_number"),
-                name="games_turn_unique_game_sequence",
+                name="games_round_unique_game_sequence",
             )
         ]
 
@@ -136,7 +136,7 @@ class Turn(TimestampedModel):
             errors["status"] = "A terminal turn status requires ended_at to be set."
 
         if self.ended_at and self.status is None:
-            errors["status"] = "Ended turns must have a terminal status."
+            errors["status"] = "Ended rounds must have a terminal status."
 
         if (
             selected_game_word_id is not None
@@ -157,4 +157,4 @@ class Turn(TimestampedModel):
 
     def __str__(self):
         game_pk = self.__dict__.get("game_id")
-        return f"Turn {self.sequence_number} of game {game_pk}"
+        return f"Round {self.sequence_number} of game {game_pk}"
