@@ -89,7 +89,7 @@ class Round(TimestampedModel):
         related_name="rounds",
     )
     drawer_participant = models.ForeignKey(
-        "rooms.RoomParticipant",
+        "rooms.Player",
         on_delete=models.SET_NULL,
         related_name="drawn_rounds",
         blank=True,
@@ -158,3 +158,24 @@ class Round(TimestampedModel):
     def __str__(self):
         game_pk = self.__dict__.get("game_id")
         return f"Round {self.sequence_number} of game {game_pk}"
+
+
+class Guess(TimestampedModel):
+    round = models.ForeignKey(
+        Round,
+        on_delete=models.CASCADE,
+        related_name="guesses",
+    )
+    player = models.ForeignKey(
+        "rooms.Player",
+        on_delete=models.CASCADE,
+        related_name="guesses",
+    )
+    text = models.CharField(max_length=255)
+    typed_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ("round_id", "typed_at", "id")
+
+    def __str__(self):
+        return self.text
