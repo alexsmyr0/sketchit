@@ -10,9 +10,6 @@ assignees: []
 
 Describe the goal in one sentence.
 
-## Why this task exists
-
-Explain the user or system need this task supports.
 
 ## Read first
 
@@ -23,9 +20,6 @@ Explain the user or system need this task supports.
 
 What should be implemented in this issue?
 
-## Out of scope
-
-What should not be implemented here?
 
 ## Non-obvious constraints
 
@@ -48,32 +42,3 @@ Examples:
 - [ ] Criterion 1
 - [ ] Criterion 2
 - [ ] Criterion 3
-
-
-## Assignee kickoff comment
-
-Before coding, comment with:
-
-- your understanding of the task
-- files you expect to change
-- any missing decision or unclear behavior
-
-## AI prompt starter
-
-If you use AI, start with something like this:
-
-```text
-You are helping on the SketchIt Django project.
-
-Project constraints:
-[paste project constraints or need to knows for this issue here]
-
-
-Task:
-[paste the issue goal and scope here]
-
-Relevant files:
-[paste file paths and code snippets here]
-
-Do not invent new product requirements. If behavior is unclear, point out the ambiguity instead of guessing.
-```
