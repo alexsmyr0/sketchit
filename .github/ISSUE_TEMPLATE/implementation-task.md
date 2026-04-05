@@ -13,7 +13,8 @@ Describe the goal in one sentence.
 
 ## Read first
 
-- [ ] `docs/project-context.md`
+- [ ] `docs/mvp-spec.md`
+- [ ] `docs/progress-context.md`
 - [ ] Relevant existing code/files: `...`
 
 ## Scope

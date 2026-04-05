@@ -8,21 +8,28 @@ Do not rely on memory for shared implementation context.
 
 If a rule matters in more than one issue, put it in:
 
-- `docs/project-context.md`
+- `docs/mvp-spec.md`
+- `docs/progress-context.md`
 
 ## What should live where
 
-Use `docs/project-context.md` for stable constraints such as:
+Use `docs/mvp-spec.md` for intended product constraints such as:
 
 - guest-only MVP
 - server-authoritative gameplay
 - which app owns which responsibility
 
-It should also hold key project decisions such as:
+It should also hold key product decisions such as:
 
 - "players are guests, not Django users"
 - "room host can start the game only when at least 2 players are present"
 - "late joiners can watch immediately but only participate next round"
+
+Use `docs/progress-context.md` for the current implementation snapshot, such as:
+
+- what models already exist
+- which layers are still stubbed
+- what infrastructure is already wired
 
 Use GitHub issues for:
 
@@ -37,8 +44,9 @@ Do not try to write every technical detail from scratch each time.
 
 Instead, split the information into layers:
 
-- Layer 1: project-wide context and decisions in `docs/project-context.md`
-- Layer 2: issue-specific instructions in the GitHub issue
+- Layer 1: intended product context and decisions in `docs/mvp-spec.md`
+- Layer 2: current implementation snapshot in `docs/progress-context.md`
+- Layer 3: issue-specific instructions in the GitHub issue
 
 That means the issue only needs to explain what is unique about that task.
 
@@ -70,11 +78,17 @@ Good issue shape:
 - mid-week async check-in in GitHub comments or chat
 - short review pass before merge
 
-## When to stop and write a decision into project-context
+## When to update shared docs
 
-Update `project-context.md` when:
+Update `docs/mvp-spec.md` when:
 
 - the answer will likely matter again and needs to be known by an LLM
 - someone asked a question that revealed important hidden context for implementation
 - an issue cannot be specified cleanly without referencing the same context again
 - AI keeps making the same wrong assumption
+
+Update `docs/progress-context.md` when:
+
+- the implementation state has materially changed
+- a new layer becomes wired enough that people should stop assuming it is missing
+- the current snapshot would mislead someone planning the next issue

@@ -1,6 +1,6 @@
-# SketchIt Project Context
+# SketchIt MVP Spec
 
-This file is the single source of truth for what SketchIt is, what the MVP includes, and the decisions and constraints the team should follow while implementing it.
+This file describes the intended SketchIt MVP product: scope, gameplay rules, decisions, and constraints. It is product context, not an implementation status document.
 
 ## General idea of the project
 
