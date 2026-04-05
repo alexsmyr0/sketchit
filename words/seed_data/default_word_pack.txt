@@ -1,0 +1,15 @@
+cat
+dog
+house
+car
+tree
+sun
+moon
+fish
+apple
+pizza
+ball
+chair
+book
+boat
+flower
