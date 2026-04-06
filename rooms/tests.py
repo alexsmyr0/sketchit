@@ -115,3 +115,167 @@ class CreateRoomViewTests(TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(Room.objects.count(), 2)
         self.assertTrue(Room.objects.filter(join_code="UNIQCODE").exists())
+
+
+class JoinRoomViewTests(TestCase):
+    def setUp(self):
+        self.room = Room.objects.create(
+            name="Friday Sketches",
+            join_code="ABC12345",
+            visibility=Room.Visibility.PRIVATE,
+            max_players=3,
+        )
+        self.url = f"/rooms/{self.room.join_code}/join/"
+
+    def post_join_room(self, client=None, join_code=None, content_type="application/json", raw_body=None, **overrides):
+        payload = {"display_name": "Alex"}
+        payload.update(overrides)
+        client = client or self.client
+
+        return client.post(
+            f"/rooms/{join_code or self.room.join_code}/join/",
+            data=json.dumps(payload) if raw_body is None else raw_body,
+            content_type=content_type,
+        )
+
+    def test_join_room_creates_participant_for_existing_room(self):
+        response = self.post_join_room()
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(Player.objects.count(), 1)
+
+        player = Player.objects.get()
+        response_data = response.json()
+
+        self.assertEqual(player.room_id, self.room.id)
+        self.assertEqual(player.display_name, "Alex")
+        self.assertEqual(player.session_key, self.client.session.session_key)
+        self.assertEqual(
+            player.session_expires_at.replace(microsecond=0),
+            self.client.session.get_expiry_date().replace(microsecond=0),
+        )
+        self.assertEqual(response_data["join_code"], self.room.join_code)
+        self.assertEqual(response_data["room_url"], f"/rooms/{self.room.join_code}/")
+
+    def test_join_room_persists_session_for_guest_request(self):
+        self.assertNotIn(settings.SESSION_COOKIE_NAME, self.client.cookies)
+
+        response = self.post_join_room()
+
+        self.assertEqual(response.status_code, 201)
+        self.assertIn(settings.SESSION_COOKIE_NAME, self.client.cookies)
+
+    def test_join_room_reuses_existing_participant_for_same_session(self):
+        first_response = self.post_join_room(display_name="Alex")
+
+        player = Player.objects.get()
+
+        session = self.client.session
+        session.set_expiry(60 * 60 * 24 * 30)
+        session.save()
+
+        second_response = self.post_join_room(display_name="Changed Name")
+
+        player.refresh_from_db()
+
+        self.assertEqual(first_response.status_code, 201)
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(Player.objects.count(), 1)
+        self.assertEqual(player.display_name, "Alex")
+        self.assertEqual(
+            player.session_expires_at.replace(microsecond=0),
+            self.client.session.get_expiry_date().replace(microsecond=0),
+        )
+        self.assertEqual(second_response.json()["join_code"], self.room.join_code)
+
+    def test_join_room_allows_same_session_rejoin_even_when_room_is_full(self):
+        self.room.max_players = 1
+        self.room.save(update_fields=["max_players"])
+
+        first_response = self.post_join_room()
+        second_response = self.post_join_room(display_name="Changed Name")
+
+        self.assertEqual(first_response.status_code, 201)
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(Player.objects.count(), 1)
+
+    def test_join_room_rejects_new_session_when_room_is_full(self):
+        self.room.max_players = 1
+        self.room.save(update_fields=["max_players"])
+        self.post_join_room()
+
+        other_client = self.client_class()
+
+        response = self.post_join_room(client=other_client, display_name="Jamie")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(Player.objects.count(), 1)
+        self.assertEqual(response.json()["detail"], "This room is full.")
+
+    def test_join_room_rejects_session_already_assigned_to_another_room(self):
+        other_room = Room.objects.create(
+            name="Other Room",
+            join_code="ZXCV5678",
+            visibility=Room.Visibility.PUBLIC,
+        )
+        Player.objects.create(
+            room=other_room,
+            session_key="session-123",
+            display_name="Alex",
+            session_expires_at=self.client.session.get_expiry_date(),
+        )
+
+        session = self.client.session
+        session.save()
+        session["marker"] = "keep"
+        session.save()
+
+        Player.objects.filter(room=other_room).update(session_key=session.session_key)
+
+        response = self.post_join_room()
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(Player.objects.count(), 1)
+        self.assertEqual(
+            response.json()["detail"],
+            "This guest session is already assigned to a room.",
+        )
+
+    def test_join_room_returns_404_for_unknown_join_code(self):
+        response = self.post_join_room(join_code="missing1")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(Player.objects.count(), 0)
+
+    def test_join_room_normalizes_join_code_to_uppercase(self):
+        response = self.post_join_room(join_code="abc12345")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(Player.objects.get().room_id, self.room.id)
+
+    def test_join_room_rejects_missing_display_name_without_partial_data(self):
+        response = self.post_join_room(display_name="")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Player.objects.count(), 0)
+        self.assertIn("display_name", response.json()["errors"])
+
+    def test_join_room_rejects_invalid_json_without_partial_data(self):
+        response = self.post_join_room(raw_body="{not json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Player.objects.count(), 0)
+        self.assertIn("body", response.json()["errors"])
+
+    def test_join_room_rejects_non_json_body_without_partial_data(self):
+        response = self.post_join_room(content_type="text/plain", raw_body="display_name=Alex")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Player.objects.count(), 0)
+        self.assertIn("body", response.json()["errors"])
+
+    def test_join_room_rejects_non_post_requests(self):
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 405)
+        self.assertEqual(Player.objects.count(), 0)
