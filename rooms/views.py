@@ -15,8 +15,13 @@ class CreateRoomForm(forms.Form):
     visibility = forms.ChoiceField(choices=Room.Visibility.choices)
     display_name = forms.CharField(max_length=24)
 
+
+class JoinRoomForm(forms.Form):
+    display_name = forms.CharField(max_length=24)
+
+
 # Parse the raw request body once and turn JSON format problems into API errors.
-def _parse_create_room_payload(request):
+def _parse_json_payload(request):
     if request.content_type != "application/json":
         return None, JsonResponse(
             {"errors": {"body": ["Expected application/json request body."]}},
@@ -68,7 +73,7 @@ def create_room(request):
     if request.method != "POST":
         return HttpResponseNotAllowed(["POST"])
 
-    payload, error_response = _parse_create_room_payload(request)
+    payload, error_response = _parse_json_payload(request)
     if error_response is not None:
         return error_response
 
