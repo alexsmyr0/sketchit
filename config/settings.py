@@ -117,7 +117,7 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 LANGUAGE_CODE = "en-us"
-TIME_ZONE = "EET"
+TIME_ZONE = "Europe/Athens"
 
 USE_I18N = True
 USE_TZ = True
