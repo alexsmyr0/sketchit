@@ -1,6 +1,7 @@
 import json
 from unittest.mock import patch
 
+from django.conf import settings
 from django.test import TestCase
 
 from rooms.models import Player, Room
@@ -43,20 +44,20 @@ class CreateRoomViewTests(TestCase):
         self.assertEqual(player.display_name, "Alex")
         self.assertEqual(player.session_key, self.client.session.session_key)
         self.assertEqual(
-            player.session_expires_at,
-            self.client.session.get_expiry_date(),
+            player.session_expires_at.replace(microsecond=0),
+            self.client.session.get_expiry_date().replace(microsecond=0),
         )
 
         self.assertEqual(response_data["join_code"], room.join_code)
         self.assertIn(room.join_code, response_data["room_url"])
 
     def test_create_room_persists_session_for_guest_request(self):
-        self.assertIsNone(self.client.session.session_key)
+        self.assertNotIn(settings.SESSION_COOKIE_NAME, self.client.cookies)
 
         response = self.post_create_room()
 
         self.assertEqual(response.status_code, 201)
-        self.assertIsNotNone(self.client.session.session_key)
+        self.assertIn(settings.SESSION_COOKIE_NAME, self.client.cookies)
 
     def test_create_room_rejects_invalid_visibility_without_partial_data(self):
         response = self.post_create_room(visibility="friends_only")

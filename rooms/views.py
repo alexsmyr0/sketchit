@@ -4,6 +4,7 @@ import string
 
 from django import forms
 from django.db import transaction
+from django.db.utils import IntegrityError
 from django.http import HttpResponseNotAllowed, JsonResponse
 
 from rooms.models import Player, Room
@@ -14,8 +15,7 @@ class CreateRoomForm(forms.Form):
     visibility = forms.ChoiceField(choices=Room.Visibility.choices)
     display_name = forms.CharField(max_length=24)
 
-
-    # Parse the raw request body once and turn JSON format problems into API errors.
+# Parse the raw request body once and turn JSON format problems into API errors.
 def _parse_create_room_payload(request):
     if request.content_type != "application/json":
         return None, JsonResponse(
@@ -39,14 +39,31 @@ def _parse_create_room_payload(request):
 
     return payload, None
 
-
-    # Create short room codes for URL-based room access.
+# Create short room codes for URL-based room access.
 def generate_join_code(length=8):
     alphabet = string.ascii_uppercase + string.digits
     return "".join(random.choices(alphabet, k=length))
 
+# Retry room creation if a generated join code collides with an existing room.
+def _create_room_with_unique_join_code(*, name, visibility, max_attempts=10):
+    for _ in range(max_attempts):
+        join_code = generate_join_code()
+        try:
+            with transaction.atomic():
+                return Room.objects.create(
+                    name=name,
+                    visibility=visibility,
+                    join_code=join_code,
+                    status=Room.Status.LOBBY,
+                )
+        except IntegrityError:
+            if Room.objects.filter(join_code=join_code).exists():
+                continue
+            raise
 
-    # Validate the request, create the room and host player, then return the room location.
+    raise RuntimeError("Could not generate a unique join code.")
+
+# Validate the request, create the room and host player, then return the room location.
 def create_room(request):
     if request.method != "POST":
         return HttpResponseNotAllowed(["POST"])
@@ -72,11 +89,9 @@ def create_room(request):
     cleaned_data = form.cleaned_data
 
     with transaction.atomic():
-        room = Room.objects.create(
+        room = _create_room_with_unique_join_code(
             name=cleaned_data["name"],
             visibility=cleaned_data["visibility"],
-            join_code=generate_join_code(),
-            status=Room.Status.LOBBY,
         )
         player = Player.objects.create(
             room=room,
