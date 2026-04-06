@@ -1,9 +1,11 @@
 import json
 from unittest.mock import patch
 
+from django.contrib import admin
 from django.conf import settings
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 
+from rooms.admin import PlayerAdmin, RoomAdmin
 from rooms.models import Player, Room
 
 
@@ -424,3 +426,64 @@ class RoomLobbyStateViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 405)
+class RoomsAdminRegistrationTests(SimpleTestCase):
+    def test_room_and_player_models_are_registered_in_admin(self):
+        self.assertIsInstance(admin.site._registry.get(Room), RoomAdmin)
+        self.assertIsInstance(admin.site._registry.get(Player), PlayerAdmin)
+
+    def test_room_admin_configuration_matches_expected_setup(self):
+        room_admin = admin.site._registry[Room]
+
+        self.assertEqual(
+            room_admin.list_display,
+            (
+                "id",
+                "join_code",
+                "name",
+                "visibility",
+                "status",
+                "max_players",
+                "host",
+                "empty_since",
+                "created_at",
+                "updated_at",
+            ),
+        )
+        self.assertEqual(
+            room_admin.list_filter,
+            ("visibility", "status", "created_at", "updated_at"),
+        )
+        self.assertEqual(room_admin.search_fields, ("join_code", "name", "host__display_name"))
+        self.assertEqual(room_admin.raw_id_fields, ("host",))
+        self.assertEqual(room_admin.readonly_fields, ("created_at", "updated_at"))
+        self.assertEqual(room_admin.list_select_related, ("host",))
+
+    def test_player_admin_configuration_matches_expected_setup(self):
+        player_admin = admin.site._registry[Player]
+
+        self.assertEqual(
+            player_admin.list_display,
+            (
+                "id",
+                "display_name",
+                "room",
+                "connection_status",
+                "participation_status",
+                "current_score",
+                "session_expires_at",
+                "last_seen_at",
+                "created_at",
+                "updated_at",
+            ),
+        )
+        self.assertEqual(
+            player_admin.list_filter,
+            ("connection_status", "participation_status", "created_at"),
+        )
+        self.assertEqual(
+            player_admin.search_fields,
+            ("display_name", "session_key", "room__join_code", "room__name"),
+        )
+        self.assertEqual(player_admin.raw_id_fields, ("room",))
+        self.assertEqual(player_admin.readonly_fields, ("created_at", "updated_at"))
+        self.assertEqual(player_admin.list_select_related, ("room",))
