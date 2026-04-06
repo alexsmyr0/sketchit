@@ -17,6 +17,9 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path
 
+from rooms.views import create_room
+
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path("rooms/create/", create_room, name="create-room"),
 ]

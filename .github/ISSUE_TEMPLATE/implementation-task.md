@@ -17,6 +17,16 @@ Describe the goal in one sentence.
 - [ ] `docs/progress-context.md`
 - [ ] Relevant existing code/files: `...`
 
+## Blocked by
+
+List prerequisite issues that must be completed before this issue is ready.
+
+Examples:
+
+- None
+- #12
+- #12, #14
+
 ## Scope
 
 What should be implemented in this issue?
