@@ -6,7 +6,8 @@ from django.conf import settings
 from django.test import SimpleTestCase, TestCase
 
 from rooms.admin import PlayerAdmin, RoomAdmin
-from rooms.models import Player, Room
+from rooms.models import MVP_DEFAULT_WORD_PACK_NAME, Player, Room
+from words.models import WordPack
 
 
 class CreateRoomViewTests(TestCase):
@@ -34,6 +35,7 @@ class CreateRoomViewTests(TestCase):
 
         room = Room.objects.get()
         player = Player.objects.get()
+        default_word_pack = WordPack.objects.get(name=MVP_DEFAULT_WORD_PACK_NAME)
         response_data = response.json()
 
         self.assertEqual(room.name, "Friday Sketches")
@@ -41,6 +43,7 @@ class CreateRoomViewTests(TestCase):
         self.assertEqual(room.status, Room.Status.LOBBY)
         self.assertEqual(len(room.join_code), 8)
         self.assertEqual(room.host_id, player.id)
+        self.assertEqual(room.word_pack_id, default_word_pack.id)
 
         self.assertEqual(player.room_id, room.id)
         self.assertEqual(player.display_name, "Alex")
@@ -117,6 +120,28 @@ class CreateRoomViewTests(TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(Room.objects.count(), 2)
         self.assertTrue(Room.objects.filter(join_code="UNIQCODE").exists())
+
+    def test_create_room_uses_seeded_default_word_pack_even_when_other_packs_exist(self):
+        WordPack.objects.create(name="Animals")
+        expected_default_word_pack = WordPack.objects.get(name=MVP_DEFAULT_WORD_PACK_NAME)
+
+        response = self.post_create_room()
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(Room.objects.get().word_pack_id, expected_default_word_pack.id)
+
+
+class RoomWordPackModelTests(TestCase):
+    def test_room_model_assigns_default_word_pack_when_not_provided(self):
+        expected_default_word_pack = WordPack.objects.get(name=MVP_DEFAULT_WORD_PACK_NAME)
+
+        room = Room.objects.create(
+            name="Model Room",
+            join_code="MODEL123",
+            visibility=Room.Visibility.PRIVATE,
+        )
+
+        self.assertEqual(room.word_pack_id, expected_default_word_pack.id)
 
 
 class JoinRoomViewTests(TestCase):

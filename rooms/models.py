@@ -19,6 +19,29 @@ class PlayerManager(models.Manager):
         return deleted_count
 
 
+MVP_DEFAULT_WORD_PACK_NAME = "Default Word Pack"
+
+
+def get_mvp_default_word_pack_id():
+    from words.models import WordPack
+
+    default_word_pack = (
+        WordPack.objects.filter(
+            name=MVP_DEFAULT_WORD_PACK_NAME,
+            word_pack_entries__isnull=False,
+        )
+        .order_by("id")
+        .first()
+    )
+    if default_word_pack is None:
+        raise RuntimeError(
+            "Cannot create a room without a valid default word pack. "
+            f"Expected '{MVP_DEFAULT_WORD_PACK_NAME}' with at least one word."
+        )
+
+    return default_word_pack.id
+
+
 class Room(models.Model):
     class Visibility(models.TextChoices):
         PUBLIC = "public", "Public"
@@ -44,6 +67,12 @@ class Room(models.Model):
     )
     max_players = models.PositiveSmallIntegerField(default=6)
     settings = models.JSONField(default=dict, blank=True)
+    word_pack = models.ForeignKey(
+        "words.WordPack",
+        on_delete=models.PROTECT,
+        related_name="rooms",
+        default=get_mvp_default_word_pack_id,
+    )
     empty_since = models.DateTimeField(null=True, blank=True)
     host = models.ForeignKey(
         "Player",
