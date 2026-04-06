@@ -70,6 +70,42 @@ def _build_room_response(room, *, status):
     )
 
 
+def _serialize_host(player):
+    if player is None:
+        return None
+
+    return {
+        "id": player.id,
+        "display_name": player.display_name,
+    }
+
+
+def _serialize_participant(player):
+    return {
+        "id": player.id,
+        "display_name": player.display_name,
+        "connection_status": player.connection_status,
+        "participation_status": player.participation_status,
+    }
+
+
+def _build_room_lobby_state_response(room):
+    participants = room.participants.order_by("created_at", "id")
+    return JsonResponse(
+        {
+            "room": {
+                "name": room.name,
+                "join_code": room.join_code,
+                "visibility": room.visibility,
+                "status": room.status,
+            },
+            "host": _serialize_host(room.host),
+            "participants": [_serialize_participant(player) for player in participants],
+        },
+        status=200,
+    )
+
+
 def generate_join_code(length=8):
     # Join codes are short and URL-friendly rather than secret passwords.
     alphabet = string.ascii_uppercase + string.digits
@@ -195,3 +231,22 @@ def join_room(request, join_code):
     )
 
     return _build_room_response(room, status=201)
+
+
+def room_lobby_state(request, join_code):
+    if request.method != "GET":
+        return HttpResponseNotAllowed(["GET"])
+
+    try:
+        room = Room.objects.select_related("host").get(join_code=join_code.upper())
+    except Room.DoesNotExist:
+        return JsonResponse({"detail": "Room not found."}, status=404)
+
+    session_key = _get_or_create_session_key(request)
+    if not room.participants.filter(session_key=session_key).exists():
+        return JsonResponse(
+            {"detail": "This guest session is not a participant in this room."},
+            status=403,
+        )
+
+    return _build_room_lobby_state_response(room)
