@@ -1,13 +1,16 @@
 import json
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib import admin
 from django.conf import settings
 from django.test import SimpleTestCase, TestCase
+from django.utils import timezone
 
+from games.models import Game, GameWord, Round
 from rooms.admin import PlayerAdmin, RoomAdmin
 from rooms.models import MVP_DEFAULT_WORD_PACK_NAME, Player, Room
-from words.models import WordPack
+from words.models import Word, WordPack, WordPackEntry
 
 
 class CreateRoomViewTests(TestCase):
@@ -451,6 +454,133 @@ class RoomLobbyStateViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 405)
+
+
+class StartGameViewTests(TestCase):
+    def _ensure_session_key(self, client):
+        session = client.session
+        session.save()
+        return session.session_key
+
+    def setUp(self):
+        self.word_pack = WordPack.objects.create(name="Room Pack")
+        for word_text in ("apple", "banana", "cherry"):
+            word = Word.objects.create(text=word_text)
+            WordPackEntry.objects.create(word_pack=self.word_pack, word=word)
+
+        self.room = Room.objects.create(
+            name="Friday Sketches",
+            join_code="ABC12345",
+            visibility=Room.Visibility.PRIVATE,
+            status=Room.Status.LOBBY,
+            word_pack=self.word_pack,
+        )
+        self.url = f"/rooms/{self.room.join_code}/start-game/"
+        session_expires_at = timezone.now() + timedelta(hours=1)
+
+        self.host_client = self.client_class()
+        host_session_key = self._ensure_session_key(self.host_client)
+        self.host_player = Player.objects.create(
+            room=self.room,
+            session_key=host_session_key,
+            display_name="Host Alex",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            current_score=42,
+            session_expires_at=session_expires_at,
+        )
+
+        self.member_client = self.client_class()
+        member_session_key = self._ensure_session_key(self.member_client)
+        self.member_player = Player.objects.create(
+            room=self.room,
+            session_key=member_session_key,
+            display_name="Jamie",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            current_score=7,
+            session_expires_at=session_expires_at,
+        )
+
+        self.room.host = self.host_player
+        self.room.save(update_fields=("host",))
+
+    def test_host_can_start_game_and_create_first_active_round(self):
+        response = self.host_client.post(self.url)
+
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+
+        self.room.refresh_from_db()
+        game = Game.objects.get(id=data["game_id"])
+        first_round = Round.objects.get(id=data["round_id"])
+
+        self.assertEqual(self.room.status, Room.Status.IN_PROGRESS)
+        self.assertEqual(game.room_id, self.room.id)
+        self.assertEqual(first_round.game_id, game.id)
+        self.assertEqual(first_round.sequence_number, 1)
+        self.assertIsNone(first_round.status)
+        self.assertIsNone(first_round.ended_at)
+        self.assertIn(first_round.drawer_participant_id, {self.host_player.id, self.member_player.id})
+        self.assertIn(
+            first_round.selected_game_word.text,
+            list(game.snapshot_words.values_list("text", flat=True)),
+        )
+        self.assertEqual(
+            GameWord.objects.filter(game=game).count(),
+            3,
+        )
+
+        self.host_player.refresh_from_db()
+        self.member_player.refresh_from_db()
+        self.assertEqual(self.host_player.current_score, 0)
+        self.assertEqual(self.member_player.current_score, 0)
+
+    def test_non_host_participant_cannot_start_game(self):
+        response = self.member_client.post(self.url)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["detail"], "Only the room host can start a game.")
+        self.assertEqual(Game.objects.filter(room=self.room).count(), 0)
+
+    def test_non_participant_cannot_start_game(self):
+        outsider_client = self.client_class()
+        self._ensure_session_key(outsider_client)
+
+        response = outsider_client.post(self.url)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.json()["detail"],
+            "This guest session is not a participant in this room.",
+        )
+        self.assertEqual(Game.objects.filter(room=self.room).count(), 0)
+
+    def test_start_game_requires_post(self):
+        response = self.host_client.get(self.url)
+
+        self.assertEqual(response.status_code, 405)
+        self.assertEqual(Game.objects.filter(room=self.room).count(), 0)
+
+    def test_start_game_returns_conflict_when_room_is_not_in_lobby(self):
+        self.room.status = Room.Status.IN_PROGRESS
+        self.room.save(update_fields=("status",))
+
+        response = self.host_client.post(self.url)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(Game.objects.filter(room=self.room).count(), 0)
+
+    def test_start_game_returns_conflict_when_fewer_than_two_eligible_participants(self):
+        self.member_player.participation_status = Player.ParticipationStatus.SPECTATING
+        self.member_player.save(update_fields=("participation_status", "updated_at"))
+
+        response = self.host_client.post(self.url)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(Game.objects.filter(room=self.room).count(), 0)
+
+
 class RoomsAdminRegistrationTests(SimpleTestCase):
     def test_room_and_player_models_are_registered_in_admin(self):
         self.assertIsInstance(admin.site._registry.get(Room), RoomAdmin)

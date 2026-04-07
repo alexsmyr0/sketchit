@@ -1,8 +1,14 @@
+from datetime import timedelta
+
 from django.contrib import admin
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
+from django.utils import timezone
 
 from games.admin import GameAdmin, GameWordAdmin, GuessAdmin, RoundAdmin
 from games.models import Game, GameWord, Guess, Round
+from games.services import StartGameError, start_game_for_room
+from rooms.models import Player, Room
+from words.models import Word, WordPack, WordPackEntry
 
 
 class GamesAdminRegistrationTests(SimpleTestCase):
@@ -54,3 +60,109 @@ class GamesAdminRegistrationTests(SimpleTestCase):
             ),
         )
         self.assertEqual(guess_admin.raw_id_fields, ("round", "player"))
+
+
+class StartGameServiceTests(TestCase):
+    def setUp(self):
+        self.word_pack = WordPack.objects.create(name="Test Pack")
+        for word_text in ("apple", "banana", "cherry"):
+            word = Word.objects.create(text=word_text)
+            WordPackEntry.objects.create(word_pack=self.word_pack, word=word)
+
+        self.room = Room.objects.create(
+            name="Friday Sketches",
+            join_code="ABCD1234",
+            visibility=Room.Visibility.PRIVATE,
+            status=Room.Status.LOBBY,
+            word_pack=self.word_pack,
+        )
+        session_expires_at = timezone.now() + timedelta(hours=1)
+        self.host = Player.objects.create(
+            room=self.room,
+            session_key="host-session",
+            display_name="Host",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            current_score=50,
+            session_expires_at=session_expires_at,
+        )
+        self.member = Player.objects.create(
+            room=self.room,
+            session_key="member-session",
+            display_name="Member",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            current_score=30,
+            session_expires_at=session_expires_at,
+        )
+        self.spectator = Player.objects.create(
+            room=self.room,
+            session_key="spectator-session",
+            display_name="Spectator",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.SPECTATING,
+            current_score=10,
+            session_expires_at=session_expires_at,
+        )
+        self.room.host = self.host
+        self.room.save(update_fields=("host",))
+
+    def test_start_game_creates_snapshot_and_first_active_round(self):
+        started_game = start_game_for_room(self.room)
+
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.status, Room.Status.IN_PROGRESS)
+        self.assertEqual(Game.objects.filter(room=self.room).count(), 1)
+
+        game = started_game.game
+        first_round = started_game.first_round
+        snapshot_word_texts = list(
+            game.snapshot_words.order_by("id").values_list("text", flat=True)
+        )
+
+        self.assertEqual(snapshot_word_texts, ["apple", "banana", "cherry"])
+        self.assertEqual(first_round.game_id, game.id)
+        self.assertEqual(first_round.sequence_number, 1)
+        self.assertIsNone(first_round.status)
+        self.assertIsNone(first_round.ended_at)
+        self.assertIn(first_round.drawer_participant_id, {self.host.id, self.member.id})
+        self.assertIn(first_round.selected_game_word.text, snapshot_word_texts)
+
+        for participant in self.room.participants.all():
+            self.assertEqual(participant.current_score, 0)
+
+    def test_start_game_uses_game_word_snapshot_not_live_room_word_pack(self):
+        started_game = start_game_for_room(self.room)
+        game = started_game.game
+
+        replacement_pack = WordPack.objects.create(name="Replacement Pack")
+        replacement_word = Word.objects.create(text="replacement")
+        WordPackEntry.objects.create(word_pack=replacement_pack, word=replacement_word)
+
+        self.room.word_pack = replacement_pack
+        self.room.save(update_fields=("word_pack",))
+        self.word_pack.word_pack_entries.all().delete()
+
+        self.assertEqual(
+            list(game.snapshot_words.order_by("id").values_list("text", flat=True)),
+            ["apple", "banana", "cherry"],
+        )
+
+    def test_start_game_requires_two_eligible_participants(self):
+        self.member.participation_status = Player.ParticipationStatus.SPECTATING
+        self.member.save(update_fields=("participation_status", "updated_at"))
+
+        with self.assertRaises(StartGameError):
+            start_game_for_room(self.room)
+
+        self.assertEqual(Game.objects.filter(room=self.room).count(), 0)
+
+    def test_start_game_requires_room_word_pack_to_have_words(self):
+        empty_pack = WordPack.objects.create(name="Empty Pack")
+        self.room.word_pack = empty_pack
+        self.room.save(update_fields=("word_pack",))
+
+        with self.assertRaises(StartGameError):
+            start_game_for_room(self.room)
+
+        self.assertEqual(Game.objects.filter(room=self.room).count(), 0)

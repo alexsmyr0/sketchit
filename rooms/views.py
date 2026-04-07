@@ -7,6 +7,7 @@ from django.db import transaction
 from django.db.utils import IntegrityError
 from django.http import HttpResponseNotAllowed, JsonResponse
 
+from games.services import StartGameError, start_game_for_room
 from rooms.models import Player, Room
 
 
@@ -250,3 +251,41 @@ def room_lobby_state(request, join_code):
         )
 
     return _build_room_lobby_state_response(room)
+
+
+def start_game(request, join_code):
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    try:
+        room = Room.objects.select_related("host").get(join_code=join_code.upper())
+    except Room.DoesNotExist:
+        return JsonResponse({"detail": "Room not found."}, status=404)
+
+    session_key = _get_or_create_session_key(request)
+    requester = room.participants.filter(session_key=session_key).first()
+    if requester is None:
+        return JsonResponse(
+            {"detail": "This guest session is not a participant in this room."},
+            status=403,
+        )
+
+    if room.host_id != requester.id:
+        return JsonResponse(
+            {"detail": "Only the room host can start a game."},
+            status=403,
+        )
+
+    try:
+        started_game = start_game_for_room(room)
+    except StartGameError as exc:
+        return JsonResponse({"detail": str(exc)}, status=409)
+
+    return JsonResponse(
+        {
+            "game_id": started_game.game.id,
+            "round_id": started_game.first_round.id,
+            "room_status": Room.Status.IN_PROGRESS,
+        },
+        status=201,
+    )
