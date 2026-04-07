@@ -99,6 +99,32 @@ Open a shell in the app container:
 docker compose exec app sh
 ```
 
+## Run Tests
+
+Start the backing services first:
+
+```bash
+docker compose up -d mysql redis
+```
+
+Run the full test suite with the Docker-specific test settings:
+
+```bash
+docker compose run --rm app python manage.py test --settings=config.test_settings
+```
+
+Run a smaller subset of tests:
+
+```bash
+docker compose run --rm app python manage.py test rooms.tests games.tests --settings=config.test_settings
+```
+
+Important notes:
+
+- `config.test_settings` is intended to be used from Docker, not from the host shell.
+- The test settings force `MYSQL_HOST=mysql` and Docker test credentials, so host-side commands like `python manage.py test --settings=config.test_settings` are not the supported path.
+- `config.test_settings` still uses MySQL, but swaps Channels to the in-memory layer so tests that do not need Redis transport behavior can run without Redis itself being under test.
+
 ## Environment Configuration
 
 The Docker Compose file currently provides the required environment variables for local development, including:
@@ -111,8 +137,6 @@ The Docker Compose file currently provides the required environment variables fo
 - `REDIS_URL`
 
 The Django project runtime is configured to require MySQL and Redis. SQLite is no longer part of the active project setup.
-
-For automated tests, `config.test_settings` still uses MySQL but swaps Channels to the in-memory layer so tests that do not need Redis transport behavior can run with less infrastructure.
 
 ## Why Both MySQL and Redis?
 
