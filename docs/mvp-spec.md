@@ -29,9 +29,8 @@ This file describes the intended SketchIt MVP product: scope, gameplay rules, de
 - Backend framework: Django.
 - Real-time layer: Django Channels.
 - Persistent database target: MySQL.
-- Local fallback database during setup: SQLite.
 - Real-time broker target: Redis.
-- Local fallback channel layer during setup: in-memory channel layer.
+- Automated tests may use an in-memory channel layer when Redis itself is not under test.
 
 ### Architecture rules
 
@@ -87,13 +86,14 @@ If those are missing, the issue is not ready to assign.
   - Frontend code should send intents and render state updates.
   - Business rules should live in backend services, consumers, or models rather than browser-only logic.
 
-### D-003: Local development can use fallbacks
+### D-003: SQLite is not part of the active project setup
 
-- Decision: Local work may use SQLite and the in-memory channel layer until MySQL and Redis are fully available for the team.
-- Why: This keeps setup from blocking implementation.
+- Decision: The live project should not use SQLite for development, runtime, or automated tests.
+- Why: The team standardized on MySQL and wants one consistent database target across implementation and verification.
 - Implications:
-  - Team members can develop HTTP-side features without waiting on full infrastructure.
-  - Production-oriented behavior still needs validation against MySQL and Redis later.
+  - Do not add new SQLite settings, files, or fallback paths to the main project.
+  - Automated tests should run against MySQL-backed settings.
+  - If tests do not need Redis transport behavior, they may still use an in-memory channel layer for isolation and speed.
 
 ### D-004: Reference code is not product scope
 

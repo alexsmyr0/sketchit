@@ -110,7 +110,9 @@ The Docker Compose file currently provides the required environment variables fo
 - `MYSQL_PORT`
 - `REDIS_URL`
 
-The Django project is now configured to require MySQL and Redis. It no longer falls back to SQLite or an in-memory channel layer.
+The Django project runtime is configured to require MySQL and Redis. SQLite is no longer part of the active project setup.
+
+For automated tests, `config.test_settings` still uses MySQL but swaps Channels to the in-memory layer so tests that do not need Redis transport behavior can run with less infrastructure.
 
 ## Why Both MySQL and Redis?
 
