@@ -281,11 +281,32 @@ def start_game(request, join_code):
     except StartGameError as exc:
         return JsonResponse({"detail": str(exc)}, status=409)
 
+    room.refresh_from_db(fields=["status"])
+    game = started_game.game
+    first_round = started_game.first_round
+
     return JsonResponse(
         {
-            "game_id": started_game.game.id,
-            "round_id": started_game.first_round.id,
-            "room_status": Room.Status.IN_PROGRESS,
+            "game_id": game.id,
+            "round_id": first_round.id,
+            "room_status": room.status,
+            "room": {
+                "join_code": room.join_code,
+                "status": room.status,
+            },
+            "game": {
+                "id": game.id,
+                "status": game.status,
+                "word_count": game.snapshot_words.count(),
+            },
+            "first_round": {
+                "id": first_round.id,
+                "sequence_number": first_round.sequence_number,
+                "status": first_round.status,
+                "drawer_participant_id": first_round.drawer_participant_id,
+                "drawer_nickname": first_round.drawer_nickname,
+                "selected_game_word_id": first_round.selected_game_word_id,
+            },
         },
         status=201,
     )

@@ -530,11 +530,81 @@ class StartGameViewTests(TestCase):
             GameWord.objects.filter(game=game).count(),
             3,
         )
+        self.assertEqual(data["room_status"], Room.Status.IN_PROGRESS)
+        self.assertEqual(
+            data["room"],
+            {
+                "join_code": self.room.join_code,
+                "status": Room.Status.IN_PROGRESS,
+            },
+        )
+        self.assertEqual(
+            data["game"],
+            {
+                "id": game.id,
+                "status": game.status,
+                "word_count": 3,
+            },
+        )
+        self.assertEqual(
+            data["first_round"],
+            {
+                "id": first_round.id,
+                "sequence_number": 1,
+                "status": None,
+                "drawer_participant_id": first_round.drawer_participant_id,
+                "drawer_nickname": first_round.drawer_nickname,
+                "selected_game_word_id": first_round.selected_game_word_id,
+            },
+        )
 
         self.host_player.refresh_from_db()
         self.member_player.refresh_from_db()
         self.assertEqual(self.host_player.current_score, 0)
         self.assertEqual(self.member_player.current_score, 0)
+
+    def test_start_game_ignores_client_attempt_to_choose_first_drawer_or_word(self):
+        spectator = Player.objects.create(
+            room=self.room,
+            session_key="spectator-session",
+            display_name="Spectator",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.SPECTATING,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        out_of_snapshot_word = Word.objects.create(text="dragonfruit")
+
+        response = self.host_client.post(
+            self.url,
+            data=json.dumps(
+                {
+                    "drawer_participant_id": spectator.id,
+                    "selected_game_word_id": out_of_snapshot_word.id,
+                }
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        round_id = response.json()["round_id"]
+        first_round = Round.objects.select_related("selected_game_word").get(id=round_id)
+
+        self.assertNotEqual(first_round.drawer_participant_id, spectator.id)
+        self.assertNotEqual(first_round.selected_game_word_id, out_of_snapshot_word.id)
+
+    def test_start_game_returns_clear_error_when_room_word_setup_is_missing(self):
+        empty_pack = WordPack.objects.create(name="Empty Pack")
+        self.room.word_pack = empty_pack
+        self.room.save(update_fields=("word_pack",))
+
+        response = self.host_client.post(self.url)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["detail"],
+            "The room's selected word list has no words.",
+        )
+        self.assertEqual(Game.objects.filter(room=self.room).count(), 0)
 
     def test_non_host_participant_cannot_start_game(self):
         response = self.member_client.post(self.url)
