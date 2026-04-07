@@ -17,6 +17,17 @@ class StartedGame:
     first_round: Round
 
 
+def _dedupe_snapshot_words_case_insensitive(word_texts: list[str]) -> list[str]:
+    unique_words_by_normalized_text: dict[str, str] = {}
+    for word_text in word_texts:
+        normalized_text = word_text.casefold()
+        if normalized_text in unique_words_by_normalized_text:
+            continue
+        unique_words_by_normalized_text[normalized_text] = word_text
+
+    return list(unique_words_by_normalized_text.values())
+
+
 @transaction.atomic
 def start_game_for_room(room: Room) -> StartedGame:
     locked_room = Room.objects.select_for_update().select_related("word_pack").get(pk=room.pk)
@@ -38,7 +49,7 @@ def start_game_for_room(room: Room) -> StartedGame:
     room_word_texts = list(
         locked_room.word_pack.word_pack_entries.order_by("id").values_list("word__text", flat=True)
     )
-    snapshot_word_texts = list(dict.fromkeys(room_word_texts))
+    snapshot_word_texts = _dedupe_snapshot_words_case_insensitive(room_word_texts)
     if not snapshot_word_texts:
         raise StartGameError("The room's selected word list has no words.")
 

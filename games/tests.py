@@ -157,6 +157,24 @@ class StartGameServiceTests(TestCase):
 
         self.assertEqual(Game.objects.filter(room=self.room).count(), 0)
 
+    def test_start_game_requires_room_to_be_in_lobby(self):
+        self.room.status = Room.Status.IN_PROGRESS
+        self.room.save(update_fields=("status", "updated_at"))
+
+        with self.assertRaises(StartGameError):
+            start_game_for_room(self.room)
+
+        self.assertEqual(Game.objects.filter(room=self.room).count(), 0)
+
+    def test_start_game_treats_disconnected_participants_as_ineligible(self):
+        self.member.connection_status = Player.ConnectionStatus.DISCONNECTED
+        self.member.save(update_fields=("connection_status", "updated_at"))
+
+        with self.assertRaises(StartGameError):
+            start_game_for_room(self.room)
+
+        self.assertEqual(Game.objects.filter(room=self.room).count(), 0)
+
     def test_start_game_requires_room_word_pack_to_have_words(self):
         empty_pack = WordPack.objects.create(name="Empty Pack")
         self.room.word_pack = empty_pack
@@ -166,3 +184,22 @@ class StartGameServiceTests(TestCase):
             start_game_for_room(self.room)
 
         self.assertEqual(Game.objects.filter(room=self.room).count(), 0)
+
+    def test_start_game_dedupes_case_variant_words_in_snapshot(self):
+        case_variant_pack = WordPack.objects.create(name="Case Variants")
+        lowercase_apple = Word.objects.create(text="apple")
+        uppercase_apple = Word.objects.create(text="Apple")
+        banana = Word.objects.create(text="banana")
+        WordPackEntry.objects.create(word_pack=case_variant_pack, word=lowercase_apple)
+        WordPackEntry.objects.create(word_pack=case_variant_pack, word=uppercase_apple)
+        WordPackEntry.objects.create(word_pack=case_variant_pack, word=banana)
+
+        self.room.word_pack = case_variant_pack
+        self.room.save(update_fields=("word_pack", "updated_at"))
+
+        started_game = start_game_for_room(self.room)
+
+        self.assertEqual(
+            list(started_game.game.snapshot_words.order_by("id").values_list("text", flat=True)),
+            ["apple", "banana"],
+        )
