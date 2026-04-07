@@ -180,7 +180,10 @@ class StartGameServiceTests(TestCase):
         self.room.word_pack = empty_pack
         self.room.save(update_fields=("word_pack",))
 
-        with self.assertRaises(StartGameError):
+        with self.assertRaisesMessage(
+            StartGameError,
+            "The room's selected word list has no words.",
+        ):
             start_game_for_room(self.room)
 
         self.assertEqual(Game.objects.filter(room=self.room).count(), 0)
