@@ -4,6 +4,12 @@ This guide explains how each team member should implement an assigned issue.
 
 Issue planning, issue writing, and team coordination guidance lives in `docs/issue-creation-guide.md`.
 
+## Important rule
+
+Every implemented feature for an issue must also be documented in the teammate's personal logbook under `docs/logbook/`.
+
+Add a short paragraph for the feature and include the date, so each person's logbook stays up to date with what they implemented.
+
 ## Main rule
 
 Do not rely on memory for shared implementation context.

@@ -48,14 +48,16 @@ This file is a concise snapshot of the current implementation state. It describe
 
 ## Infrastructure
 
-- Settings support MySQL with SQLite fallback.
-- Settings support Redis channel layers with in-memory fallback.
+- The default project settings use MySQL for persistent data.
+- The default project settings use Redis channel layers.
+- `config.test_settings` keeps MySQL but swaps the channel layer to in-memory for tests that do not need Redis transport behavior.
 - Local Docker files exist for app, MySQL, and Redis setup.
 
 ## Testing
 
-- No automated tests are implemented yet.
-- `manage.py test` currently runs zero tests.
+- Automated tests exist in `rooms/tests.py`, `games/tests.py`, and `words/tests.py`.
+- Tests should use MySQL-backed settings rather than SQLite.
+- Running `manage.py test` without environment variables still fails because the default settings require MySQL configuration.
 
 ## Notes for future work
 
