@@ -3,6 +3,7 @@ channels==4.3.1
 channels-redis==4.3.0
 daphne==4.2.1
 Django==6.0.3
+fakeredis==2.28.1
 mysqlclient==2.2.7
 redis==6.4.0
 sqlparse==0.5.5
