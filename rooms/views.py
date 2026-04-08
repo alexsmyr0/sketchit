@@ -6,6 +6,7 @@ from django import forms
 from django.db import transaction
 from django.db.utils import IntegrityError
 from django.http import HttpResponseNotAllowed, JsonResponse
+from django.shortcuts import render
 
 from games.services import StartGameError, start_game_for_room
 from rooms.models import Player, Room
@@ -310,3 +311,7 @@ def start_game(request, join_code):
         },
         status=201,
     )
+
+
+def room_entry_page(request):
+    return render(request, "rooms/room_entry.html")
