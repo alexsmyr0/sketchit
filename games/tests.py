@@ -7,8 +7,11 @@ from django.utils import timezone
 from games.admin import GameAdmin, GameWordAdmin, GuessAdmin, RoundAdmin
 from games.models import Game, GameWord, Guess, Round, RoundStatus
 from games.services import (
+    AdvanceGameError,
+    AdvancedGameCycleResult,
     GuessEvaluationError,
     StartGameError,
+    advance_game_cycle,
     evaluate_guess_for_round,
     start_game_for_room,
 )
@@ -381,3 +384,120 @@ class StartGameServiceTests(TestCase):
             evaluate_guess_for_round(first_round, outsider, first_round.selected_game_word.text)
 
         self.assertEqual(Guess.objects.filter(round=first_round).count(), 0)
+
+
+class AdvanceGameCycleServiceTests(TestCase):
+    def setUp(self):
+        self.word_pack = WordPack.objects.create(name="Test Pack")
+        for word_text in ("apple", "banana", "cherry", "date", "elderberry"):
+            word = Word.objects.create(text=word_text)
+            WordPackEntry.objects.create(word_pack=self.word_pack, word=word)
+
+        self.room = Room.objects.create(
+            name="Advance Test Room",
+            join_code="ADVTEST1",
+            visibility=Room.Visibility.PRIVATE,
+            status=Room.Status.LOBBY,
+            word_pack=self.word_pack,
+        )
+        session_expires_at = timezone.now() + timedelta(hours=1)
+        self.player1 = Player.objects.create(
+            room=self.room,
+            session_key="p1",
+            display_name="P1",
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=session_expires_at,
+        )
+        self.player2 = Player.objects.create(
+            room=self.room,
+            session_key="p2",
+            display_name="P2",
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=session_expires_at,
+        )
+        self.player3 = Player.objects.create(
+            room=self.room,
+            session_key="p3",
+            display_name="P3",
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=session_expires_at,
+        )
+        self.started_game = start_game_for_room(self.room)
+        self.game = self.started_game.game
+
+    def _complete_active_round(self):
+        active_round = self.game.rounds.get(ended_at__isnull=True)
+        active_round.status = RoundStatus.COMPLETED
+        active_round.ended_at = timezone.now()
+        active_round.save()
+        return active_round
+
+    def test_advance_game_cycle_creates_next_round(self):
+        self._complete_active_round()
+        result = advance_game_cycle(self.game)
+
+        self.assertFalse(result.game_finished)
+        self.assertIsNotNone(result.next_round)
+        self.assertEqual(self.game.rounds.count(), 2)
+
+        first_drawer_id = self.started_game.first_round.drawer_participant_id
+        self.assertNotEqual(result.next_round.drawer_participant_id, first_drawer_id)
+
+        first_word_id = self.started_game.first_round.selected_game_word_id
+        self.assertNotEqual(result.next_round.selected_game_word_id, first_word_id)
+
+    def test_advance_game_cycle_finishes_game_after_all_eligible_have_drawn(self):
+        self._complete_active_round()
+        result1 = advance_game_cycle(self.game)
+        self.assertFalse(result1.game_finished)
+
+        self._complete_active_round()
+        result2 = advance_game_cycle(self.game)
+        self.assertFalse(result2.game_finished)
+
+        self._complete_active_round()
+        result3 = advance_game_cycle(self.game)
+        self.assertTrue(result3.game_finished)
+        self.assertIsNone(result3.next_round)
+
+        self.game.refresh_from_db()
+        self.assertEqual(self.game.status, "finished")
+        self.assertIsNotNone(self.game.ended_at)
+
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.status, "lobby")
+
+    def test_advance_multiple_times(self):
+        drawers = []
+        words = []
+        
+        drawers.append(self.started_game.first_round.drawer_participant_id)
+        words.append(self.started_game.first_round.selected_game_word_id)
+
+        # R2
+        self._complete_active_round()
+        r = advance_game_cycle(self.game)
+        drawers.append(r.next_round.drawer_participant_id)
+        words.append(r.next_round.selected_game_word_id)
+        
+        # R3
+        self._complete_active_round()
+        r = advance_game_cycle(self.game)
+        drawers.append(r.next_round.drawer_participant_id)
+        words.append(r.next_round.selected_game_word_id)
+
+        self.assertEqual(len(set(drawers)), 3)
+        self.assertEqual(len(set(words)), 3)
+
+    def test_fail_to_advance_if_round_is_active(self):
+        with self.assertRaisesMessage(AdvanceGameError, "Cannot advance the game while a round is still active"):
+            advance_game_cycle(self.game)
+
+    def test_fail_to_advance_if_game_not_in_progress(self):
+        self._complete_active_round()
+        self.game.status = "finished"
+        self.game.save()
+
+        with self.assertRaisesMessage(AdvanceGameError, "Cannot advance a game that is not in progress."):
+            advance_game_cycle(self.game)
+

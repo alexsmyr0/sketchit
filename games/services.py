@@ -18,10 +18,21 @@ class GuessEvaluationError(Exception):
     pass
 
 
+class AdvanceGameError(Exception):
+    pass
+
+
 @dataclass(frozen=True)
 class StartedGame:
     game: Game
     first_round: Round
+
+
+@dataclass(frozen=True)
+class AdvancedGameCycleResult:
+    game: Game
+    game_finished: bool
+    next_round: Round | None
 
 
 @dataclass(frozen=True)
@@ -258,4 +269,87 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
         round_completed_now=True,
         winning_player_id=guessing_player.id,
         score_updates=updated_scores,
+    )
+
+
+@transaction.atomic
+def advance_game_cycle(game: Game) -> AdvancedGameCycleResult:
+    locked_game = Game.objects.select_for_update().get(pk=game.pk)
+
+    if locked_game.status != GameStatus.IN_PROGRESS:
+        raise AdvanceGameError("Cannot advance a game that is not in progress.")
+
+    if locked_game.rounds.filter(ended_at__isnull=True).exists():
+        raise AdvanceGameError("Cannot advance the game while a round is still active.")
+
+    drawn_player_ids = set(
+        locked_game.rounds.exclude(drawer_participant_id__isnull=True)
+        .values_list("drawer_participant_id", flat=True)
+    )
+
+    eligible_participants = list(
+        Player.objects.filter(
+            room_id=locked_game.room_id,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            connection_status=Player.ConnectionStatus.CONNECTED,
+        ).order_by("created_at", "id")
+    )
+
+    remaining_drawers = [p for p in eligible_participants if p.id not in drawn_player_ids]
+
+    if not remaining_drawers:
+        locked_game.status = GameStatus.FINISHED
+        locked_game.ended_at = timezone.now()
+        locked_game.save(update_fields=["status", "ended_at", "updated_at"])
+
+        locked_room = Room.objects.select_for_update().get(pk=locked_game.room_id)
+        locked_room.status = Room.Status.LOBBY
+        locked_room.save(update_fields=["status", "updated_at"])
+
+        return AdvancedGameCycleResult(
+            game=locked_game,
+            game_finished=True,
+            next_round=None,
+        )
+
+    next_drawer = random.choice(remaining_drawers)
+
+    used_word_ids = set(
+        locked_game.rounds.exclude(selected_game_word_id__isnull=True)
+        .values_list("selected_game_word_id", flat=True)
+    )
+
+    unused_words = list(
+        locked_game.snapshot_words.exclude(id__in=used_word_ids).order_by("id")
+    )
+
+    if not unused_words:
+        locked_game.status = GameStatus.FINISHED
+        locked_game.ended_at = timezone.now()
+        locked_game.save(update_fields=["status", "ended_at", "updated_at"])
+
+        locked_room = Room.objects.select_for_update().get(pk=locked_game.room_id)
+        locked_room.status = Room.Status.LOBBY
+        locked_room.save(update_fields=["status", "updated_at"])
+
+        return AdvancedGameCycleResult(
+            game=locked_game,
+            game_finished=True,
+            next_round=None,
+        )
+
+    next_word = random.choice(unused_words)
+
+    next_round = Round.objects.create(
+        game=locked_game,
+        drawer_participant=next_drawer,
+        drawer_nickname=next_drawer.display_name,
+        selected_game_word=next_word,
+        sequence_number=locked_game.rounds.count() + 1,
+    )
+
+    return AdvancedGameCycleResult(
+        game=locked_game,
+        game_finished=False,
+        next_round=next_round,
     )
