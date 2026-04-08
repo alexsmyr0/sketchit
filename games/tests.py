@@ -5,7 +5,7 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from games.admin import GameAdmin, GameWordAdmin, GuessAdmin, RoundAdmin
-from games.models import Game, GameWord, Guess, Round, RoundStatus
+from games.models import Game, GameStatus, GameWord, Guess, Round, RoundStatus
 from games.services import (
     GuessEvaluationError,
     StartGameError,
@@ -220,6 +220,24 @@ class StartGameServiceTests(TestCase):
             return first_round, self.member, self.host
         return first_round, self.host, self.member
 
+    def _resolve_round_with_correct_guess(self, round_to_resolve: Round) -> None:
+        guesser = (
+            Player.objects.filter(
+                room=self.room,
+                connection_status=Player.ConnectionStatus.CONNECTED,
+                participation_status=Player.ParticipationStatus.PLAYING,
+            )
+            .exclude(pk=round_to_resolve.drawer_participant_id)
+            .order_by("created_at", "id")
+            .first()
+        )
+        self.assertIsNotNone(guesser)
+        evaluate_guess_for_round(
+            round_to_resolve,
+            guesser,
+            round_to_resolve.selected_game_word.text,
+        )
+
     def test_correct_guess_ends_active_round_and_updates_scores(self):
         first_round, guesser, drawer = self._start_game_with_non_drawer_guesser()
         guess_text = f"  {first_round.selected_game_word.text.upper()}  "
@@ -249,6 +267,79 @@ class StartGameServiceTests(TestCase):
         self.assertEqual(result.as_round_result()["winning_player_id"], guesser.id)
         self.assertEqual(Guess.objects.filter(round=first_round).count(), 1)
         self.assertTrue(Guess.objects.get(round=first_round).is_correct)
+
+    def test_completed_round_creates_next_round_with_unused_drawer_and_word(self):
+        started_game = start_game_for_room(self.room)
+        game = started_game.game
+        first_round = started_game.first_round
+
+        self._resolve_round_with_correct_guess(first_round)
+
+        game.refresh_from_db()
+        first_round.refresh_from_db()
+        second_round = game.rounds.select_related("selected_game_word").get(sequence_number=2)
+
+        self.assertEqual(game.status, GameStatus.IN_PROGRESS)
+        self.assertIsNone(game.ended_at)
+        self.assertEqual(first_round.status, RoundStatus.COMPLETED)
+        self.assertIsNone(second_round.status)
+        self.assertIsNone(second_round.ended_at)
+        self.assertNotEqual(second_round.drawer_participant_id, first_round.drawer_participant_id)
+        self.assertIn(second_round.drawer_participant_id, {self.host.id, self.member.id})
+        self.assertNotEqual(second_round.drawer_participant_id, self.spectator.id)
+        self.assertNotEqual(second_round.selected_game_word_id, first_round.selected_game_word_id)
+
+    def test_game_finishes_after_each_eligible_drawer_draws_once(self):
+        started_game = start_game_for_room(self.room)
+        game = started_game.game
+
+        self._resolve_round_with_correct_guess(started_game.first_round)
+        second_round = game.rounds.get(sequence_number=2)
+        self._resolve_round_with_correct_guess(second_round)
+
+        game.refresh_from_db()
+        self.host.refresh_from_db()
+        self.member.refresh_from_db()
+        self.spectator.refresh_from_db()
+
+        self.assertEqual(game.status, GameStatus.FINISHED)
+        self.assertIsNotNone(game.ended_at)
+        self.assertEqual(game.rounds.count(), 2)
+        self.assertFalse(game.rounds.filter(sequence_number=3).exists())
+        self.assertEqual(self.host.current_score, 2)
+        self.assertEqual(self.member.current_score, 2)
+        self.assertEqual(self.spectator.current_score, 0)
+
+    def test_round_progression_never_repeats_drawers_or_words_within_game(self):
+        third_player = Player.objects.create(
+            room=self.room,
+            session_key="third-session",
+            display_name="Third",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            current_score=0,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        started_game = start_game_for_room(self.room)
+        game = started_game.game
+        first_round = started_game.first_round
+
+        self._resolve_round_with_correct_guess(first_round)
+        second_round = game.rounds.get(sequence_number=2)
+        self._resolve_round_with_correct_guess(second_round)
+        third_round = game.rounds.get(sequence_number=3)
+
+        drawer_ids = {
+            first_round.drawer_participant_id,
+            second_round.drawer_participant_id,
+            third_round.drawer_participant_id,
+        }
+        self.assertSetEqual(drawer_ids, {self.host.id, self.member.id, third_player.id})
+
+        selected_word_ids = list(
+            game.rounds.order_by("sequence_number").values_list("selected_game_word_id", flat=True)
+        )
+        self.assertEqual(len(selected_word_ids), len(set(selected_word_ids)))
 
     def test_incorrect_guess_does_not_end_round_or_change_scores(self):
         first_round, guesser, _drawer = self._start_game_with_non_drawer_guesser()
