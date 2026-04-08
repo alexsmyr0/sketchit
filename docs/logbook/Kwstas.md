@@ -13,3 +13,7 @@
 - Added a room-to-word-pack relation and default word-pack assignment.
 - Added server-side game.
 - Added host-only start-game action.
+
+## Apr 8
+
+- Added server-side round-resolution logic.

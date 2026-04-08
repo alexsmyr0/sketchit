@@ -5,8 +5,13 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from games.admin import GameAdmin, GameWordAdmin, GuessAdmin, RoundAdmin
-from games.models import Game, GameWord, Guess, Round
-from games.services import StartGameError, start_game_for_room
+from games.models import Game, GameWord, Guess, Round, RoundStatus
+from games.services import (
+    GuessEvaluationError,
+    StartGameError,
+    evaluate_guess_for_round,
+    start_game_for_room,
+)
 from rooms.models import Player, Room
 from words.models import Word, WordPack, WordPackEntry
 
@@ -206,3 +211,173 @@ class StartGameServiceTests(TestCase):
             list(started_game.game.snapshot_words.order_by("id").values_list("text", flat=True)),
             ["apple", "banana"],
         )
+
+    def _start_game_with_non_drawer_guesser(self):
+        started_game = start_game_for_room(self.room)
+        first_round = started_game.first_round
+
+        if first_round.drawer_participant_id == self.host.id:
+            return first_round, self.member, self.host
+        return first_round, self.host, self.member
+
+    def test_correct_guess_ends_active_round_and_updates_scores(self):
+        first_round, guesser, drawer = self._start_game_with_non_drawer_guesser()
+        guess_text = f"  {first_round.selected_game_word.text.upper()}  "
+
+        result = evaluate_guess_for_round(first_round, guesser, guess_text)
+
+        first_round.refresh_from_db()
+        guesser.refresh_from_db()
+        drawer.refresh_from_db()
+        self.spectator.refresh_from_db()
+
+        self.assertTrue(result.is_correct)
+        self.assertTrue(result.round_completed)
+        self.assertTrue(result.round_completed_now)
+        self.assertEqual(result.round_status, RoundStatus.COMPLETED)
+        self.assertEqual(result.winning_player_id, guesser.id)
+        self.assertIsNotNone(result.round_ended_at)
+        self.assertEqual(first_round.status, RoundStatus.COMPLETED)
+        self.assertIsNotNone(first_round.ended_at)
+        self.assertEqual(guesser.current_score, 1)
+        self.assertEqual(drawer.current_score, 1)
+        self.assertEqual(self.spectator.current_score, 0)
+        self.assertEqual(
+            {(update.player_id, update.current_score) for update in result.score_updates},
+            {(guesser.id, 1), (drawer.id, 1)},
+        )
+        self.assertEqual(result.as_round_result()["winning_player_id"], guesser.id)
+        self.assertEqual(Guess.objects.filter(round=first_round).count(), 1)
+        self.assertTrue(Guess.objects.get(round=first_round).is_correct)
+
+    def test_incorrect_guess_does_not_end_round_or_change_scores(self):
+        first_round, guesser, _drawer = self._start_game_with_non_drawer_guesser()
+
+        result = evaluate_guess_for_round(first_round, guesser, "definitely-not-the-word")
+
+        first_round.refresh_from_db()
+        self.host.refresh_from_db()
+        self.member.refresh_from_db()
+        self.spectator.refresh_from_db()
+
+        self.assertFalse(result.is_correct)
+        self.assertFalse(result.round_completed)
+        self.assertFalse(result.round_completed_now)
+        self.assertIsNone(result.round_status)
+        self.assertIsNone(result.round_ended_at)
+        self.assertIsNone(result.winning_player_id)
+        self.assertEqual(result.score_updates, ())
+        self.assertIsNone(first_round.status)
+        self.assertIsNone(first_round.ended_at)
+        self.assertEqual(self.host.current_score, 0)
+        self.assertEqual(self.member.current_score, 0)
+        self.assertEqual(self.spectator.current_score, 0)
+        self.assertEqual(Guess.objects.filter(round=first_round).count(), 1)
+
+    def test_late_guesses_do_not_change_completed_round_outcome_or_scores(self):
+        first_round, first_winner, drawer = self._start_game_with_non_drawer_guesser()
+        evaluate_guess_for_round(first_round, first_winner, first_round.selected_game_word.text)
+
+        first_round.refresh_from_db()
+        completed_at = first_round.ended_at
+        first_winner.refresh_from_db()
+        drawer.refresh_from_db()
+        self.spectator.refresh_from_db()
+        winner_score_after_resolution = first_winner.current_score
+        drawer_score_after_resolution = drawer.current_score
+        spectator_score_after_resolution = self.spectator.current_score
+
+        result = evaluate_guess_for_round(
+            first_round,
+            drawer,
+            first_round.selected_game_word.text,
+        )
+
+        first_round.refresh_from_db()
+        first_winner.refresh_from_db()
+        drawer.refresh_from_db()
+        self.spectator.refresh_from_db()
+
+        self.assertFalse(result.is_correct)
+        self.assertTrue(result.round_completed)
+        self.assertFalse(result.round_completed_now)
+        self.assertEqual(result.round_status, RoundStatus.COMPLETED)
+        self.assertEqual(result.round_ended_at, completed_at)
+        self.assertEqual(result.winning_player_id, first_winner.id)
+        self.assertEqual(result.score_updates, ())
+        self.assertEqual(first_round.status, RoundStatus.COMPLETED)
+        self.assertEqual(first_round.ended_at, completed_at)
+        self.assertEqual(first_winner.current_score, winner_score_after_resolution)
+        self.assertEqual(drawer.current_score, drawer_score_after_resolution)
+        self.assertEqual(self.spectator.current_score, spectator_score_after_resolution)
+        self.assertEqual(Guess.objects.filter(round=first_round).count(), 2)
+        self.assertEqual(Guess.objects.filter(round=first_round, is_correct=True).count(), 1)
+
+    def test_drawer_correct_guess_does_not_end_round(self):
+        started_game = start_game_for_room(self.room)
+        first_round = started_game.first_round
+        drawer = first_round.drawer_participant
+
+        result = evaluate_guess_for_round(first_round, drawer, first_round.selected_game_word.text)
+
+        first_round.refresh_from_db()
+        drawer.refresh_from_db()
+
+        self.assertFalse(result.is_correct)
+        self.assertFalse(result.round_completed)
+        self.assertFalse(result.round_completed_now)
+        self.assertIsNone(result.round_status)
+        self.assertIsNone(result.round_ended_at)
+        self.assertEqual(result.score_updates, ())
+        self.assertIsNone(first_round.status)
+        self.assertIsNone(first_round.ended_at)
+        self.assertEqual(drawer.current_score, 0)
+        self.assertEqual(Guess.objects.filter(round=first_round).count(), 1)
+
+    def test_evaluate_guess_rejects_spectating_participant(self):
+        first_round, _guesser, _drawer = self._start_game_with_non_drawer_guesser()
+
+        with self.assertRaisesMessage(
+            GuessEvaluationError,
+            "The guessing participant must be connected and have playing status.",
+        ):
+            evaluate_guess_for_round(first_round, self.spectator, first_round.selected_game_word.text)
+
+        self.assertEqual(Guess.objects.filter(round=first_round).count(), 0)
+
+    def test_evaluate_guess_rejects_disconnected_participant(self):
+        first_round, guesser, _drawer = self._start_game_with_non_drawer_guesser()
+        guesser.connection_status = Player.ConnectionStatus.DISCONNECTED
+        guesser.save(update_fields=("connection_status", "updated_at"))
+
+        with self.assertRaisesMessage(
+            GuessEvaluationError,
+            "The guessing participant must be connected and have playing status.",
+        ):
+            evaluate_guess_for_round(first_round, guesser, first_round.selected_game_word.text)
+
+        self.assertEqual(Guess.objects.filter(round=first_round).count(), 0)
+
+    def test_evaluate_guess_rejects_player_outside_round_room(self):
+        first_round, _guesser, _drawer = self._start_game_with_non_drawer_guesser()
+        outsider_room = Room.objects.create(
+            name="Other Room",
+            join_code="OTHER123",
+            visibility=Room.Visibility.PUBLIC,
+        )
+        outsider = Player.objects.create(
+            room=outsider_room,
+            session_key="outsider-session",
+            display_name="Outsider",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+
+        with self.assertRaisesMessage(
+            GuessEvaluationError,
+            "The guessing participant must belong to the round's room.",
+        ):
+            evaluate_guess_for_round(first_round, outsider, first_round.selected_game_word.text)
+
+        self.assertEqual(Guess.objects.filter(round=first_round).count(), 0)
