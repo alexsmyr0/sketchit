@@ -76,6 +76,15 @@ def _normalize_guess_text(value: str) -> str:
     return value.strip().casefold()
 
 
+def _get_round_winning_player_id(round_id: int) -> int | None:
+    return (
+        Guess.objects.filter(round_id=round_id, is_correct=True)
+        .order_by("typed_at", "id")
+        .values_list("player_id", flat=True)
+        .first()
+    )
+
+
 def _build_guess_evaluation_result(
     *,
     guess: Guess,
@@ -170,6 +179,13 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
         raise GuessEvaluationError(
             "The guessing participant must belong to the round's room."
         )
+    if (
+        guessing_player.connection_status != Player.ConnectionStatus.CONNECTED
+        or guessing_player.participation_status != Player.ParticipationStatus.PLAYING
+    ):
+        raise GuessEvaluationError(
+            "The guessing participant must be connected and have playing status."
+        )
 
     guess = Guess.objects.create(
         round=locked_round,
@@ -185,7 +201,7 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
             locked_round=locked_round,
             is_correct=False,
             round_completed_now=False,
-            winning_player_id=None,
+            winning_player_id=_get_round_winning_player_id(locked_round.id),
             score_updates=(),
         )
 
@@ -208,6 +224,9 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
             winning_player_id=None,
             score_updates=(),
         )
+
+    guess.is_correct = True
+    guess.save(update_fields=["is_correct", "updated_at"])
 
     locked_round.status = RoundStatus.COMPLETED
     locked_round.ended_at = timezone.now()

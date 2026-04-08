@@ -172,6 +172,7 @@ class Guess(TimestampedModel):
         related_name="guesses",
     )
     text = models.CharField(max_length=255)
+    is_correct = models.BooleanField(default=False)
     typed_at = models.DateTimeField(default=timezone.now)
 
     class Meta:

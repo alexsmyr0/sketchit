@@ -248,6 +248,7 @@ class StartGameServiceTests(TestCase):
         )
         self.assertEqual(result.as_round_result()["winning_player_id"], guesser.id)
         self.assertEqual(Guess.objects.filter(round=first_round).count(), 1)
+        self.assertTrue(Guess.objects.get(round=first_round).is_correct)
 
     def test_incorrect_guess_does_not_end_round_or_change_scores(self):
         first_round, guesser, _drawer = self._start_game_with_non_drawer_guesser()
@@ -288,7 +289,7 @@ class StartGameServiceTests(TestCase):
 
         result = evaluate_guess_for_round(
             first_round,
-            self.spectator,
+            drawer,
             first_round.selected_game_word.text,
         )
 
@@ -302,7 +303,7 @@ class StartGameServiceTests(TestCase):
         self.assertFalse(result.round_completed_now)
         self.assertEqual(result.round_status, RoundStatus.COMPLETED)
         self.assertEqual(result.round_ended_at, completed_at)
-        self.assertIsNone(result.winning_player_id)
+        self.assertEqual(result.winning_player_id, first_winner.id)
         self.assertEqual(result.score_updates, ())
         self.assertEqual(first_round.status, RoundStatus.COMPLETED)
         self.assertEqual(first_round.ended_at, completed_at)
@@ -310,6 +311,7 @@ class StartGameServiceTests(TestCase):
         self.assertEqual(drawer.current_score, drawer_score_after_resolution)
         self.assertEqual(self.spectator.current_score, spectator_score_after_resolution)
         self.assertEqual(Guess.objects.filter(round=first_round).count(), 2)
+        self.assertEqual(Guess.objects.filter(round=first_round, is_correct=True).count(), 1)
 
     def test_drawer_correct_guess_does_not_end_round(self):
         started_game = start_game_for_room(self.room)
@@ -331,6 +333,30 @@ class StartGameServiceTests(TestCase):
         self.assertIsNone(first_round.ended_at)
         self.assertEqual(drawer.current_score, 0)
         self.assertEqual(Guess.objects.filter(round=first_round).count(), 1)
+
+    def test_evaluate_guess_rejects_spectating_participant(self):
+        first_round, _guesser, _drawer = self._start_game_with_non_drawer_guesser()
+
+        with self.assertRaisesMessage(
+            GuessEvaluationError,
+            "The guessing participant must be connected and have playing status.",
+        ):
+            evaluate_guess_for_round(first_round, self.spectator, first_round.selected_game_word.text)
+
+        self.assertEqual(Guess.objects.filter(round=first_round).count(), 0)
+
+    def test_evaluate_guess_rejects_disconnected_participant(self):
+        first_round, guesser, _drawer = self._start_game_with_non_drawer_guesser()
+        guesser.connection_status = Player.ConnectionStatus.DISCONNECTED
+        guesser.save(update_fields=("connection_status", "updated_at"))
+
+        with self.assertRaisesMessage(
+            GuessEvaluationError,
+            "The guessing participant must be connected and have playing status.",
+        ):
+            evaluate_guess_for_round(first_round, guesser, first_round.selected_game_word.text)
+
+        self.assertEqual(Guess.objects.filter(round=first_round).count(), 0)
 
     def test_evaluate_guess_rejects_player_outside_round_room(self):
         first_round, _guesser, _drawer = self._start_game_with_non_drawer_guesser()
