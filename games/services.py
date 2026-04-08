@@ -1,9 +1,12 @@
 import random
+from datetime import datetime
 from dataclasses import dataclass
 
 from django.db import transaction
+from django.db.models import F
+from django.utils import timezone
 
-from games.models import Game, GameStatus, GameWord, Round
+from games.models import Game, GameStatus, GameWord, Guess, Round, RoundStatus
 from rooms.models import Player, Room
 
 
@@ -11,10 +14,51 @@ class StartGameError(Exception):
     pass
 
 
+class GuessEvaluationError(Exception):
+    pass
+
+
 @dataclass(frozen=True)
 class StartedGame:
     game: Game
     first_round: Round
+
+
+@dataclass(frozen=True)
+class PlayerScoreUpdate:
+    player_id: int
+    current_score: int
+
+
+@dataclass(frozen=True)
+class GuessEvaluationResult:
+    guess: Guess
+    is_correct: bool
+    round_completed: bool
+    round_completed_now: bool
+    round_status: str | None
+    round_ended_at: datetime | None
+    winning_player_id: int | None
+    score_updates: tuple[PlayerScoreUpdate, ...]
+
+    def as_round_result(self) -> dict[str, object]:
+        return {
+            "round_id": self.guess.round_id,
+            "status": self.round_status,
+            "ended_at": self.round_ended_at,
+            "winning_player_id": self.winning_player_id,
+            "score_updates": [
+                {
+                    "player_id": score_update.player_id,
+                    "current_score": score_update.current_score,
+                }
+                for score_update in self.score_updates
+            ],
+        }
+
+
+CORRECT_GUESSER_SCORE_DELTA = 1
+DRAWER_SCORE_DELTA_ON_CORRECT_GUESS = 1
 
 
 def _dedupe_snapshot_words_case_insensitive(word_texts: list[str]) -> list[str]:
@@ -26,6 +70,32 @@ def _dedupe_snapshot_words_case_insensitive(word_texts: list[str]) -> list[str]:
         unique_words_by_normalized_text[normalized_text] = word_text
 
     return list(unique_words_by_normalized_text.values())
+
+
+def _normalize_guess_text(value: str) -> str:
+    return value.strip().casefold()
+
+
+def _build_guess_evaluation_result(
+    *,
+    guess: Guess,
+    locked_round: Round,
+    is_correct: bool,
+    round_completed_now: bool,
+    winning_player_id: int | None,
+    score_updates: tuple[PlayerScoreUpdate, ...],
+) -> GuessEvaluationResult:
+    round_completed = bool(locked_round.status or locked_round.ended_at)
+    return GuessEvaluationResult(
+        guess=guess,
+        is_correct=is_correct,
+        round_completed=round_completed,
+        round_completed_now=round_completed_now,
+        round_status=locked_round.status,
+        round_ended_at=locked_round.ended_at,
+        winning_player_id=winning_player_id,
+        score_updates=score_updates,
+    )
 
 
 @transaction.atomic
@@ -79,3 +149,94 @@ def start_game_for_room(room: Room) -> StartedGame:
     locked_room.save(update_fields=["status", "updated_at"])
 
     return StartedGame(game=game, first_round=first_round)
+
+
+@transaction.atomic
+def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> GuessEvaluationResult:
+    locked_round = (
+        Round.objects.select_for_update()
+        .select_related("game", "selected_game_word")
+        .get(pk=round.pk)
+    )
+    guessing_player = (
+        Player.objects.select_for_update()
+        .filter(
+            pk=player.pk,
+            room_id=locked_round.game.room_id,
+        )
+        .first()
+    )
+    if guessing_player is None:
+        raise GuessEvaluationError(
+            "The guessing participant must belong to the round's room."
+        )
+
+    guess = Guess.objects.create(
+        round=locked_round,
+        player=guessing_player,
+        text=guess_text,
+    )
+
+    # Completed rounds are immutable; additional guesses are stored but must not
+    # change scoring or winner outcome.
+    if locked_round.status is not None or locked_round.ended_at is not None:
+        return _build_guess_evaluation_result(
+            guess=guess,
+            locked_round=locked_round,
+            is_correct=False,
+            round_completed_now=False,
+            winning_player_id=None,
+            score_updates=(),
+        )
+
+    if locked_round.drawer_participant_id == guessing_player.id:
+        return _build_guess_evaluation_result(
+            guess=guess,
+            locked_round=locked_round,
+            is_correct=False,
+            round_completed_now=False,
+            winning_player_id=None,
+            score_updates=(),
+        )
+
+    if _normalize_guess_text(guess.text) != _normalize_guess_text(locked_round.selected_game_word.text):
+        return _build_guess_evaluation_result(
+            guess=guess,
+            locked_round=locked_round,
+            is_correct=False,
+            round_completed_now=False,
+            winning_player_id=None,
+            score_updates=(),
+        )
+
+    locked_round.status = RoundStatus.COMPLETED
+    locked_round.ended_at = timezone.now()
+    locked_round.save(update_fields=["status", "ended_at", "updated_at"])
+
+    score_deltas_by_participant_id = {
+        guessing_player.id: CORRECT_GUESSER_SCORE_DELTA,
+    }
+    drawer_participant_id = locked_round.drawer_participant_id
+    if drawer_participant_id is not None and drawer_participant_id != guessing_player.id:
+        score_deltas_by_participant_id[drawer_participant_id] = DRAWER_SCORE_DELTA_ON_CORRECT_GUESS
+
+    for participant_id, score_delta in score_deltas_by_participant_id.items():
+        Player.objects.filter(pk=participant_id).update(
+            current_score=F("current_score") + score_delta
+        )
+
+    updated_scores = tuple(
+        PlayerScoreUpdate(player_id=row["id"], current_score=row["current_score"])
+        for row in Player.objects.filter(pk__in=score_deltas_by_participant_id)
+        .order_by("id")
+        .values("id", "current_score")
+    )
+
+    return _build_guess_evaluation_result(
+        guess=guess,
+        locked_round=locked_round,
+        is_correct=True,
+        round_completed_now=True,
+        winning_player_id=guessing_player.id,
+        score_updates=updated_scores,
+    )
