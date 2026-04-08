@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SketchIt - Join or Create Room</title>
+    <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 2rem auto; padding: 0 1rem; }
+        section { border: 1px solid #ccc; padding: 1.5rem; margin-bottom: 2rem; border-radius: 8px; }
+        .form-group { margin-bottom: 1rem; }
+        label { display: block; margin-bottom: 0.25rem; font-weight: bold; }
+        input, select { width: 100%; padding: 0.5rem; box-sizing: border-box; }
+        button { padding: 0.5rem 1rem; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; }
+        button:hover { background: #0056b3; }
+        .error { color: red; margin-top: 1rem; }
+        .success-panel { background: #eef9f1; border: 1px solid #7ac08a; padding: 1rem 1.25rem; margin-bottom: 2rem; border-radius: 8px; }
+        .success-panel[hidden] { display: none; }
+        .success-panel h2 { margin-top: 0; }
+        .success-code { font-family: monospace; font-size: 1.1rem; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>Welcome to SketchIt</h1>
+
+    <section id="room-success" class="success-panel" hidden>
+        <h2 id="success-title">Room ready</h2>
+        <p id="success-message"></p>
+        <p>Room code: <span id="success-join-code" class="success-code"></span></p>
+    </section>
+
+    <section>
+        <h2>Join a Room</h2>
+        <form id="join-form" method="post">
+            {% csrf_token %}
+            <div class="form-group">
+                <label for="join_code">Room Code (e.g. ABC12345)</label>
+                <input type="text" id="join_code" required>
+            </div>
+            <div class="form-group">
+                <label for="join_display_name">Your Nickname</label>
+                <input type="text" id="join_display_name" required maxlength="24">
+            </div>
+            <button type="submit">Join Room</button>
+            <div id="join-error" class="error"></div>
+        </form>
+    </section>
+
+    <section>
+        <h2>Create a Room</h2>
+        <form id="create-form" method="post">
+            {% csrf_token %}
+            <div class="form-group">
+                <label for="room_name">Room Name</label>
+                <input type="text" id="room_name" required maxlength="255">
+            </div>
+            <div class="form-group">
+                <label for="create_display_name">Your Nickname</label>
+                <input type="text" id="create_display_name" required maxlength="24">
+            </div>
+            <div class="form-group">
+                <label for="visibility">Visibility</label>
+                <select id="visibility" required>
+                    <option value="private">Private</option>
+                    <option value="public">Public</option>
+                </select>
+            </div>
+            <button type="submit">Create Room</button>
+            <div id="create-error" class="error"></div>
+        </form>
+    </section>
+
+    <script>
+        function getCsrfToken() {
+            const csrfInput = document.querySelector('[name="csrfmiddlewaretoken"]');
+            return csrfInput ? csrfInput.value : '';
+        }
+
+        function buildErrorMessage(data) {
+            if (data.detail) {
+                return data.detail;
+            }
+
+            if (!data.errors) {
+                return 'An error occurred.';
+            }
+
+            return Object.entries(data.errors)
+                .map(([fieldName, messages]) => `${fieldName}: ${messages.join(' ')}`)
+                .join(' ');
+        }
+
+        function showSuccessMessage(actionLabel, joinCode) {
+            const successPanel = document.getElementById('room-success');
+            document.getElementById('success-title').textContent = actionLabel;
+            document.getElementById('success-message').textContent =
+                'The room page is not implemented yet, but your room session is ready.';
+            document.getElementById('success-join-code').textContent = joinCode;
+            successPanel.hidden = false;
+        }
+
+        async function submitJsonRequest(url, payload, errorElementId, successLabel) {
+            const errorElement = document.getElementById(errorElementId);
+            const successPanel = document.getElementById('room-success');
+            errorElement.textContent = '';
+            successPanel.hidden = true;
+            
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': getCsrfToken()
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showSuccessMessage(successLabel, data.join_code);
+                } else {
+                    errorElement.textContent = buildErrorMessage(data);
+                }
+            } catch (err) {
+                errorElement.textContent = 'Network error. Please try again.';
+            }
+        }
+
+        document.getElementById('join-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const joinCode = document.getElementById('join_code').value.trim();
+            const displayName = document.getElementById('join_display_name').value.trim();
+            
+            if (!joinCode || !displayName) return;
+            
+            submitJsonRequest(
+                `/rooms/${joinCode}/join/`,
+                { display_name: displayName },
+                'join-error',
+                'Room joined'
+            );
+        });
+
+        document.getElementById('create-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const roomName = document.getElementById('room_name').value.trim();
+            const displayName = document.getElementById('create_display_name').value.trim();
+            const visibility = document.getElementById('visibility').value;
+            
+            if (!roomName || !displayName || !visibility) return;
+            
+            submitJsonRequest(
+                '/rooms/create/',
+                {
+                    name: roomName,
+                    display_name: displayName,
+                    visibility: visibility
+                },
+                'create-error',
+                'Room created'
+            );
+        });
+    </script>
+</body>
+</html>
