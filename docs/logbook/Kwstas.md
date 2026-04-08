@@ -17,3 +17,4 @@
 ## Apr 8
 
 - Added server-side round-resolution logic.
+- Added drawer rotation.

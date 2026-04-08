@@ -107,6 +107,70 @@ def _build_guess_evaluation_result(
     )
 
 
+def _get_eligible_drawers_for_game(game: Game) -> list[Player]:
+    return list(
+        Player.objects.select_for_update()
+        .filter(
+            room_id=game.room_id,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            connection_status=Player.ConnectionStatus.CONNECTED,
+        )
+        .order_by("created_at", "id")
+    )
+
+
+def _get_remaining_eligible_drawers(game: Game) -> list[Player]:
+    eligible_drawers = _get_eligible_drawers_for_game(game)
+    already_drawn_participant_ids = set(
+        game.rounds.exclude(drawer_participant_id__isnull=True).values_list(
+            "drawer_participant_id",
+            flat=True,
+        )
+    )
+    return [
+        participant
+        for participant in eligible_drawers
+        if participant.id not in already_drawn_participant_ids
+    ]
+
+
+def _progress_game_after_round_completion(completed_round: Round) -> None:
+    locked_game = Game.objects.select_for_update().get(pk=completed_round.game_id)
+    if locked_game.status != GameStatus.IN_PROGRESS:
+        return
+
+    next_round_sequence_number = completed_round.sequence_number + 1
+    if locked_game.rounds.filter(sequence_number=next_round_sequence_number).exists():
+        return
+
+    remaining_drawers = _get_remaining_eligible_drawers(locked_game)
+    if not remaining_drawers:
+        locked_game.status = GameStatus.FINISHED
+        locked_game.ended_at = timezone.now()
+        locked_game.save(update_fields=["status", "ended_at", "updated_at"])
+        return
+
+    available_words = list(
+        locked_game.snapshot_words.select_for_update()
+        .filter(round__isnull=True)
+        .order_by("id")
+    )
+    if not available_words:
+        raise GuessEvaluationError(
+            "Cannot continue game because no unused snapshot words remain."
+        )
+
+    next_drawer = random.choice(remaining_drawers)
+    next_word = random.choice(available_words)
+    Round.objects.create(
+        game=locked_game,
+        drawer_participant=next_drawer,
+        drawer_nickname=next_drawer.display_name,
+        selected_game_word=next_word,
+        sequence_number=next_round_sequence_number,
+    )
+
+
 @transaction.atomic
 def start_game_for_room(room: Room) -> StartedGame:
     locked_room = Room.objects.select_for_update().select_related("word_pack").get(pk=room.pk)
@@ -250,6 +314,7 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
         .order_by("id")
         .values("id", "current_score")
     )
+    _progress_game_after_round_completion(locked_round)
 
     return _build_guess_evaluation_result(
         guess=guess,
