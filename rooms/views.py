@@ -7,6 +7,7 @@ from django.db import transaction
 from django.db.utils import IntegrityError
 from django.http import HttpResponseNotAllowed, JsonResponse
 
+from games.services import StartGameError, start_game_for_room
 from rooms.models import Player, Room
 
 
@@ -67,6 +68,42 @@ def _build_room_response(room, *, status):
             "room_url": f"/rooms/{room.join_code}/",
         },
         status=status,
+    )
+
+
+def _serialize_host(player):
+    if player is None:
+        return None
+
+    return {
+        "id": player.id,
+        "display_name": player.display_name,
+    }
+
+
+def _serialize_participant(player):
+    return {
+        "id": player.id,
+        "display_name": player.display_name,
+        "connection_status": player.connection_status,
+        "participation_status": player.participation_status,
+    }
+
+
+def _build_room_lobby_state_response(room):
+    participants = room.participants.order_by("created_at", "id")
+    return JsonResponse(
+        {
+            "room": {
+                "name": room.name,
+                "join_code": room.join_code,
+                "visibility": room.visibility,
+                "status": room.status,
+            },
+            "host": _serialize_host(room.host),
+            "participants": [_serialize_participant(player) for player in participants],
+        },
+        status=200,
     )
 
 
@@ -195,3 +232,81 @@ def join_room(request, join_code):
     )
 
     return _build_room_response(room, status=201)
+
+
+def room_lobby_state(request, join_code):
+    if request.method != "GET":
+        return HttpResponseNotAllowed(["GET"])
+
+    try:
+        room = Room.objects.select_related("host").get(join_code=join_code.upper())
+    except Room.DoesNotExist:
+        return JsonResponse({"detail": "Room not found."}, status=404)
+
+    session_key = _get_or_create_session_key(request)
+    if not room.participants.filter(session_key=session_key).exists():
+        return JsonResponse(
+            {"detail": "This guest session is not a participant in this room."},
+            status=403,
+        )
+
+    return _build_room_lobby_state_response(room)
+
+
+def start_game(request, join_code):
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    try:
+        room = Room.objects.select_related("host").get(join_code=join_code.upper())
+    except Room.DoesNotExist:
+        return JsonResponse({"detail": "Room not found."}, status=404)
+
+    session_key = _get_or_create_session_key(request)
+    requester = room.participants.filter(session_key=session_key).first()
+    if requester is None:
+        return JsonResponse(
+            {"detail": "This guest session is not a participant in this room."},
+            status=403,
+        )
+
+    if room.host_id != requester.id:
+        return JsonResponse(
+            {"detail": "Only the room host can start a game."},
+            status=403,
+        )
+
+    try:
+        started_game = start_game_for_room(room)
+    except StartGameError as exc:
+        return JsonResponse({"detail": str(exc)}, status=409)
+
+    room.refresh_from_db(fields=["status"])
+    game = started_game.game
+    first_round = started_game.first_round
+
+    return JsonResponse(
+        {
+            "game_id": game.id,
+            "round_id": first_round.id,
+            "room_status": room.status,
+            "room": {
+                "join_code": room.join_code,
+                "status": room.status,
+            },
+            "game": {
+                "id": game.id,
+                "status": game.status,
+                "word_count": game.snapshot_words.count(),
+            },
+            "first_round": {
+                "id": first_round.id,
+                "sequence_number": first_round.sequence_number,
+                "status": first_round.status,
+                "drawer_participant_id": first_round.drawer_participant_id,
+                "drawer_nickname": first_round.drawer_nickname,
+                "selected_game_word_id": first_round.selected_game_word_id,
+            },
+        },
+        status=201,
+    )
