@@ -13,6 +13,45 @@ from rooms.models import MVP_DEFAULT_WORD_PACK_NAME, Player, Room
 from words.models import Word, WordPack, WordPackEntry
 
 
+class RoomEntryPageTests(TestCase):
+    def test_room_entry_page_renders_forms_and_csrf_token(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "rooms/room_entry.html")
+        self.assertContains(response, '<form id="join-form"', html=False)
+        self.assertContains(response, '<form id="create-form"', html=False)
+        self.assertContains(
+            response,
+            '<input type="hidden" name="csrfmiddlewaretoken"',
+            count=2,
+            html=False,
+        )
+        self.assertIn("csrftoken", response.cookies)
+
+    def test_room_entry_page_primes_csrf_for_create_room_submission(self):
+        client = self.client_class(enforce_csrf_checks=True)
+        response = client.get("/")
+
+        csrf_token = response.cookies["csrftoken"].value
+        create_response = client.post(
+            "/rooms/create/",
+            data=json.dumps(
+                {
+                    "name": "Friday Sketches",
+                    "visibility": Room.Visibility.PRIVATE,
+                    "display_name": "Alex",
+                }
+            ),
+            content_type="application/json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+
+        self.assertEqual(create_response.status_code, 201)
+        self.assertEqual(Room.objects.count(), 1)
+        self.assertEqual(Player.objects.count(), 1)
+
+
 class CreateRoomViewTests(TestCase):
     url = "/rooms/create/"
 

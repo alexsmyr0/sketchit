@@ -7,6 +7,7 @@ from django.db import transaction
 from django.db.utils import IntegrityError
 from django.http import HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import render
+from django.views.decorators.csrf import ensure_csrf_cookie
 
 from games.services import StartGameError, start_game_for_room
 from rooms.models import Player, Room
@@ -313,5 +314,6 @@ def start_game(request, join_code):
     )
 
 
+@ensure_csrf_cookie
 def room_entry_page(request):
     return render(request, "rooms/room_entry.html")
