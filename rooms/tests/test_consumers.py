@@ -16,32 +16,26 @@ which WebsocketCommunicator omits by default).
 """
 
 import json
-from datetime import timedelta
 
+from asgiref.sync import async_to_sync
 from channels.auth import AuthMiddlewareStack
+from channels.db import database_sync_to_async
+from channels.layers import get_channel_layer
 from channels.routing import URLRouter
 from channels.testing import WebsocketCommunicator
+from django.contrib.sessions.backends.db import SessionStore
 from django.test import TransactionTestCase
-from django.urls import re_path
-from django.utils import timezone
 
-from rooms.consumers import RoomConsumer, _room_group_name
+from config.routing import websocket_urlpatterns
+from rooms.consumers import _room_group_name
 from rooms.models import Player, Room
+from words.models import Word, WordPack, WordPackEntry
 
 # ---------------------------------------------------------------------------
 # Test-scoped ASGI application
 # ---------------------------------------------------------------------------
 
-_TEST_APP = AuthMiddlewareStack(
-    URLRouter(
-        [
-            re_path(
-                r"^ws/rooms/(?P<join_code>[A-Za-z0-9]{8})/$",
-                RoomConsumer.as_asgi(),
-            ),
-        ]
-    )
-)
+_TEST_APP = AuthMiddlewareStack(URLRouter(websocket_urlpatterns))
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +51,27 @@ def _session_headers(session_key: str) -> list[tuple[bytes, bytes]]:
     return [(b"cookie", f"sessionid={session_key}".encode())]
 
 
+@database_sync_to_async
+def _create_session_key() -> str:
+    session = SessionStore()
+    session.save()
+    return session.session_key
+
+
+@database_sync_to_async
+def _create_room_member(room_id: int, display_name: str) -> str:
+    session = SessionStore()
+    session.save()
+    room = Room.objects.get(pk=room_id)
+    Player.objects.create(
+        room=room,
+        session_key=session.session_key,
+        display_name=display_name,
+        session_expires_at=session.get_expiry_date(),
+    )
+    return session.session_key
+
+
 # ---------------------------------------------------------------------------
 # Test cases
 # ---------------------------------------------------------------------------
@@ -66,12 +81,18 @@ class RoomConsumerConnectTests(TransactionTestCase):
     """Tests for the WebSocket connect / disconnect lifecycle."""
 
     def setUp(self):
-        session_expires_at = timezone.now() + timedelta(hours=1)
+        self.channel_layer = get_channel_layer()
+        async_to_sync(self.channel_layer.flush)()
+
+        self.word_pack = WordPack.objects.create(name="Test Pack")
+        test_word = Word.objects.create(text="rocket")
+        WordPackEntry.objects.create(word_pack=self.word_pack, word=test_word)
 
         self.room = Room.objects.create(
             name="Test Room",
             join_code="TEST1234",
             visibility=Room.Visibility.PRIVATE,
+            word_pack=self.word_pack,
         )
 
         # Use the HTTP test client to create a real Django session so we can
@@ -85,6 +106,13 @@ class RoomConsumerConnectTests(TransactionTestCase):
         self.session_key = self.client.session.session_key
         self.player = Player.objects.get(room=self.room, session_key=self.session_key)
 
+    def tearDown(self):
+        async_to_sync(self.channel_layer.flush)()
+        super().tearDown()
+
+    def _group_members(self, group_name: str) -> dict[str, float]:
+        return self.channel_layer.groups.get(group_name, {})
+
     async def test_connect_accepts_valid_room_member(self):
         communicator = WebsocketCommunicator(
             _TEST_APP,
@@ -93,6 +121,22 @@ class RoomConsumerConnectTests(TransactionTestCase):
         )
         connected, _ = await communicator.connect()
         self.assertTrue(connected)
+        await communicator.disconnect()
+
+    async def test_connect_adds_socket_to_room_group(self):
+        communicator = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        connected, _ = await communicator.connect()
+
+        self.assertTrue(connected)
+        self.assertEqual(
+            len(self._group_members(_room_group_name(self.room.join_code))),
+            1,
+        )
+
         await communicator.disconnect()
 
     async def test_connect_rejects_unknown_room(self):
@@ -106,19 +150,7 @@ class RoomConsumerConnectTests(TransactionTestCase):
         self.assertEqual(code, 4004)
 
     async def test_connect_rejects_non_member_session(self):
-        # Create a second client (different session) that has NOT joined the room.
-        other_client = self.client_class()
-        # Force a session for the other client by hitting any view.
-        other_client.get("/rooms/ZZZZ0000/")  # 404 is fine — just needs a session
-        other_session_key = other_client.session.session_key
-
-        # other_session_key may be None if no session was created yet.  Use an
-        # invented key directly if needed.
-        if not other_session_key:
-            from django.contrib.sessions.backends.db import SessionStore
-            s = SessionStore()
-            s.save()
-            other_session_key = s.session_key
+        other_session_key = await _create_session_key()
 
         communicator = WebsocketCommunicator(
             _TEST_APP,
@@ -149,6 +181,53 @@ class RoomConsumerConnectTests(TransactionTestCase):
         connected, _ = await communicator.connect()
         self.assertTrue(connected)
         await communicator.disconnect()
+
+    async def test_multiple_room_members_share_the_same_group(self):
+        second_session_key = await _create_room_member(self.room.id, "Bob")
+
+        first = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        second = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(second_session_key),
+        )
+
+        first_connected, _ = await first.connect()
+        second_connected, _ = await second.connect()
+
+        self.assertTrue(first_connected)
+        self.assertTrue(second_connected)
+        self.assertEqual(
+            len(self._group_members(_room_group_name(self.room.join_code))),
+            2,
+        )
+
+        await first.disconnect()
+        await second.disconnect()
+
+    async def test_disconnect_removes_socket_from_room_group(self):
+        communicator = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        connected, _ = await communicator.connect()
+        self.assertTrue(connected)
+        self.assertEqual(
+            len(self._group_members(_room_group_name(self.room.join_code))),
+            1,
+        )
+
+        await communicator.disconnect()
+
+        self.assertEqual(
+            self._group_members(_room_group_name(self.room.join_code)),
+            {},
+        )
 
     async def test_disconnect_does_not_raise_when_connect_was_rejected(self):
         # Rejected connections must not cause errors in disconnect.
