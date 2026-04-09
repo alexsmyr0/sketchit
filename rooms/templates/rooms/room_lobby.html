@@ -1,53 +1,11 @@
+{% load static %}
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sketchit Room {{ room.join_code }}</title>
-    <style>
-        body {
-            margin: 0;
-            min-height: 100vh;
-            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
-            background: #0b1838;
-            color: #ffffff;
-            display: grid;
-            place-items: center;
-            padding: 24px;
-        }
-
-        .card {
-            width: min(640px, 100%);
-            background: rgba(255, 255, 255, 0.09);
-            border: 1px solid rgba(255, 255, 255, 0.18);
-            border-radius: 14px;
-            padding: 22px;
-        }
-
-        h1 {
-            margin: 0 0 12px;
-        }
-
-        .meta {
-            color: #c6d4f4;
-            margin: 6px 0;
-            font-size: 0.95rem;
-        }
-
-        .participants {
-            margin: 18px 0 0;
-            padding: 0;
-            list-style: none;
-            border-top: 1px solid rgba(255, 255, 255, 0.2);
-        }
-
-        .participants li {
-            padding: 10px 0;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.16);
-            color: #e8efff;
-            font-size: 0.95rem;
-        }
-    </style>
+    <link rel="stylesheet" href="{% static 'rooms/room_lobby.css' %}">
 </head>
 <body>
     <main class="card">

@@ -1,0 +1,224 @@
+:root {
+    --overlay: rgba(10, 20, 50, 0.7);
+    --card-bg: #ffffff;
+    --play: #2fa856;
+    --create: #2b78e4;
+    --join: #3f8cf5;
+    --text: #1b2a40;
+    --muted: #617084;
+    --danger: #cf2f45;
+    --field-border: #c8d2e1;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background-color: #d8e5ff;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220' viewBox='0 0 220 220'%3E%3Crect width='220' height='220' fill='%23d8e5ff'/%3E%3Cg fill='none' stroke='%238ca6d3' stroke-width='2' opacity='0.45' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 34c8-9 20-9 28 0c6 8 6 16 0 24c-8 9-20 9-28 0c-6-8-6-16 0-24z'/%3E%3Cpath d='M74 32c11 10 23 10 34 0'/%3E%3Cpath d='M140 24l8 10l12-8'/%3E%3Cpath d='M30 106c11-11 26-11 37 0'/%3E%3Cpath d='M86 90c8 6 11 15 10 24'/%3E%3Cpath d='M158 100c8-6 15-6 23 0'/%3E%3Cpath d='M22 162c9-8 19-8 28 0'/%3E%3Cpath d='M104 170c10 8 21 8 31 0'/%3E%3Cpath d='M152 148c8-8 17-8 25 0'/%3E%3Ccircle cx='125' cy='28' r='5'/%3E%3Ccircle cx='52' cy='130' r='4'/%3E%3Ccircle cx='192' cy='122' r='4'/%3E%3C/g%3E%3C/svg%3E");
+    background-size: 220px 220px;
+    background-repeat: repeat;
+    position: relative;
+}
+
+body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    background: var(--overlay);
+    pointer-events: none;
+}
+
+.entry-card {
+    width: min(560px, 100%);
+    background: var(--card-bg);
+    border-radius: 16px;
+    padding: 24px;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.28);
+    position: relative;
+    z-index: 1;
+}
+
+.logo {
+    margin: 0;
+    text-align: center;
+    font-size: clamp(2.2rem, 8vw, 3rem);
+    letter-spacing: 0.08em;
+    text-transform: lowercase;
+    line-height: 1;
+}
+
+.logo span {
+    display: inline-block;
+    margin-right: 1px;
+}
+
+.subtitle {
+    margin: 10px 0 20px;
+    color: var(--muted);
+    text-align: center;
+    font-size: 0.98rem;
+}
+
+.field {
+    margin-bottom: 10px;
+}
+
+.field label {
+    display: block;
+    margin-bottom: 6px;
+    color: var(--text);
+    font-weight: 600;
+    font-size: 0.94rem;
+}
+
+.field input {
+    width: 100%;
+    border: 1px solid var(--field-border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 0.95rem;
+    background: #fff;
+}
+
+.field input:focus {
+    outline: 2px solid #8cb7ff;
+    border-color: #8cb7ff;
+}
+
+.button-row {
+    margin-top: 8px;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.action-button {
+    flex: 1 1 180px;
+    border: 0;
+    border-radius: 10px;
+    color: #fff;
+    font-weight: 600;
+    font-size: 0.96rem;
+    padding: 11px 14px;
+    cursor: pointer;
+    transition: transform 120ms ease, filter 120ms ease;
+}
+
+.action-button:hover {
+    transform: scale(1.02);
+    filter: brightness(1.03);
+}
+
+.action-button:disabled {
+    opacity: 0.65;
+    cursor: wait;
+    transform: none;
+}
+
+#play-button {
+    background: var(--play);
+}
+
+#create-button {
+    background: var(--create);
+}
+
+.message {
+    margin: 12px 0 0;
+    font-size: 0.94rem;
+}
+
+.message[hidden] {
+    display: none;
+}
+
+.message.error {
+    color: var(--danger);
+}
+
+.message.status {
+    color: #1f5cb0;
+}
+
+.public-rooms {
+    margin-top: 18px;
+    border-top: 1px solid #e9eef6;
+    padding-top: 14px;
+}
+
+.public-rooms h2 {
+    margin: 0 0 10px;
+    color: var(--text);
+    font-size: 1.08rem;
+}
+
+.room-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.room-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    border-bottom: 1px solid #edf1f8;
+    padding: 10px 0;
+}
+
+.room-name {
+    margin: 0;
+    color: var(--text);
+    font-size: 0.95rem;
+    font-weight: 600;
+}
+
+.room-meta {
+    margin: 3px 0 0;
+    color: var(--muted);
+    font-size: 0.86rem;
+}
+
+.join-public-button {
+    border: 0;
+    border-radius: 8px;
+    background: var(--join);
+    color: #fff;
+    font-size: 0.9rem;
+    font-weight: 600;
+    padding: 8px 12px;
+    cursor: pointer;
+    transition: transform 120ms ease, filter 120ms ease;
+}
+
+.join-public-button:hover {
+    transform: scale(1.02);
+    filter: brightness(1.03);
+}
+
+.join-public-button:disabled {
+    opacity: 0.65;
+    cursor: wait;
+    transform: none;
+}
+
+.empty-public {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.92rem;
+}
+
+@media (max-width: 640px) {
+    .entry-card {
+        padding: 18px;
+    }
+}

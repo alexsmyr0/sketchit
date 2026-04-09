@@ -51,13 +51,13 @@ class RoomEntryPageTests(TestCase):
         self.assertNotContains(response, "Hidden Room")
         self.assertNotContains(response, "PRIVLIST")
 
-    def test_room_entry_page_contains_client_redirect_and_endpoint_hooks(self):
+    def test_room_entry_page_uses_static_assets_for_styles_and_behavior(self):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "window.location.assign(payload.room_url);")
-        self.assertContains(response, '"/rooms/create/"')
-        self.assertContains(response, "encodeURIComponent(joinCode)")
+        self.assertContains(response, 'href="/static/rooms/room_entry.css"')
+        self.assertContains(response, 'src="/static/rooms/room_entry.js"')
+        self.assertNotContains(response, "window.location.assign(payload.room_url);")
 
     def test_room_entry_page_primes_csrf_for_create_room_submission(self):
         client = self.client_class(enforce_csrf_checks=True)
@@ -475,6 +475,7 @@ class RoomLobbyStateViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTemplateUsed(response, "rooms/room_lobby.html")
+        self.assertContains(response, 'href="/static/rooms/room_lobby.css"')
         self.assertContains(response, self.room.name)
         self.assertContains(response, self.room.join_code)
         self.assertContains(response, self.member_player.display_name)
