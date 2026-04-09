@@ -4,6 +4,7 @@ import string
 
 from django import forms
 from django.db import transaction
+from django.db.models import Count
 from django.db.utils import IntegrityError
 from django.http import HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import render
@@ -89,6 +90,19 @@ def _serialize_participant(player):
         "display_name": player.display_name,
         "connection_status": player.connection_status,
         "participation_status": player.participation_status,
+    }
+
+
+def _serialize_public_room(room):
+    return {
+        "name": room.name,
+        "join_code": room.join_code,
+        "visibility": room.visibility,
+        "status": room.status,
+        "participant_count": room.participant_count,
+        "max_players": room.max_players,
+        "host": _serialize_host(room.host),
+        "room_url": f"/rooms/{room.join_code}/",
     }
 
 
@@ -253,6 +267,25 @@ def room_lobby_state(request, join_code):
         )
 
     return _build_room_lobby_state_response(room)
+
+
+def public_room_directory(request):
+    if request.method != "GET":
+        return HttpResponseNotAllowed(["GET"])
+
+    public_rooms = (
+        Room.objects.select_related("host")
+        .annotate(participant_count=Count("participants"))
+        .filter(visibility=Room.Visibility.PUBLIC)
+        .order_by("-created_at", "-id")
+    )
+
+    return JsonResponse(
+        {
+            "rooms": [_serialize_public_room(room) for room in public_rooms],
+        },
+        status=200,
+    )
 
 
 def start_game(request, join_code):
