@@ -495,6 +495,127 @@ class RoomLobbyStateViewTests(TestCase):
         self.assertEqual(response.status_code, 405)
 
 
+class PublicRoomDirectoryViewTests(TestCase):
+    url = "/rooms/public/"
+
+    def test_public_room_directory_returns_only_public_rooms(self):
+        public_room_lobby = Room.objects.create(
+            name="Public Lobby",
+            join_code="PUBROOM1",
+            visibility=Room.Visibility.PUBLIC,
+            status=Room.Status.LOBBY,
+        )
+        public_room_in_progress = Room.objects.create(
+            name="Public Live",
+            join_code="PUBROOM2",
+            visibility=Room.Visibility.PUBLIC,
+            status=Room.Status.IN_PROGRESS,
+        )
+        private_room_lobby = Room.objects.create(
+            name="Private Lobby",
+            join_code="PRIV0001",
+            visibility=Room.Visibility.PRIVATE,
+            status=Room.Status.LOBBY,
+        )
+        private_room_in_progress = Room.objects.create(
+            name="Private Live",
+            join_code="PRIV0002",
+            visibility=Room.Visibility.PRIVATE,
+            status=Room.Status.IN_PROGRESS,
+        )
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        returned_join_codes = {
+            room_payload["join_code"] for room_payload in response.json()["rooms"]
+        }
+        self.assertSetEqual(
+            returned_join_codes,
+            {public_room_lobby.join_code, public_room_in_progress.join_code},
+        )
+        self.assertNotIn(private_room_lobby.join_code, returned_join_codes)
+        self.assertNotIn(private_room_in_progress.join_code, returned_join_codes)
+
+    def test_public_room_directory_includes_public_rooms_even_when_in_progress(self):
+        Room.objects.create(
+            name="Public Live",
+            join_code="PUBLIVE1",
+            visibility=Room.Visibility.PUBLIC,
+            status=Room.Status.IN_PROGRESS,
+        )
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        rooms_by_code = {
+            room_payload["join_code"]: room_payload for room_payload in response.json()["rooms"]
+        }
+        self.assertEqual(
+            rooms_by_code["PUBLIVE1"]["status"],
+            Room.Status.IN_PROGRESS,
+        )
+
+    def test_public_room_directory_returns_room_card_metadata(self):
+        room = Room.objects.create(
+            name="Sketch Squad",
+            join_code="PUBMETA1",
+            visibility=Room.Visibility.PUBLIC,
+            status=Room.Status.LOBBY,
+            max_players=6,
+        )
+
+        host_session = self.client.session
+        host_session.save()
+        host = Player.objects.create(
+            room=room,
+            session_key=host_session.session_key,
+            display_name="Host Alex",
+            session_expires_at=host_session.get_expiry_date(),
+        )
+        Player.objects.create(
+            room=room,
+            session_key="member-session",
+            display_name="Jamie",
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        room.host = host
+        room.save(update_fields=["host"])
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        rooms_by_code = {
+            room_payload["join_code"]: room_payload for room_payload in response.json()["rooms"]
+        }
+        self.assertIn("PUBMETA1", rooms_by_code)
+        self.assertEqual(
+            rooms_by_code["PUBMETA1"],
+            {
+                "name": room.name,
+                "join_code": room.join_code,
+                "visibility": Room.Visibility.PUBLIC,
+                "status": Room.Status.LOBBY,
+                "participant_count": 2,
+                "max_players": room.max_players,
+                "host": {
+                    "id": host.id,
+                    "display_name": host.display_name,
+                },
+                "room_url": f"/rooms/{room.join_code}/",
+            },
+        )
+
+    def test_public_room_directory_rejects_non_get_requests(self):
+        response = self.client.post(
+            self.url,
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 405)
+
+
 class StartGameViewTests(TestCase):
     def _ensure_session_key(self, client):
         session = client.session

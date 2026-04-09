@@ -18,3 +18,7 @@
 
 - Added server-side round-resolution logic.
 - Added drawer rotation.
+
+## Apr 9
+
+- Added public room directory API.
