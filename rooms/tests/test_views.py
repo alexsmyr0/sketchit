@@ -19,15 +19,44 @@ class RoomEntryPageTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTemplateUsed(response, "rooms/room_entry.html")
-        self.assertContains(response, '<form id="join-form"', html=False)
-        self.assertContains(response, '<form id="create-form"', html=False)
+        self.assertContains(response, '<form id="entry-form"', html=False)
+        self.assertContains(response, "Create Private Room")
+        self.assertContains(response, "Public Rooms")
         self.assertContains(
             response,
             '<input type="hidden" name="csrfmiddlewaretoken"',
-            count=2,
+            count=1,
             html=False,
         )
         self.assertIn("csrftoken", response.cookies)
+
+    def test_room_entry_page_renders_only_public_rooms(self):
+        Room.objects.create(
+            name="Public Sketchers",
+            join_code="PUBLIST1",
+            visibility=Room.Visibility.PUBLIC,
+        )
+        Room.objects.create(
+            name="Hidden Room",
+            join_code="PRIVLIST",
+            visibility=Room.Visibility.PRIVATE,
+        )
+
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Public Sketchers")
+        self.assertContains(response, "PUBLIST1")
+        self.assertNotContains(response, "Hidden Room")
+        self.assertNotContains(response, "PRIVLIST")
+
+    def test_room_entry_page_contains_client_redirect_and_endpoint_hooks(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "window.location.assign(payload.room_url);")
+        self.assertContains(response, '"/rooms/create/"')
+        self.assertContains(response, "encodeURIComponent(joinCode)")
 
     def test_room_entry_page_primes_csrf_for_create_room_submission(self):
         client = self.client_class(enforce_csrf_checks=True)
@@ -439,6 +468,15 @@ class RoomLobbyStateViewTests(TestCase):
                 "participation_status": self.member_player.participation_status,
             },
         )
+
+    def test_member_can_load_room_page_template_for_browser_navigation(self):
+        response = self.member_client.get(self.url, HTTP_ACCEPT="text/html")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "rooms/room_lobby.html")
+        self.assertContains(response, self.room.name)
+        self.assertContains(response, self.room.join_code)
+        self.assertContains(response, self.member_player.display_name)
 
     def test_non_member_session_cannot_load_room_lobby_state(self):
         outsider_client = self.client_class()

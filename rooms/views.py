@@ -123,6 +123,12 @@ def _build_room_lobby_state_response(room):
     )
 
 
+def _request_prefers_html(request):
+    accept_header = request.headers.get("Accept", "")
+    normalized_accept = accept_header.lower()
+    return "text/html" in normalized_accept and "application/json" not in normalized_accept
+
+
 def generate_join_code(length=8):
     # Join codes are short and URL-friendly rather than secret passwords.
     alphabet = string.ascii_uppercase + string.digits
@@ -260,10 +266,24 @@ def room_lobby_state(request, join_code):
         return JsonResponse({"detail": "Room not found."}, status=404)
 
     session_key = _get_or_create_session_key(request)
-    if not room.participants.filter(session_key=session_key).exists():
+    participant = room.participants.filter(session_key=session_key).first()
+    if participant is None:
         return JsonResponse(
             {"detail": "This guest session is not a participant in this room."},
             status=403,
+        )
+
+    if _request_prefers_html(request):
+        participants = room.participants.order_by("created_at", "id")
+        return render(
+            request,
+            "rooms/room_lobby.html",
+            {
+                "room": room,
+                "host": room.host,
+                "participant": participant,
+                "participants": participants,
+            },
         )
 
     return _build_room_lobby_state_response(room)
@@ -349,4 +369,17 @@ def start_game(request, join_code):
 
 @ensure_csrf_cookie
 def room_entry_page(request):
-    return render(request, "rooms/room_entry.html")
+    public_rooms = (
+        Room.objects.select_related("host")
+        .annotate(participant_count=Count("participants"))
+        .filter(visibility=Room.Visibility.PUBLIC)
+        .order_by("-created_at", "-id")
+    )
+
+    return render(
+        request,
+        "rooms/room_entry.html",
+        {
+            "public_rooms": [_serialize_public_room(room) for room in public_rooms],
+        },
+    )

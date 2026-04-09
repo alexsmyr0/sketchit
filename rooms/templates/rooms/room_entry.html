@@ -3,162 +3,507 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SketchIt - Join or Create Room</title>
+    <title>Sketchit - Entry</title>
     <style>
-        body { font-family: sans-serif; max-width: 600px; margin: 2rem auto; padding: 0 1rem; }
-        section { border: 1px solid #ccc; padding: 1.5rem; margin-bottom: 2rem; border-radius: 8px; }
-        .form-group { margin-bottom: 1rem; }
-        label { display: block; margin-bottom: 0.25rem; font-weight: bold; }
-        input, select { width: 100%; padding: 0.5rem; box-sizing: border-box; }
-        button { padding: 0.5rem 1rem; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; }
-        button:hover { background: #0056b3; }
-        .error { color: red; margin-top: 1rem; }
-        .success-panel { background: #eef9f1; border: 1px solid #7ac08a; padding: 1rem 1.25rem; margin-bottom: 2rem; border-radius: 8px; }
-        .success-panel[hidden] { display: none; }
-        .success-panel h2 { margin-top: 0; }
-        .success-code { font-family: monospace; font-size: 1.1rem; font-weight: bold; }
+        :root {
+            --overlay: rgba(10, 20, 50, 0.7);
+            --card-bg: #ffffff;
+            --play: #2fa856;
+            --create: #2b78e4;
+            --join: #3f8cf5;
+            --text: #1b2a40;
+            --muted: #617084;
+            --danger: #cf2f45;
+            --field-border: #c8d2e1;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            display: grid;
+            place-items: center;
+            padding: 24px;
+            background-color: #d8e5ff;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220' viewBox='0 0 220 220'%3E%3Crect width='220' height='220' fill='%23d8e5ff'/%3E%3Cg fill='none' stroke='%238ca6d3' stroke-width='2' opacity='0.45' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 34c8-9 20-9 28 0c6 8 6 16 0 24c-8 9-20 9-28 0c-6-8-6-16 0-24z'/%3E%3Cpath d='M74 32c11 10 23 10 34 0'/%3E%3Cpath d='M140 24l8 10l12-8'/%3E%3Cpath d='M30 106c11-11 26-11 37 0'/%3E%3Cpath d='M86 90c8 6 11 15 10 24'/%3E%3Cpath d='M158 100c8-6 15-6 23 0'/%3E%3Cpath d='M22 162c9-8 19-8 28 0'/%3E%3Cpath d='M104 170c10 8 21 8 31 0'/%3E%3Cpath d='M152 148c8-8 17-8 25 0'/%3E%3Ccircle cx='125' cy='28' r='5'/%3E%3Ccircle cx='52' cy='130' r='4'/%3E%3Ccircle cx='192' cy='122' r='4'/%3E%3C/g%3E%3C/svg%3E");
+            background-size: 220px 220px;
+            background-repeat: repeat;
+            position: relative;
+        }
+
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            background: var(--overlay);
+            pointer-events: none;
+        }
+
+        .entry-card {
+            width: min(560px, 100%);
+            background: var(--card-bg);
+            border-radius: 16px;
+            padding: 24px;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.28);
+            position: relative;
+            z-index: 1;
+        }
+
+        .logo {
+            margin: 0;
+            text-align: center;
+            font-size: clamp(2.2rem, 8vw, 3rem);
+            letter-spacing: 0.08em;
+            text-transform: lowercase;
+            line-height: 1;
+        }
+
+        .logo span {
+            display: inline-block;
+            margin-right: 1px;
+        }
+
+        .subtitle {
+            margin: 10px 0 20px;
+            color: var(--muted);
+            text-align: center;
+            font-size: 0.98rem;
+        }
+
+        .field {
+            margin-bottom: 10px;
+        }
+
+        .field label {
+            display: block;
+            margin-bottom: 6px;
+            color: var(--text);
+            font-weight: 600;
+            font-size: 0.94rem;
+        }
+
+        .field input,
+        .field select {
+            width: 100%;
+            border: 1px solid var(--field-border);
+            border-radius: 10px;
+            padding: 10px 12px;
+            font-size: 0.95rem;
+            background: #fff;
+        }
+
+        .field input:focus,
+        .field select:focus {
+            outline: 2px solid #8cb7ff;
+            border-color: #8cb7ff;
+        }
+
+        .button-row {
+            margin-top: 8px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .action-button {
+            flex: 1 1 180px;
+            border: 0;
+            border-radius: 10px;
+            color: #fff;
+            font-weight: 600;
+            font-size: 0.96rem;
+            padding: 11px 14px;
+            cursor: pointer;
+            transition: transform 120ms ease, filter 120ms ease;
+        }
+
+        .action-button:hover {
+            transform: scale(1.02);
+            filter: brightness(1.03);
+        }
+
+        .action-button:disabled {
+            opacity: 0.65;
+            cursor: wait;
+            transform: none;
+        }
+
+        #play-button {
+            background: var(--play);
+        }
+
+        #create-button {
+            background: var(--create);
+        }
+
+        .message {
+            margin: 12px 0 0;
+            font-size: 0.94rem;
+        }
+
+        .message[hidden] {
+            display: none;
+        }
+
+        .message.error {
+            color: var(--danger);
+        }
+
+        .message.status {
+            color: #1f5cb0;
+        }
+
+        .public-rooms {
+            margin-top: 18px;
+            border-top: 1px solid #e9eef6;
+            padding-top: 14px;
+        }
+
+        .public-rooms h2 {
+            margin: 0 0 10px;
+            color: var(--text);
+            font-size: 1.08rem;
+        }
+
+        .room-list {
+            margin: 0;
+            padding: 0;
+            list-style: none;
+        }
+
+        .room-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            border-bottom: 1px solid #edf1f8;
+            padding: 10px 0;
+        }
+
+        .room-name {
+            margin: 0;
+            color: var(--text);
+            font-size: 0.95rem;
+            font-weight: 600;
+        }
+
+        .room-meta {
+            margin: 3px 0 0;
+            color: var(--muted);
+            font-size: 0.86rem;
+        }
+
+        .join-public-button {
+            border: 0;
+            border-radius: 8px;
+            background: var(--join);
+            color: #fff;
+            font-size: 0.9rem;
+            font-weight: 600;
+            padding: 8px 12px;
+            cursor: pointer;
+            transition: transform 120ms ease, filter 120ms ease;
+        }
+
+        .join-public-button:hover {
+            transform: scale(1.02);
+            filter: brightness(1.03);
+        }
+
+        .join-public-button:disabled {
+            opacity: 0.65;
+            cursor: wait;
+            transform: none;
+        }
+
+        .empty-public {
+            margin: 0;
+            color: var(--muted);
+            font-size: 0.92rem;
+        }
+
+        @media (max-width: 640px) {
+            .entry-card {
+                padding: 18px;
+            }
+        }
     </style>
 </head>
 <body>
-    <h1>Welcome to SketchIt</h1>
+    <main class="entry-card">
+        <h1 class="logo" aria-label="sketchit">
+            <span style="color:#ff595e;">s</span><span style="color:#ffca3a;">k</span><span style="color:#8ac926;">e</span><span style="color:#1982c4;">t</span><span style="color:#6a4c93;">c</span><span style="color:#ff924c;">h</span><span style="color:#52b788;">i</span><span style="color:#4cc9f0;">t</span>
+        </h1>
+        <p class="subtitle">Draw, guess, and play together.</p>
 
-    <section id="room-success" class="success-panel" hidden>
-        <h2 id="success-title">Room ready</h2>
-        <p id="success-message"></p>
-        <p>Room code: <span id="success-join-code" class="success-code"></span></p>
-    </section>
-
-    <section>
-        <h2>Join a Room</h2>
-        <form id="join-form" method="post">
+        <form id="entry-form" method="post" novalidate>
             {% csrf_token %}
-            <div class="form-group">
-                <label for="join_code">Room Code (e.g. ABC12345)</label>
-                <input type="text" id="join_code" required>
+            <div class="field">
+                <label for="display_name">Name</label>
+                <input id="display_name" type="text" maxlength="24" autocomplete="nickname" required>
             </div>
-            <div class="form-group">
-                <label for="join_display_name">Your Nickname</label>
-                <input type="text" id="join_display_name" required maxlength="24">
-            </div>
-            <button type="submit">Join Room</button>
-            <div id="join-error" class="error"></div>
-        </form>
-    </section>
 
-    <section>
-        <h2>Create a Room</h2>
-        <form id="create-form" method="post">
-            {% csrf_token %}
-            <div class="form-group">
-                <label for="room_name">Room Name</label>
-                <input type="text" id="room_name" required maxlength="255">
-            </div>
-            <div class="form-group">
-                <label for="create_display_name">Your Nickname</label>
-                <input type="text" id="create_display_name" required maxlength="24">
-            </div>
-            <div class="form-group">
-                <label for="visibility">Visibility</label>
-                <select id="visibility" required>
-                    <option value="private">Private</option>
-                    <option value="public">Public</option>
+            <div class="field">
+                <label for="language">Language</label>
+                <select id="language">
+                    <option value="English" selected>English</option>
+                    <option value="Spanish">Spanish</option>
+                    <option value="French">French</option>
+                    <option value="German">German</option>
+                    <option value="Greek">Greek</option>
                 </select>
             </div>
-            <button type="submit">Create Room</button>
-            <div id="create-error" class="error"></div>
+
+            <div class="field">
+                <label for="room_code">Room Code (optional)</label>
+                <input id="room_code" type="text" maxlength="32" placeholder="Example: ABC12345">
+            </div>
+
+            <div class="field">
+                <label for="room_name">Private Room Name (optional)</label>
+                <input id="room_name" type="text" maxlength="255" placeholder="Defaults to your name's room">
+            </div>
+
+            <div class="button-row">
+                <button id="play-button" class="action-button" type="submit">Play</button>
+                <button id="create-button" class="action-button" type="button">Create Private Room</button>
+            </div>
+
+            <p id="entry-error" class="message error" hidden></p>
+            <p id="entry-status" class="message status" hidden></p>
         </form>
-    </section>
+
+        <section class="public-rooms">
+            <h2>Public Rooms</h2>
+            {% if public_rooms %}
+                <ul class="room-list" id="public-room-list">
+                    {% for room in public_rooms %}
+                        <li class="room-item">
+                            <div>
+                                <p class="room-name">{{ room.name }}</p>
+                                <p class="room-meta">
+                                    Code {{ room.join_code }} - {{ room.participant_count }}/{{ room.max_players }} players
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                class="join-public-button"
+                                data-join-code="{{ room.join_code }}"
+                            >
+                                Join
+                            </button>
+                        </li>
+                    {% endfor %}
+                </ul>
+            {% else %}
+                <p class="empty-public">No public rooms available right now.</p>
+            {% endif %}
+        </section>
+    </main>
 
     <script>
         function getCsrfToken() {
-            const csrfInput = document.querySelector('[name="csrfmiddlewaretoken"]');
-            return csrfInput ? csrfInput.value : '';
+            const tokenInput = document.querySelector('[name="csrfmiddlewaretoken"]');
+            return tokenInput ? tokenInput.value : "";
         }
 
-        function buildErrorMessage(data) {
-            if (data.detail) {
+        function parseErrorMessage(data) {
+            if (data && typeof data.detail === "string") {
                 return data.detail;
             }
-
-            if (!data.errors) {
-                return 'An error occurred.';
+            if (!data || typeof data.errors !== "object") {
+                return "Something went wrong. Please try again.";
             }
-
             return Object.entries(data.errors)
-                .map(([fieldName, messages]) => `${fieldName}: ${messages.join(' ')}`)
-                .join(' ');
+                .map(([fieldName, messages]) => {
+                    if (Array.isArray(messages)) {
+                        return `${fieldName}: ${messages.join(" ")}`;
+                    }
+                    return `${fieldName}: ${String(messages)}`;
+                })
+                .join(" ");
         }
 
-        function showSuccessMessage(actionLabel, joinCode) {
-            const successPanel = document.getElementById('room-success');
-            document.getElementById('success-title').textContent = actionLabel;
-            document.getElementById('success-message').textContent =
-                'The room page is not implemented yet, but your room session is ready.';
-            document.getElementById('success-join-code').textContent = joinCode;
-            successPanel.hidden = false;
-        }
+        async function postJson(url, payload) {
+            const response = await fetch(url, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-CSRFToken": getCsrfToken(),
+                },
+                body: JSON.stringify(payload),
+            });
 
-        async function submitJsonRequest(url, payload, errorElementId, successLabel) {
-            const errorElement = document.getElementById(errorElementId);
-            const successPanel = document.getElementById('room-success');
-            errorElement.textContent = '';
-            successPanel.hidden = true;
-            
+            let data = {};
             try {
-                const response = await fetch(url, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-CSRFToken': getCsrfToken()
-                    },
-                    body: JSON.stringify(payload)
-                });
-
-                const data = await response.json();
-
-                if (response.ok) {
-                    showSuccessMessage(successLabel, data.join_code);
-                } else {
-                    errorElement.textContent = buildErrorMessage(data);
-                }
-            } catch (err) {
-                errorElement.textContent = 'Network error. Please try again.';
+                data = await response.json();
+            } catch (error) {
+                data = {};
             }
+
+            if (!response.ok) {
+                throw new Error(parseErrorMessage(data));
+            }
+
+            return data;
         }
 
-        document.getElementById('join-form').addEventListener('submit', function(e) {
-            e.preventDefault();
-            const joinCode = document.getElementById('join_code').value.trim();
-            const displayName = document.getElementById('join_display_name').value.trim();
-            
-            if (!joinCode || !displayName) return;
-            
-            submitJsonRequest(
-                `/rooms/${joinCode}/join/`,
-                { display_name: displayName },
-                'join-error',
-                'Room joined'
+        function redirectToRoom(payload) {
+            if (!payload || typeof payload.room_url !== "string") {
+                throw new Error("Room URL is missing in the server response.");
+            }
+            window.location.assign(payload.room_url);
+        }
+
+        const displayNameInput = document.getElementById("display_name");
+        const roomCodeInput = document.getElementById("room_code");
+        const roomNameInput = document.getElementById("room_name");
+        const playButton = document.getElementById("play-button");
+        const createButton = document.getElementById("create-button");
+        const publicJoinButtons = Array.from(document.querySelectorAll(".join-public-button"));
+        const entryError = document.getElementById("entry-error");
+        const entryStatus = document.getElementById("entry-status");
+
+        function showError(message) {
+            entryStatus.hidden = true;
+            entryError.textContent = message;
+            entryError.hidden = false;
+        }
+
+        function showStatus(message) {
+            entryError.hidden = true;
+            entryStatus.textContent = message;
+            entryStatus.hidden = false;
+        }
+
+        function setIdleState() {
+            playButton.disabled = false;
+            createButton.disabled = false;
+            publicJoinButtons.forEach((button) => {
+                button.disabled = false;
+            });
+        }
+
+        function setBusyState() {
+            playButton.disabled = true;
+            createButton.disabled = true;
+            publicJoinButtons.forEach((button) => {
+                button.disabled = true;
+            });
+        }
+
+        function readDisplayName() {
+            return displayNameInput.value.trim();
+        }
+
+        function buildPrivateRoomName(displayName) {
+            const typedName = roomNameInput.value.trim();
+            if (typedName) {
+                return typedName;
+            }
+            return `${displayName}'s Room`;
+        }
+
+        async function joinRoomByCode(joinCode, displayName) {
+            const responseData = await postJson(
+                `/rooms/${encodeURIComponent(joinCode)}/join/`,
+                { display_name: displayName }
             );
+            redirectToRoom(responseData);
+        }
+
+        async function createPrivateRoom(displayName) {
+            const responseData = await postJson(
+                "/rooms/create/",
+                {
+                    name: buildPrivateRoomName(displayName),
+                    visibility: "private",
+                    display_name: displayName,
+                }
+            );
+            redirectToRoom(responseData);
+        }
+
+        document.getElementById("entry-form").addEventListener("submit", async function (event) {
+            event.preventDefault();
+
+            const displayName = readDisplayName();
+            if (!displayName) {
+                showError("Please enter your name before joining.");
+                return;
+            }
+
+            setBusyState();
+            showStatus("Joining room...");
+
+            try {
+                const typedRoomCode = roomCodeInput.value.trim();
+                if (typedRoomCode) {
+                    await joinRoomByCode(typedRoomCode, displayName);
+                    return;
+                }
+
+                const firstPublicCode = publicJoinButtons.length > 0
+                    ? publicJoinButtons[0].dataset.joinCode
+                    : "";
+                if (firstPublicCode) {
+                    await joinRoomByCode(firstPublicCode, displayName);
+                    return;
+                }
+
+                await createPrivateRoom(displayName);
+            } catch (error) {
+                showError(error.message);
+                setIdleState();
+            }
         });
 
-        document.getElementById('create-form').addEventListener('submit', function(e) {
-            e.preventDefault();
-            const roomName = document.getElementById('room_name').value.trim();
-            const displayName = document.getElementById('create_display_name').value.trim();
-            const visibility = document.getElementById('visibility').value;
-            
-            if (!roomName || !displayName || !visibility) return;
-            
-            submitJsonRequest(
-                '/rooms/create/',
-                {
-                    name: roomName,
-                    display_name: displayName,
-                    visibility: visibility
-                },
-                'create-error',
-                'Room created'
-            );
+        createButton.addEventListener("click", async function () {
+            const displayName = readDisplayName();
+            if (!displayName) {
+                showError("Please enter your name before creating a room.");
+                return;
+            }
+
+            setBusyState();
+            showStatus("Creating private room...");
+
+            try {
+                await createPrivateRoom(displayName);
+            } catch (error) {
+                showError(error.message);
+                setIdleState();
+            }
+        });
+
+        publicJoinButtons.forEach((button) => {
+            button.addEventListener("click", async function () {
+                const displayName = readDisplayName();
+                if (!displayName) {
+                    showError("Please enter your name before joining a public room.");
+                    return;
+                }
+
+                const joinCode = button.dataset.joinCode;
+                if (!joinCode) {
+                    showError("This room cannot be joined right now.");
+                    return;
+                }
+
+                setBusyState();
+                showStatus("Joining public room...");
+
+                try {
+                    await joinRoomByCode(joinCode, displayName);
+                } catch (error) {
+                    showError(error.message);
+                    setIdleState();
+                }
+            });
         });
     </script>
 </body>
