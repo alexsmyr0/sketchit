@@ -41,8 +41,8 @@ The original coverage and source-ticket mapping remain canonical in:
 ## Summary Snapshot
 
 - Total tickets: `26`
-- Done: `4`
-- Partially Implemented: `4`
+- Done: `5`
+- Partially Implemented: `3`
 - Not Started: `18`
 
 ## Low-Blocking Claim Queue (Global)
@@ -88,7 +88,7 @@ Use this as the default claim order for the next wave of work:
 ### Track N
 
 - [x] **N-01** P0 - Redis Room Runtime Helper Baseline | Presence keys, canvas snapshot keys, and transient Redis TTL helpers. (Depends on: A-01) | Blocks: N-02; N-03; N-04; N-05
-- [-] **N-02** P1 - Room WebSocket Consumer & Session Authorization | Room socket routing, session membership checks, and group join/leave behavior. (Depends on: A-02; N-01) | Blocks: N-03; N-04; N-05; G-02; G-03; G-04
+- [x] **N-02** P1 - Room WebSocket Consumer & Session Authorization | Room socket routing, session membership checks, and group join/leave behavior. (Depends on: A-02; N-01) | Blocks: N-03; N-04; N-05; G-02; G-03; G-04
 - [ ] **N-03** P2 - Redis Round Runtime State | Active round runtime state for timers, drawer pools, guess state, cleanup keys, and role-specific round payload support. (Depends on: N-01; K-01; N-02) | Blocks: N-04; K-03; K-04; K-05; A-07; K-07; A-08
 - [ ] **N-04** P2 - Drawing Event Broadcast & Canvas Snapshot Sync | Drawer-only drawing events, canvas snapshot storage, and reconnect replay. (Depends on: N-02; N-03) | Blocks: G-04; G-05
 - [ ] **N-05** P2 - Guess Submission Pipeline Over Room Socket | Live `guess.submit` handling and server-broadcast `guess.result` events. (Depends on: N-02; K-03; K-01) | Blocks: K-05; K-06; G-03

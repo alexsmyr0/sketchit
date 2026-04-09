@@ -17,6 +17,7 @@ which WebsocketCommunicator omits by default).
 
 import json
 
+import fakeredis
 from asgiref.sync import async_to_sync
 from channels.auth import AuthMiddlewareStack
 from channels.db import database_sync_to_async
@@ -84,9 +85,19 @@ class RoomConsumerConnectTests(TransactionTestCase):
         self.channel_layer = get_channel_layer()
         async_to_sync(self.channel_layer.flush)()
 
+        from rooms import consumers as room_consumers
+        self.fake_redis = fakeredis.FakeRedis()
+        room_consumers._redis_client = self.fake_redis
+
         self.word_pack = WordPack.objects.create(name="Test Pack")
         test_word = Word.objects.create(text="rocket")
         WordPackEntry.objects.create(word_pack=self.word_pack, word=test_word)
+
+        # The Room model MVP default requires a 'Default Word Pack'
+        from words.models import Word, WordPack, WordPackEntry
+        wp = WordPack.objects.create(name="Default Word Pack")
+        w = Word.objects.create(text="apple")
+        WordPackEntry.objects.create(word_pack=wp, word=w)
 
         self.room = Room.objects.create(
             name="Test Room",
@@ -109,6 +120,8 @@ class RoomConsumerConnectTests(TransactionTestCase):
     def tearDown(self):
         async_to_sync(self.channel_layer.flush)()
         super().tearDown()
+        from rooms import consumers as room_consumers
+        room_consumers._redis_client = None
 
     def _group_members(self, group_name: str) -> dict[str, float]:
         return self.channel_layer.groups.get(group_name, {})
@@ -229,6 +242,38 @@ class RoomConsumerConnectTests(TransactionTestCase):
             {},
         )
 
+    async def test_presence_state_updates_on_connect_and_disconnect(self):
+        # Force initial state to disconnected
+        self.player.connection_status = Player.ConnectionStatus.DISCONNECTED
+        await database_sync_to_async(self.player.save)()
+
+        communicator = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        connected, _ = await communicator.connect()
+        self.assertTrue(connected)
+
+        # Check DB update
+        await database_sync_to_async(self.player.refresh_from_db)()
+        self.assertEqual(self.player.connection_status, Player.ConnectionStatus.CONNECTED)
+
+        # Check Redis update
+        from rooms import redis as room_redis
+        presence = room_redis.get_presence(self.fake_redis, self.room.join_code)
+        self.assertIn(self.session_key, presence)
+
+        await communicator.disconnect()
+
+        # Check DB disconnect update
+        await database_sync_to_async(self.player.refresh_from_db)()
+        self.assertEqual(self.player.connection_status, Player.ConnectionStatus.DISCONNECTED)
+
+        # Check Redis disconnect update
+        presence = room_redis.get_presence(self.fake_redis, self.room.join_code)
+        self.assertNotIn(self.session_key, presence)
+
     async def test_disconnect_does_not_raise_when_connect_was_rejected(self):
         # Rejected connections must not cause errors in disconnect.
         communicator = WebsocketCommunicator(
@@ -239,6 +284,23 @@ class RoomConsumerConnectTests(TransactionTestCase):
         connected, _ = await communicator.connect()
         self.assertFalse(connected)
         # disconnect() on an already-rejected communicator should be safe.
+        await communicator.disconnect()
+
+    async def test_receive_json_echoes_message(self):
+        communicator = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        connected, _ = await communicator.connect()
+        self.assertTrue(connected)
+
+        await communicator.send_json_to({"type": "echo", "message": "hello world"})
+        response = await communicator.receive_json_from()
+        
+        self.assertEqual(response["type"], "echo_reply")
+        self.assertEqual(response["message"], "Echo: hello world")
+        
         await communicator.disconnect()
 
 
