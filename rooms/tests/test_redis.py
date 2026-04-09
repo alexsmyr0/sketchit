@@ -42,6 +42,12 @@ class RoomRedisKeyTests(SimpleTestCase):
     def test_canvas_key_format(self):
         self.assertEqual(room_redis._canvas_key("MYROOM1"), "room:MYROOM1:canvas")
 
+    def test_presence_connections_key_format(self):
+        self.assertEqual(
+            room_redis._presence_connections_key("MYROOM1", SESSION_A),
+            f"room:MYROOM1:presence:{SESSION_A}:connections",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Presence tests
@@ -77,6 +83,27 @@ class AddPresenceTests(SimpleTestCase):
         self.assertEqual(client.scard(room_redis._presence_key("ROOM0001")), 1)
         self.assertEqual(client.scard(room_redis._presence_key("ROOM0002")), 1)
 
+    def test_add_presence_tracks_multiple_connections_for_same_session(self):
+        client = make_client()
+        room_redis.add_presence(
+            client,
+            JOIN_CODE,
+            SESSION_A,
+            connection_id="chan-1",
+        )
+        room_redis.add_presence(
+            client,
+            JOIN_CODE,
+            SESSION_A,
+            connection_id="chan-2",
+        )
+
+        self.assertEqual(room_redis.get_presence(client, JOIN_CODE), {SESSION_A})
+        self.assertEqual(
+            client.scard(room_redis._presence_connections_key(JOIN_CODE, SESSION_A)),
+            2,
+        )
+
 
 class RemovePresenceTests(SimpleTestCase):
     def test_remove_presence_removes_session_from_set(self):
@@ -98,6 +125,47 @@ class RemovePresenceTests(SimpleTestCase):
     def test_remove_presence_is_safe_when_key_does_not_exist(self):
         client = make_client()
         room_redis.remove_presence(client, "NOSUCHROOM", SESSION_A)
+
+    def test_remove_presence_with_connection_id_keeps_session_until_last_socket_leaves(self):
+        client = make_client()
+        room_redis.add_presence(
+            client,
+            JOIN_CODE,
+            SESSION_A,
+            connection_id="chan-1",
+        )
+        room_redis.add_presence(
+            client,
+            JOIN_CODE,
+            SESSION_A,
+            connection_id="chan-2",
+        )
+
+        room_redis.remove_presence(
+            client,
+            JOIN_CODE,
+            SESSION_A,
+            connection_id="chan-1",
+        )
+
+        self.assertTrue(room_redis.is_present(client, JOIN_CODE, SESSION_A))
+        self.assertEqual(
+            client.scard(room_redis._presence_connections_key(JOIN_CODE, SESSION_A)),
+            1,
+        )
+
+        room_redis.remove_presence(
+            client,
+            JOIN_CODE,
+            SESSION_A,
+            connection_id="chan-2",
+        )
+
+        self.assertFalse(room_redis.is_present(client, JOIN_CODE, SESSION_A))
+        self.assertEqual(
+            client.exists(room_redis._presence_connections_key(JOIN_CODE, SESSION_A)),
+            0,
+        )
 
 
 class GetPresenceTests(SimpleTestCase):
@@ -170,6 +238,22 @@ class ClearPresenceTests(SimpleTestCase):
 
         self.assertEqual(room_redis.get_presence(client, "ROOM0001"), set())
         self.assertIn(SESSION_B, room_redis.get_presence(client, "ROOM0002"))
+
+    def test_clear_presence_removes_per_session_connection_keys(self):
+        client = make_client()
+        room_redis.add_presence(
+            client,
+            JOIN_CODE,
+            SESSION_A,
+            connection_id="chan-1",
+        )
+
+        room_redis.clear_presence(client, JOIN_CODE)
+
+        self.assertEqual(
+            client.exists(room_redis._presence_connections_key(JOIN_CODE, SESSION_A)),
+            0,
+        )
 
 
 # ---------------------------------------------------------------------------

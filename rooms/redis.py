@@ -8,8 +8,12 @@ are trivially testable with fakeredis.
 
 Key layout
 ----------
-room:{join_code}:presence  Redis Set    Connected session keys for a room.
-room:{join_code}:canvas    Redis String Latest canvas snapshot bytes for a room.
+room:{join_code}:presence                               Redis Set
+    Connected session keys for a room.
+room:{join_code}:presence:{session_key}:connections     Redis Set
+    Active socket/channel IDs for one session in a room.
+room:{join_code}:canvas                                 Redis String
+    Latest canvas snapshot bytes for a room.
 
 Both keys carry a 24-hour TTL that is refreshed on every write.  This ensures
 orphaned keys are cleaned up automatically if the server never calls the
@@ -48,28 +52,60 @@ def _canvas_key(join_code: str) -> str:
     return f"room:{join_code}:canvas"
 
 
+def _presence_connections_key(join_code: str, session_key: str) -> str:
+    """Return the Redis key for active socket IDs of one room/session pair."""
+    return f"room:{join_code}:presence:{session_key}:connections"
+
+
 # ---------------------------------------------------------------------------
 # Presence API
 # ---------------------------------------------------------------------------
 
 
-def add_presence(client: "_redis.Redis", join_code: str, session_key: str) -> None:
+def add_presence(
+    client: "_redis.Redis",
+    join_code: str,
+    session_key: str,
+    *,
+    connection_id: str | None = None,
+) -> None:
     """Mark *session_key* as connected to the room identified by *join_code*.
 
     Creates the presence set if it doesn't exist and resets the TTL.
+    When *connection_id* is provided, it is also tracked so the session stays
+    present until its final socket disconnects.
     """
     key = _presence_key(join_code)
     client.sadd(key, session_key)
     client.expire(key, ROOM_KEY_TTL)
+    if connection_id is not None:
+        connections_key = _presence_connections_key(join_code, session_key)
+        client.sadd(connections_key, connection_id)
+        client.expire(connections_key, ROOM_KEY_TTL)
 
 
-def remove_presence(client: "_redis.Redis", join_code: str, session_key: str) -> None:
+def remove_presence(
+    client: "_redis.Redis",
+    join_code: str,
+    session_key: str,
+    *,
+    connection_id: str | None = None,
+) -> None:
     """Remove *session_key* from the room's connected-session set.
 
     Safe to call even if *session_key* is not in the set or the key doesn't
-    exist at all.
+    exist at all. When *connection_id* is provided, the session is only
+    removed from the room presence set after its final tracked socket leaves.
     """
-    client.srem(_presence_key(join_code), session_key)
+    if connection_id is None:
+        client.srem(_presence_key(join_code), session_key)
+        return
+
+    connections_key = _presence_connections_key(join_code, session_key)
+    client.srem(connections_key, connection_id)
+    if client.scard(connections_key) == 0:
+        client.delete(connections_key)
+        client.srem(_presence_key(join_code), session_key)
 
 
 def get_presence(client: "_redis.Redis", join_code: str) -> set[str]:
@@ -95,6 +131,10 @@ def clear_presence(client: "_redis.Redis", join_code: str) -> None:
     Intended for use when a room closes or is deleted.
     """
     client.delete(_presence_key(join_code))
+    pattern = _presence_connections_key(join_code, "*")
+    connection_keys = list(client.scan_iter(match=pattern))
+    if connection_keys:
+        client.delete(*connection_keys)
 
 
 # ---------------------------------------------------------------------------
