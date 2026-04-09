@@ -86,8 +86,7 @@
             font-size: 0.94rem;
         }
 
-        .field input,
-        .field select {
+        .field input {
             width: 100%;
             border: 1px solid var(--field-border);
             border-radius: 10px;
@@ -96,8 +95,7 @@
             background: #fff;
         }
 
-        .field input:focus,
-        .field select:focus {
+        .field input:focus {
             outline: 2px solid #8cb7ff;
             border-color: #8cb7ff;
         }
@@ -245,17 +243,6 @@
             <div class="field">
                 <label for="display_name">Name</label>
                 <input id="display_name" type="text" maxlength="24" autocomplete="nickname" required>
-            </div>
-
-            <div class="field">
-                <label for="language">Language</label>
-                <select id="language">
-                    <option value="English" selected>English</option>
-                    <option value="Spanish">Spanish</option>
-                    <option value="French">French</option>
-                    <option value="German">German</option>
-                    <option value="Greek">Greek</option>
-                </select>
             </div>
 
             <div class="field">

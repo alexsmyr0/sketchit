@@ -22,6 +22,7 @@ class RoomEntryPageTests(TestCase):
         self.assertContains(response, '<form id="entry-form"', html=False)
         self.assertContains(response, "Create Private Room")
         self.assertContains(response, "Public Rooms")
+        self.assertNotContains(response, "Language")
         self.assertContains(
             response,
             '<input type="hidden" name="csrfmiddlewaretoken"',
