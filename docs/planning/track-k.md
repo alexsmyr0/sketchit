@@ -15,7 +15,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### K-01: Game Bootstrap & Basic Guess Service Baseline
-**Source Ticket**: `T-04`  
 **Priority**: Critical  
 **Phase**: P0 Existing Baseline  
 **Depends On**: `A-01`, `A-02`  
@@ -37,7 +36,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### K-02: Public Room Directory API
-**Source Ticket**: `T-05`  
 **Priority**: Medium  
 **Phase**: P1 Realtime Lobby  
 **Depends On**: `A-02`  
@@ -59,7 +57,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### K-03: Round Timer & Early-Finish Coordinator
-**Source Ticket**: `T-13`  
 **Priority**: Critical  
 **Phase**: P2 Playable Round Loop  
 **Depends On**: `K-01`, `N-03`  
@@ -85,7 +82,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### K-04: Full Game Cycle Drawer Rotation & Word Uniqueness
-**Source Ticket**: `T-14`  
 **Priority**: Critical  
 **Phase**: P2 Playable Round Loop  
 **Depends On**: `K-01`, `N-03`, `K-03`  
@@ -109,7 +105,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### K-05: Time-Based Scoring & Multi-Guesser Round Resolution
-**Source Ticket**: `T-16`  
 **Priority**: Critical  
 **Phase**: P3 Full Game Rules  
 **Depends On**: `K-03`, `K-04`, `N-05`  
@@ -131,7 +126,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### K-06: Near-Match, Duplicate, And Correct-Once Guess Rules
-**Source Ticket**: `T-17`  
 **Priority**: High  
 **Phase**: P3 Full Game Rules  
 **Depends On**: `N-03`, `N-05`  
@@ -154,7 +148,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### K-07: Drawer Disconnect Grace & Turn Outcome Handling
-**Source Ticket**: `T-19`  
 **Priority**: Critical  
 **Phase**: P3 Full Game Rules  
 **Depends On**: `N-03`, `K-03`, `K-04`  

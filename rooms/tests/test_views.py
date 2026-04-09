@@ -912,3 +912,93 @@ class RoomsAdminRegistrationTests(SimpleTestCase):
         self.assertEqual(player_admin.raw_id_fields, ("room",))
         self.assertEqual(player_admin.readonly_fields, ("created_at", "updated_at"))
         self.assertEqual(player_admin.list_select_related, ("room",))
+
+
+class UpdateLobbySettingsTests(TestCase):
+    def _ensure_session_key(self, client):
+        session = client.session
+        session.save()
+        return session.session_key
+
+    def setUp(self):
+        self.room = Room.objects.create(
+            name="Friday Sketches",
+            join_code="ABC12345",
+            visibility=Room.Visibility.PUBLIC,
+            status=Room.Status.LOBBY,
+        )
+        self.url = f"/rooms/{self.room.join_code}/settings/"
+        
+        self.host_client = self.client_class()
+        host_session_key = self._ensure_session_key(self.host_client)
+        self.host_player = Player.objects.create(
+            room=self.room,
+            session_key=host_session_key,
+            display_name="Host Alex",
+            session_expires_at=self.host_client.session.get_expiry_date(),
+        )
+        self.room.host = self.host_player
+        self.room.save(update_fields=["host"])
+
+        self.member_client = self.client_class()
+        member_session_key = self._ensure_session_key(self.member_client)
+        self.member_player = Player.objects.create(
+            room=self.room,
+            session_key=member_session_key,
+            display_name="Jamie",
+            session_expires_at=self.member_client.session.get_expiry_date(),
+        )
+
+    def test_host_can_update_settings(self):
+        response = self.host_client.post(
+            self.url,
+            data=json.dumps({"name": "New Name", "visibility": Room.Visibility.PRIVATE}),
+            content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.name, "New Name")
+        self.assertEqual(self.room.visibility, Room.Visibility.PRIVATE)
+        self.assertEqual(response.json()["room"]["name"], "New Name")
+        self.assertEqual(response.json()["room"]["visibility"], Room.Visibility.PRIVATE)
+    
+    def test_member_cannot_update_settings(self):
+        response = self.member_client.post(
+            self.url,
+            data=json.dumps({"name": "New Name", "visibility": Room.Visibility.PRIVATE}),
+            content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 403)
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.name, "Friday Sketches")
+
+    def test_outsider_cannot_update_settings(self):
+        outsider_client = self.client_class()
+        self._ensure_session_key(outsider_client)
+        response = outsider_client.post(
+            self.url,
+            data=json.dumps({"name": "New Name", "visibility": Room.Visibility.PRIVATE}),
+            content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_settings_cannot_be_updated_in_progress(self):
+        self.room.status = Room.Status.IN_PROGRESS
+        self.room.save(update_fields=["status"])
+
+        response = self.host_client.post(
+            self.url,
+            data=json.dumps({"name": "New Name", "visibility": Room.Visibility.PRIVATE}),
+            content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 409)
+
+    def test_invalid_payload_fails(self):
+        response = self.host_client.post(
+            self.url,
+            data=json.dumps({"name": "", "visibility": "invalid"}),
+            content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("name", response.json()["errors"])
+        self.assertIn("visibility", response.json()["errors"])

@@ -24,6 +24,7 @@ from rooms.views import (
     room_entry_page,
     room_lobby_state,
     start_game,
+    update_lobby_settings,
 )
 
 urlpatterns = [
@@ -33,5 +34,6 @@ urlpatterns = [
     path("rooms/public/", public_room_directory, name="public-room-directory"),
     path("rooms/<str:join_code>/join/", join_room, name="join-room"),
     path("rooms/<str:join_code>/", room_lobby_state, name="room-lobby-state"),
+    path("rooms/<str:join_code>/settings/", update_lobby_settings, name="update-lobby-settings"),
     path("rooms/<str:join_code>/start-game/", start_game, name="start-game"),
 ]

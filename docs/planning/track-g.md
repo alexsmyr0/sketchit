@@ -15,7 +15,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### G-01: Entry Screen & Public Room Discovery UI
-**Source Ticket**: `T-21`  
 **Priority**: Medium  
 **Phase**: P1 Realtime Lobby  
 **Depends On**: `A-02`, `K-02`  
@@ -37,7 +36,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### G-02: Live Lobby Page Template & Room Client
-**Source Ticket**: `T-22`  
 **Priority**: Critical  
 **Phase**: P1 Realtime Lobby  
 **Depends On**: `A-03`, `N-02`, `A-06`, `G-01`  
@@ -61,7 +59,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### G-03: Gameplay Page Shell, HUD, And Guess UI
-**Source Ticket**: `T-23`  
 **Priority**: Critical  
 **Phase**: P2 Playable Round Loop  
 **Depends On**: `A-06`, `K-03`, `K-04`, `N-05`, `G-02`  
@@ -86,7 +83,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### G-04: Browser Drawing Surface & Room Socket Integration
-**Source Ticket**: `T-24`  
 **Priority**: Critical  
 **Phase**: P2 Playable Round Loop  
 **Depends On**: `N-04`, `G-02`  
@@ -110,7 +106,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### G-05: End-To-End Multiplayer Verification & Bug Sweep
-**Source Ticket**: `T-25`  
 **Priority**: Critical  
 **Phase**: P4 Hardening & QA  
 **Depends On**: `N-04`, `K-05`, `K-06`, `K-07`, `A-08`, `G-03`, `G-04`  
@@ -132,7 +127,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### G-06: Shared Context Refresh & Final MVP Hardening
-**Source Ticket**: `T-26`  
 **Priority**: Medium  
 **Phase**: P4 Hardening & QA  
 **Depends On**: `A-05`, `A-08`, `G-05`  
