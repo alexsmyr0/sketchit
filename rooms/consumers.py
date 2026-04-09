@@ -41,7 +41,13 @@ def get_redis_client() -> redis.Redis:
 
 
 @database_sync_to_async
-def _update_presence(player_id: int, join_code: str, session_key: str, connected: bool) -> None:
+def _update_presence(
+    player_id: int,
+    join_code: str,
+    session_key: str,
+    connection_id: str,
+    connected: bool,
+) -> None:
     now = timezone.now()
     client = get_redis_client()
     if connected:
@@ -49,13 +55,28 @@ def _update_presence(player_id: int, join_code: str, session_key: str, connected
             connection_status=Player.ConnectionStatus.CONNECTED,
             last_seen_at=now,
         )
-        room_redis.add_presence(client, join_code, session_key)
+        room_redis.add_presence(
+            client,
+            join_code,
+            session_key,
+            connection_id=connection_id,
+        )
     else:
+        room_redis.remove_presence(
+            client,
+            join_code,
+            session_key,
+            connection_id=connection_id,
+        )
+        connection_still_present = room_redis.is_present(client, join_code, session_key)
         Player.objects.filter(pk=player_id).update(
-            connection_status=Player.ConnectionStatus.DISCONNECTED,
+            connection_status=(
+                Player.ConnectionStatus.CONNECTED
+                if connection_still_present
+                else Player.ConnectionStatus.DISCONNECTED
+            ),
             last_seen_at=now,
         )
-        room_redis.remove_presence(client, join_code, session_key)
 
 
 def _room_group_name(join_code: str) -> str:
@@ -126,7 +147,13 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         self.session_key: str = session_key
 
         await self.channel_layer.group_add(self.room_group, self.channel_name)
-        await _update_presence(self.player.id, self.join_code, self.session_key, connected=True)
+        await _update_presence(
+            self.player.id,
+            self.join_code,
+            self.session_key,
+            self.channel_name,
+            connected=True,
+        )
         await self.accept()
 
     async def disconnect(self, code: int) -> None:
@@ -134,7 +161,13 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         if hasattr(self, "room_group"):
             await self.channel_layer.group_discard(self.room_group, self.channel_name)
         if hasattr(self, "player") and hasattr(self, "session_key"):
-            await _update_presence(self.player.id, self.join_code, self.session_key, connected=False)
+            await _update_presence(
+                self.player.id,
+                self.join_code,
+                self.session_key,
+                self.channel_name,
+                connected=False,
+            )
 
     async def receive_json(self, content: dict, **kwargs) -> None:
         """Handle inbound JSON events.

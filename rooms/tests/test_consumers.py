@@ -93,12 +93,6 @@ class RoomConsumerConnectTests(TransactionTestCase):
         test_word = Word.objects.create(text="rocket")
         WordPackEntry.objects.create(word_pack=self.word_pack, word=test_word)
 
-        # The Room model MVP default requires a 'Default Word Pack'
-        from words.models import Word, WordPack, WordPackEntry
-        wp = WordPack.objects.create(name="Default Word Pack")
-        w = Word.objects.create(text="apple")
-        WordPackEntry.objects.create(word_pack=wp, word=w)
-
         self.room = Room.objects.create(
             name="Test Room",
             join_code="TEST1234",
@@ -271,6 +265,42 @@ class RoomConsumerConnectTests(TransactionTestCase):
         self.assertEqual(self.player.connection_status, Player.ConnectionStatus.DISCONNECTED)
 
         # Check Redis disconnect update
+        presence = room_redis.get_presence(self.fake_redis, self.room.join_code)
+        self.assertNotIn(self.session_key, presence)
+
+    async def test_presence_stays_connected_until_last_same_session_socket_disconnects(self):
+        first = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        second = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+
+        first_connected, _ = await first.connect()
+        second_connected, _ = await second.connect()
+        self.assertTrue(first_connected)
+        self.assertTrue(second_connected)
+
+        await first.disconnect()
+
+        await database_sync_to_async(self.player.refresh_from_db)()
+        self.assertEqual(self.player.connection_status, Player.ConnectionStatus.CONNECTED)
+
+        from rooms import redis as room_redis
+        presence = room_redis.get_presence(self.fake_redis, self.room.join_code)
+        self.assertIn(self.session_key, presence)
+
+        await second.disconnect()
+
+        await database_sync_to_async(self.player.refresh_from_db)()
+        self.assertEqual(
+            self.player.connection_status,
+            Player.ConnectionStatus.DISCONNECTED,
+        )
         presence = room_redis.get_presence(self.fake_redis, self.room.join_code)
         self.assertNotIn(self.session_key, presence)
 
