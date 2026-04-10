@@ -137,6 +137,21 @@ def clear_presence(client: "_redis.Redis", join_code: str) -> None:
         client.delete(*connection_keys)
 
 
+def clear_session_presence(
+    client: "_redis.Redis",
+    join_code: str,
+    session_key: str,
+) -> None:
+    """Delete all presence state for one room/session pair.
+
+    This is used by a permanent leave flow, which needs to forget every active
+    socket for the participant instead of removing only one connection ID.
+    """
+
+    client.delete(_presence_connections_key(join_code, session_key))
+    client.srem(_presence_key(join_code), session_key)
+
+
 # ---------------------------------------------------------------------------
 # Canvas snapshot API
 # ---------------------------------------------------------------------------
