@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from unittest.mock import patch
 
 import fakeredis
 from django.test import TestCase
@@ -34,6 +35,8 @@ class ParticipantLifecycleServiceTests(TestCase):
             connection_status=Player.ConnectionStatus.DISCONNECTED,
             session_expires_at=timezone.now() + timedelta(hours=1),
         )
+        self.room.host = self.player
+        self.room.save(update_fields=["host"])
 
     def test_connect_participant_marks_player_connected_and_tracks_presence(self):
         connect_participant(
@@ -166,6 +169,59 @@ class ParticipantLifecycleServiceTests(TestCase):
             ),
             0,
         )
+        self.room.refresh_from_db()
+        self.assertIsNone(self.room.host)
+
+    @patch("rooms.services.random.choice")
+    def test_leave_participant_reassigns_host_when_current_host_leaves(
+        self,
+        random_choice,
+    ):
+        second_player = Player.objects.create(
+            room=self.room,
+            session_key="session-456",
+            display_name="Jamie",
+            connection_status=Player.ConnectionStatus.DISCONNECTED,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        third_player = Player.objects.create(
+            room=self.room,
+            session_key="session-789",
+            display_name="Morgan",
+            connection_status=Player.ConnectionStatus.DISCONNECTED,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        random_choice.return_value = third_player
+
+        leave_participant(
+            redis_client=self.redis_client,
+            player_id=self.player.id,
+        )
+
+        self.room.refresh_from_db()
+
+        self.assertEqual(self.room.host_id, third_player.id)
+        self.assertFalse(Player.objects.filter(pk=self.player.id).exists())
+        random_choice.assert_called_once()
+
+    def test_leave_participant_keeps_existing_host_when_non_host_leaves(self):
+        non_host_player = Player.objects.create(
+            room=self.room,
+            session_key="session-456",
+            display_name="Jamie",
+            connection_status=Player.ConnectionStatus.DISCONNECTED,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+
+        leave_participant(
+            redis_client=self.redis_client,
+            player_id=non_host_player.id,
+        )
+
+        self.room.refresh_from_db()
+
+        self.assertEqual(self.room.host_id, self.player.id)
+        self.assertFalse(Player.objects.filter(pk=non_host_player.id).exists())
 
     def test_connect_participant_rejects_mismatched_session_key(self):
         with self.assertRaisesMessage(

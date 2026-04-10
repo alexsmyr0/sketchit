@@ -6,11 +6,13 @@ consumers, and later background tasks all apply the same rules.
 
 from __future__ import annotations
 
+import random
+
 from django.db import transaction
 from django.utils import timezone
 
 from rooms import redis as room_redis
-from rooms.models import Player
+from rooms.models import Player, Room
 
 
 def _get_locked_player(player_id: int) -> Player:
@@ -25,6 +27,16 @@ def _get_locked_player(player_id: int) -> Player:
         .select_related("room")
         .get(pk=player_id)
     )
+
+
+def _get_locked_room(room_id: int) -> Room:
+    """Return the room row locked for update.
+
+    The leave flow updates host ownership, so the room row must be locked while
+    we decide whether a host handoff is required.
+    """
+
+    return Room.objects.select_for_update().get(pk=room_id)
 
 
 def _validate_room_presence_identity(
@@ -128,11 +140,23 @@ def leave_participant(*, redis_client, player_id: int) -> None:
     """Remove a participant from the room entirely.
 
     This is different from a temporary disconnect: the membership row is
-    deleted, and any tracked room presence for that session is cleared too.
-    Host reassignment rules are handled in the later A04 host-handoff batch.
+    deleted, any tracked room presence for that session is cleared, and host
+    ownership is reassigned if the departing participant was the current host.
     """
 
     player = _get_locked_player(player_id)
+    room = _get_locked_room(player.room_id)
+
+    if room.host_id == player.id:
+        remaining_participants = list(
+            Player.objects.select_for_update()
+            .filter(room_id=room.id)
+            .exclude(pk=player.id)
+            .order_by("created_at", "id")
+        )
+        # The PRD/SDS require a random remaining participant to become host.
+        room.host = random.choice(remaining_participants) if remaining_participants else None
+        room.save(update_fields=["host", "updated_at"])
 
     # Leaving should clear every active socket for that session so the room's
     # live presence state does not keep a ghost participant around.
