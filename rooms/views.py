@@ -294,12 +294,17 @@ def room_lobby_state(request, join_code):
     return _build_room_lobby_state_response(room)
 
 
+@transaction.atomic
 def update_lobby_settings(request, join_code):
     if request.method != "POST":
         return HttpResponseNotAllowed(["POST"])
 
     try:
-        room = Room.objects.select_related("host").get(join_code=join_code.upper())
+        room = (
+            Room.objects.select_for_update()
+            .select_related("host")
+            .get(join_code=join_code.upper())
+        )
     except Room.DoesNotExist:
         return JsonResponse({"detail": "Room not found."}, status=404)
 
