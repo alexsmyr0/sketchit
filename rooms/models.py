@@ -107,7 +107,9 @@ class Player(models.Model):
     connection_status = models.CharField(
         max_length=20,
         choices=ConnectionStatus.choices,
-        default=ConnectionStatus.CONNECTED,
+        # A participant only becomes "connected" after a successful room
+        # socket connect. HTTP create/join alone should not imply live presence.
+        default=ConnectionStatus.DISCONNECTED,
     )
     participation_status = models.CharField(
         max_length=20,

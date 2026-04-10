@@ -22,18 +22,20 @@ Close codes
 """
 
 from django.conf import settings
-from django.utils import timezone
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 import redis
 
 from rooms.models import Player, Room
-from rooms import redis as room_redis
+from rooms.services import connect_participant, disconnect_participant
 
 
 _redis_client = None
 
+
 def get_redis_client() -> redis.Redis:
+    """Return a cached Redis client for room runtime state."""
+
     global _redis_client
     if _redis_client is None:
         _redis_client = redis.Redis.from_url(settings.REDIS_URL)
@@ -41,42 +43,39 @@ def get_redis_client() -> redis.Redis:
 
 
 @database_sync_to_async
-def _update_presence(
+def _mark_participant_connected(
     player_id: int,
     join_code: str,
     session_key: str,
     connection_id: str,
-    connected: bool,
 ) -> None:
-    now = timezone.now()
-    client = get_redis_client()
-    if connected:
-        Player.objects.filter(pk=player_id).update(
-            connection_status=Player.ConnectionStatus.CONNECTED,
-            last_seen_at=now,
-        )
-        room_redis.add_presence(
-            client,
-            join_code,
-            session_key,
-            connection_id=connection_id,
-        )
-    else:
-        room_redis.remove_presence(
-            client,
-            join_code,
-            session_key,
-            connection_id=connection_id,
-        )
-        connection_still_present = room_redis.is_present(client, join_code, session_key)
-        Player.objects.filter(pk=player_id).update(
-            connection_status=(
-                Player.ConnectionStatus.CONNECTED
-                if connection_still_present
-                else Player.ConnectionStatus.DISCONNECTED
-            ),
-            last_seen_at=now,
-        )
+    """Delegate socket-connect lifecycle updates to the room service."""
+
+    connect_participant(
+        redis_client=get_redis_client(),
+        player_id=player_id,
+        join_code=join_code,
+        session_key=session_key,
+        connection_id=connection_id,
+    )
+
+
+@database_sync_to_async
+def _mark_participant_disconnected(
+    player_id: int,
+    join_code: str,
+    session_key: str,
+    connection_id: str,
+) -> None:
+    """Delegate socket-disconnect lifecycle updates to the room service."""
+
+    disconnect_participant(
+        redis_client=get_redis_client(),
+        player_id=player_id,
+        join_code=join_code,
+        session_key=session_key,
+        connection_id=connection_id,
+    )
 
 
 def _room_group_name(join_code: str) -> str:
@@ -147,12 +146,11 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         self.session_key: str = session_key
 
         await self.channel_layer.group_add(self.room_group, self.channel_name)
-        await _update_presence(
+        await _mark_participant_connected(
             self.player.id,
             self.join_code,
             self.session_key,
             self.channel_name,
-            connected=True,
         )
         await self.accept()
 
@@ -161,12 +159,11 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         if hasattr(self, "room_group"):
             await self.channel_layer.group_discard(self.room_group, self.channel_name)
         if hasattr(self, "player") and hasattr(self, "session_key"):
-            await _update_presence(
+            await _mark_participant_disconnected(
                 self.player.id,
                 self.join_code,
                 self.session_key,
                 self.channel_name,
-                connected=False,
             )
 
     async def receive_json(self, content: dict, **kwargs) -> None:

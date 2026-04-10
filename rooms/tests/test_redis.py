@@ -256,6 +256,36 @@ class ClearPresenceTests(SimpleTestCase):
         )
 
 
+class ClearSessionPresenceTests(SimpleTestCase):
+    def test_clear_session_presence_removes_one_session_and_its_connections(self):
+        client = make_client()
+        room_redis.add_presence(
+            client,
+            JOIN_CODE,
+            SESSION_A,
+            connection_id="chan-1",
+        )
+        room_redis.add_presence(
+            client,
+            JOIN_CODE,
+            SESSION_B,
+            connection_id="chan-2",
+        )
+
+        room_redis.clear_session_presence(client, JOIN_CODE, SESSION_A)
+
+        self.assertFalse(room_redis.is_present(client, JOIN_CODE, SESSION_A))
+        self.assertTrue(room_redis.is_present(client, JOIN_CODE, SESSION_B))
+        self.assertEqual(
+            client.exists(room_redis._presence_connections_key(JOIN_CODE, SESSION_A)),
+            0,
+        )
+
+    def test_clear_session_presence_is_safe_when_session_is_absent(self):
+        client = make_client()
+        room_redis.clear_session_presence(client, JOIN_CODE, SESSION_A)
+
+
 # ---------------------------------------------------------------------------
 # Canvas snapshot tests
 # ---------------------------------------------------------------------------

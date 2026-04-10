@@ -194,6 +194,9 @@ def create_room(request):
             room=room,
             session_key=session_key,
             display_name=cleaned_data["display_name"],
+            # Room membership starts disconnected until the browser opens the
+            # room socket and the realtime layer confirms live presence.
+            connection_status=Player.ConnectionStatus.DISCONNECTED,
             session_expires_at=request.session.get_expiry_date(),
         )
         # The first participant is also the initial host.
@@ -255,6 +258,8 @@ def join_room(request, join_code):
         room=room,
         session_key=session_key,
         display_name=form.cleaned_data["display_name"],
+        # Joining the room via HTTP alone should not count as live presence.
+        connection_status=Player.ConnectionStatus.DISCONNECTED,
         session_expires_at=request.session.get_expiry_date(),
     )
 

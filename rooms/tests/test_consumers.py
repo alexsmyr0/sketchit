@@ -268,6 +268,79 @@ class RoomConsumerConnectTests(TransactionTestCase):
         presence = room_redis.get_presence(self.fake_redis, self.room.join_code)
         self.assertNotIn(self.session_key, presence)
 
+    async def test_disconnect_does_not_reassign_host(self):
+        second_session_key = await _create_room_member(self.room.id, "Bob")
+        second_player = await database_sync_to_async(Player.objects.get)(
+            room=self.room,
+            session_key=second_session_key,
+        )
+        self.room.host = self.player
+        await database_sync_to_async(self.room.save)(update_fields=["host"])
+
+        host_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        member_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(second_session_key),
+        )
+
+        host_connected, _ = await host_socket.connect()
+        member_connected, _ = await member_socket.connect()
+        self.assertTrue(host_connected)
+        self.assertTrue(member_connected)
+
+        await host_socket.disconnect()
+
+        await database_sync_to_async(self.room.refresh_from_db)()
+        self.assertEqual(self.room.host_id, self.player.id)
+        self.assertNotEqual(self.room.host_id, second_player.id)
+
+        await member_socket.disconnect()
+
+    async def test_reconnect_reuses_same_participant_row(self):
+        first_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        connected, _ = await first_socket.connect()
+        self.assertTrue(connected)
+
+        original_player_id = self.player.id
+
+        await first_socket.disconnect()
+        await database_sync_to_async(self.player.refresh_from_db)()
+        self.assertEqual(
+            self.player.connection_status,
+            Player.ConnectionStatus.DISCONNECTED,
+        )
+
+        second_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        reconnected, _ = await second_socket.connect()
+        self.assertTrue(reconnected)
+
+        refreshed_player = await database_sync_to_async(Player.objects.get)(
+            room=self.room,
+            session_key=self.session_key,
+        )
+        self.assertEqual(refreshed_player.id, original_player_id)
+        self.assertEqual(
+            await database_sync_to_async(
+                Player.objects.filter(room=self.room, session_key=self.session_key).count
+            )(),
+            1,
+        )
+
+        await second_socket.disconnect()
+
     async def test_presence_stays_connected_until_last_same_session_socket_disconnects(self):
         first = WebsocketCommunicator(
             _TEST_APP,

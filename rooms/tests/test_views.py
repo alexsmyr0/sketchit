@@ -121,6 +121,10 @@ class CreateRoomViewTests(TestCase):
         self.assertEqual(player.display_name, "Alex")
         self.assertEqual(player.session_key, self.client.session.session_key)
         self.assertEqual(
+            player.connection_status,
+            Player.ConnectionStatus.DISCONNECTED,
+        )
+        self.assertEqual(
             player.session_expires_at.replace(microsecond=0),
             self.client.session.get_expiry_date().replace(microsecond=0),
         )
@@ -250,6 +254,10 @@ class JoinRoomViewTests(TestCase):
         self.assertEqual(player.display_name, "Alex")
         self.assertEqual(player.session_key, self.client.session.session_key)
         self.assertEqual(
+            player.connection_status,
+            Player.ConnectionStatus.DISCONNECTED,
+        )
+        self.assertEqual(
             player.session_expires_at.replace(microsecond=0),
             self.client.session.get_expiry_date().replace(microsecond=0),
         )
@@ -284,6 +292,10 @@ class JoinRoomViewTests(TestCase):
         self.assertEqual(
             player.session_expires_at.replace(microsecond=0),
             self.client.session.get_expiry_date().replace(microsecond=0),
+        )
+        self.assertEqual(
+            player.connection_status,
+            Player.ConnectionStatus.DISCONNECTED,
         )
         self.assertEqual(second_response.json()["join_code"], self.room.join_code)
 
