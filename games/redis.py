@@ -48,9 +48,9 @@ def _turn_state_key(join_code: str) -> str:
     return f"room:{join_code}:round:turn_state"
 
 
-def _guess_state_key(join_code: str) -> str:
-    """Return the Redis key for the active guess state hash of *join_code*."""
-    return f"room:{join_code}:round:guess_state"
+def _guess_state_key(join_code: str, round_id: int) -> str:
+    """Return the Redis key for the active guess state hash of *join_code* and *round_id*."""
+    return f"room:{join_code}:round:{round_id}:guess_state"
 
 
 def _round_payload_key(join_code: str, role: str) -> str:
@@ -58,9 +58,9 @@ def _round_payload_key(join_code: str, role: str) -> str:
     return f"room:{join_code}:round:payload:{role}"
 
 
-def _deadline_key(join_code: str) -> str:
-    """Return the Redis key for the cleanup deadline of *join_code*."""
-    return f"room:{join_code}:deadline"
+def _deadline_key(join_code: str, deadline_type: str) -> str:
+    """Return the Redis key for a specific *deadline_type* in *join_code*."""
+    return f"room:{join_code}:deadline:{deadline_type}"
 
 # ---------------------------------------------------------------------------
 # Drawer Pool API
@@ -106,23 +106,23 @@ def clear_turn_state(client: "_redis.Redis", join_code: str) -> None:
 # Guess State API
 # ---------------------------------------------------------------------------
 
-def set_guess_state(client: "_redis.Redis", join_code: str, player_id: int, state: str) -> None:
-    key = _guess_state_key(join_code)
+def set_guess_state(client: "_redis.Redis", join_code: str, round_id: int, player_id: int, state: str) -> None:
+    key = _guess_state_key(join_code, round_id)
     client.hset(key, str(player_id), state)
     client.expire(key, ROOM_RUNTIME_TTL)
 
-def get_guess_state(client: "_redis.Redis", join_code: str, player_id: int) -> str | None:
-    val = client.hget(_guess_state_key(join_code), str(player_id))
+def get_guess_state(client: "_redis.Redis", join_code: str, round_id: int, player_id: int) -> str | None:
+    val = client.hget(_guess_state_key(join_code, round_id), str(player_id))
     if val is None:
         return None
     return val.decode() if isinstance(val, bytes) else val
 
-def get_all_guess_states(client: "_redis.Redis", join_code: str) -> dict[int, str]:
-    raw = client.hgetall(_guess_state_key(join_code))
+def get_all_guess_states(client: "_redis.Redis", join_code: str, round_id: int) -> dict[int, str]:
+    raw = client.hgetall(_guess_state_key(join_code, round_id))
     return {int(k.decode() if isinstance(k, bytes) else k): v.decode() if isinstance(v, bytes) else v for k, v in raw.items()}
 
-def clear_guess_state(client: "_redis.Redis", join_code: str) -> None:
-    client.delete(_guess_state_key(join_code))
+def clear_guess_state(client: "_redis.Redis", join_code: str, round_id: int) -> None:
+    client.delete(_guess_state_key(join_code, round_id))
 
 # ---------------------------------------------------------------------------
 # Round Payload API
@@ -151,18 +151,18 @@ def clear_round_payloads(client: "_redis.Redis", join_code: str) -> None:
     client.delete(_round_payload_key(join_code, "guesser"))
 
 # ---------------------------------------------------------------------------
-# Cleanup Deadline API
+# Deadline API
 # ---------------------------------------------------------------------------
 
-def set_cleanup_deadline(client: "_redis.Redis", join_code: str, deadline_isotimestamp: str) -> None:
-    key = _deadline_key(join_code)
+def set_deadline(client: "_redis.Redis", join_code: str, deadline_type: str, deadline_isotimestamp: str) -> None:
+    key = _deadline_key(join_code, deadline_type)
     client.set(key, deadline_isotimestamp, ex=ROOM_RUNTIME_TTL)
 
-def get_cleanup_deadline(client: "_redis.Redis", join_code: str) -> str | None:
-    raw = client.get(_deadline_key(join_code))
+def get_deadline(client: "_redis.Redis", join_code: str, deadline_type: str) -> str | None:
+    raw = client.get(_deadline_key(join_code, deadline_type))
     if raw:
         return raw.decode() if isinstance(raw, bytes) else raw
     return None
 
-def clear_cleanup_deadline(client: "_redis.Redis", join_code: str) -> None:
-    client.delete(_deadline_key(join_code))
+def clear_deadline(client: "_redis.Redis", join_code: str, deadline_type: str) -> None:
+    client.delete(_deadline_key(join_code, deadline_type))

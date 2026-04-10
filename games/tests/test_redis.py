@@ -20,6 +20,7 @@ def make_client() -> fakeredis.FakeRedis:
     return fakeredis.FakeRedis()
 
 JOIN_CODE = "TESTGAME"
+OTHER_CODE = "OTHERROOM"
 PLAYER_A = 101
 PLAYER_B = 102
 PLAYER_C = 103
@@ -36,24 +37,29 @@ class GameRedisKeyTests(SimpleTestCase):
         self.assertEqual(game_redis._turn_state_key("MYROOM1"), "room:MYROOM1:round:turn_state")
 
     def test_guess_state_key_format(self):
-        self.assertEqual(game_redis._guess_state_key("MYROOM1"), "room:MYROOM1:round:guess_state")
+        self.assertEqual(game_redis._guess_state_key("MYROOM1", 5), "room:MYROOM1:round:5:guess_state")
 
     def test_round_payload_key_format(self):
         self.assertEqual(game_redis._round_payload_key("MYROOM1", "drawer"), "room:MYROOM1:round:payload:drawer")
 
     def test_deadline_key_format(self):
-        self.assertEqual(game_redis._deadline_key("MYROOM1"), "room:MYROOM1:deadline")
+        self.assertEqual(game_redis._deadline_key("MYROOM1", "cleanup"), "room:MYROOM1:deadline:cleanup")
 
 # ---------------------------------------------------------------------------
 # Drawer Pool tests
 # ---------------------------------------------------------------------------
 
 class DrawerPoolTests(SimpleTestCase):
-    def test_set_drawer_pool_adds_players(self):
+    def test_set_drawer_pool_adds_players_and_isolates(self):
         client = make_client()
         game_redis.set_drawer_pool(client, JOIN_CODE, [PLAYER_A, PLAYER_B])
+        
         pool = game_redis.get_drawer_pool(client, JOIN_CODE)
         self.assertEqual(pool, {PLAYER_A, PLAYER_B})
+        
+        # Verify isolation
+        other_pool = game_redis.get_drawer_pool(client, OTHER_CODE)
+        self.assertEqual(other_pool, set())
         
         ttl = client.ttl(game_redis._drawer_pool_key(JOIN_CODE))
         self.assertAlmostEqual(ttl, game_redis.ROOM_RUNTIME_TTL, delta=5)
@@ -89,23 +95,29 @@ class DrawerPoolTests(SimpleTestCase):
     def test_clear_drawer_pool(self):
         client = make_client()
         game_redis.set_drawer_pool(client, JOIN_CODE, [PLAYER_A])
+        game_redis.set_drawer_pool(client, OTHER_CODE, [PLAYER_B])
         game_redis.clear_drawer_pool(client, JOIN_CODE)
-        pool = game_redis.get_drawer_pool(client, JOIN_CODE)
-        self.assertEqual(pool, set())
+        
+        self.assertEqual(game_redis.get_drawer_pool(client, JOIN_CODE), set())
+        # Make sure OTHER_CODE was untouched
+        self.assertEqual(game_redis.get_drawer_pool(client, OTHER_CODE), {PLAYER_B})
+
 
 # ---------------------------------------------------------------------------
 # Turn State tests
 # ---------------------------------------------------------------------------
 
 class TurnStateTests(SimpleTestCase):
-    def test_set_turn_state_stores_hash(self):
+    def test_set_turn_state_stores_hash_and_isolates(self):
         client = make_client()
         state = {"status": "drawing", "round_id": 10}
         game_redis.set_turn_state(client, JOIN_CODE, state)
         
         result = game_redis.get_turn_state(client, JOIN_CODE)
-        # Redis hashes store everything as strings internally
         self.assertEqual(result, {"status": "drawing", "round_id": "10"})
+        
+        # Verify isolation
+        self.assertEqual(game_redis.get_turn_state(client, OTHER_CODE), {})
         
         ttl = client.ttl(game_redis._turn_state_key(JOIN_CODE))
         self.assertAlmostEqual(ttl, game_redis.ROOM_RUNTIME_TTL, delta=5)
@@ -129,53 +141,66 @@ class TurnStateTests(SimpleTestCase):
     def test_clear_turn_state(self):
         client = make_client()
         game_redis.set_turn_state(client, JOIN_CODE, {"status": "drawing"})
+        game_redis.set_turn_state(client, OTHER_CODE, {"status": "drawing"})
+        
         game_redis.clear_turn_state(client, JOIN_CODE)
         
-        result = game_redis.get_turn_state(client, JOIN_CODE)
-        self.assertEqual(result, {})
+        self.assertEqual(game_redis.get_turn_state(client, JOIN_CODE), {})
+        self.assertEqual(game_redis.get_turn_state(client, OTHER_CODE), {"status": "drawing"})
+
 
 # ---------------------------------------------------------------------------
 # Guess State tests
 # ---------------------------------------------------------------------------
 
 class GuessStateTests(SimpleTestCase):
-    def test_set_guess_state_stores_for_player(self):
+    def test_set_guess_state_stores_for_player_and_isolates(self):
         client = make_client()
-        game_redis.set_guess_state(client, JOIN_CODE, PLAYER_A, "correct")
+        game_redis.set_guess_state(client, JOIN_CODE, 1, PLAYER_A, "correct")
         
-        result = game_redis.get_guess_state(client, JOIN_CODE, PLAYER_A)
+        result = game_redis.get_guess_state(client, JOIN_CODE, 1, PLAYER_A)
         self.assertEqual(result, "correct")
         
-        ttl = client.ttl(game_redis._guess_state_key(JOIN_CODE))
+        # Verify inter-room isolation
+        self.assertIsNone(game_redis.get_guess_state(client, OTHER_CODE, 1, PLAYER_A))
+        # Verify inter-round isolation within SAME room
+        self.assertIsNone(game_redis.get_guess_state(client, JOIN_CODE, 2, PLAYER_A))
+        
+        ttl = client.ttl(game_redis._guess_state_key(JOIN_CODE, 1))
         self.assertAlmostEqual(ttl, game_redis.ROOM_RUNTIME_TTL, delta=5)
 
     def test_get_guess_state_absent(self):
         client = make_client()
-        result = game_redis.get_guess_state(client, JOIN_CODE, PLAYER_A)
+        result = game_redis.get_guess_state(client, JOIN_CODE, 1, PLAYER_A)
         self.assertIsNone(result)
 
     def test_get_all_guess_states(self):
         client = make_client()
-        game_redis.set_guess_state(client, JOIN_CODE, PLAYER_A, "correct")
-        game_redis.set_guess_state(client, JOIN_CODE, PLAYER_B, "near_match")
+        game_redis.set_guess_state(client, JOIN_CODE, 1, PLAYER_A, "correct")
+        game_redis.set_guess_state(client, JOIN_CODE, 1, PLAYER_B, "near_match")
         
-        result = game_redis.get_all_guess_states(client, JOIN_CODE)
+        result = game_redis.get_all_guess_states(client, JOIN_CODE, 1)
         self.assertEqual(result, {PLAYER_A: "correct", PLAYER_B: "near_match"})
 
     def test_clear_guess_state(self):
         client = make_client()
-        game_redis.set_guess_state(client, JOIN_CODE, PLAYER_A, "correct")
-        game_redis.clear_guess_state(client, JOIN_CODE)
+        game_redis.set_guess_state(client, JOIN_CODE, 1, PLAYER_A, "correct")
+        game_redis.set_guess_state(client, OTHER_CODE, 1, PLAYER_B, "near_match")
+        game_redis.set_guess_state(client, JOIN_CODE, 2, PLAYER_C, "correct")
         
-        result = game_redis.get_all_guess_states(client, JOIN_CODE)
-        self.assertEqual(result, {})
+        game_redis.clear_guess_state(client, JOIN_CODE, 1)
+        
+        self.assertEqual(game_redis.get_all_guess_states(client, JOIN_CODE, 1), {})
+        self.assertEqual(game_redis.get_all_guess_states(client, OTHER_CODE, 1), {PLAYER_B: "near_match"})
+        self.assertEqual(game_redis.get_all_guess_states(client, JOIN_CODE, 2), {PLAYER_C: "correct"})
+
 
 # ---------------------------------------------------------------------------
 # Round Payload tests
 # ---------------------------------------------------------------------------
 
 class RoundPayloadTests(SimpleTestCase):
-    def test_set_round_payloads_stores_json(self):
+    def test_set_round_payloads_stores_json_and_isolates(self):
         client = make_client()
         drawer_payload = {"word": "apple"}
         guesser_payload = {"word": "_____"}
@@ -188,47 +213,53 @@ class RoundPayloadTests(SimpleTestCase):
         self.assertEqual(d_res, drawer_payload)
         self.assertEqual(g_res, guesser_payload)
         
+        # Room Isolation
+        self.assertIsNone(game_redis.get_round_payload(client, OTHER_CODE, "drawer"))
+        
         ttl = client.ttl(game_redis._round_payload_key(JOIN_CODE, "drawer"))
         self.assertAlmostEqual(ttl, game_redis.ROOM_RUNTIME_TTL, delta=5)
-
-    def test_get_round_payload_absent(self):
-        client = make_client()
-        res = game_redis.get_round_payload(client, JOIN_CODE, "drawer")
-        self.assertIsNone(res)
 
     def test_clear_round_payloads(self):
         client = make_client()
         game_redis.set_round_payloads(client, JOIN_CODE, {"w": "1"}, {"w": "2"})
+        game_redis.set_round_payloads(client, OTHER_CODE, {"w": "X"}, {"w": "Y"})
+        
         game_redis.clear_round_payloads(client, JOIN_CODE)
         
         self.assertIsNone(game_redis.get_round_payload(client, JOIN_CODE, "drawer"))
         self.assertIsNone(game_redis.get_round_payload(client, JOIN_CODE, "guesser"))
+        
+        # Verify isolation
+        self.assertEqual(game_redis.get_round_payload(client, OTHER_CODE, "drawer"), {"w": "X"})
+
 
 # ---------------------------------------------------------------------------
-# Cleanup Deadline tests
+# Deadline tests
 # ---------------------------------------------------------------------------
 
-class CleanupDeadlineTests(SimpleTestCase):
-    def test_set_cleanup_deadline_stores_string(self):
+class DeadlineTests(SimpleTestCase):
+    def test_set_deadline_stores_string_and_isolates(self):
         client = make_client()
-        deadline = "2026-04-10T00:00:00Z"
-        game_redis.set_cleanup_deadline(client, JOIN_CODE, deadline)
+        ts1 = "2026-04-10T00:00:00Z"
+        ts2 = "2026-04-10T01:00:00Z"
+        game_redis.set_deadline(client, JOIN_CODE, "cleanup", ts1)
+        game_redis.set_deadline(client, JOIN_CODE, "turn_end", ts2)
         
-        res = game_redis.get_cleanup_deadline(client, JOIN_CODE)
-        self.assertEqual(res, deadline)
+        self.assertEqual(game_redis.get_deadline(client, JOIN_CODE, "cleanup"), ts1)
+        self.assertEqual(game_redis.get_deadline(client, JOIN_CODE, "turn_end"), ts2)
         
-        ttl = client.ttl(game_redis._deadline_key(JOIN_CODE))
+        # Test isolation
+        self.assertIsNone(game_redis.get_deadline(client, OTHER_CODE, "cleanup"))
+        
+        ttl = client.ttl(game_redis._deadline_key(JOIN_CODE, "cleanup"))
         self.assertAlmostEqual(ttl, game_redis.ROOM_RUNTIME_TTL, delta=5)
 
-    def test_get_cleanup_deadline_absent(self):
+    def test_clear_deadline(self):
         client = make_client()
-        res = game_redis.get_cleanup_deadline(client, JOIN_CODE)
-        self.assertIsNone(res)
-
-    def test_clear_cleanup_deadline(self):
-        client = make_client()
-        game_redis.set_cleanup_deadline(client, JOIN_CODE, "TIME")
-        game_redis.clear_cleanup_deadline(client, JOIN_CODE)
+        game_redis.set_deadline(client, JOIN_CODE, "cleanup", "TIME")
+        game_redis.set_deadline(client, OTHER_CODE, "cleanup", "OTHERTIME")
         
-        res = game_redis.get_cleanup_deadline(client, JOIN_CODE)
-        self.assertIsNone(res)
+        game_redis.clear_deadline(client, JOIN_CODE, "cleanup")
+        
+        self.assertIsNone(game_redis.get_deadline(client, JOIN_CODE, "cleanup"))
+        self.assertEqual(game_redis.get_deadline(client, OTHER_CODE, "cleanup"), "OTHERTIME")
