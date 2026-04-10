@@ -106,20 +106,24 @@ def clear_turn_state(client: "_redis.Redis", join_code: str) -> None:
 # Guess State API
 # ---------------------------------------------------------------------------
 
-def set_guess_state(client: "_redis.Redis", join_code: str, round_id: int, player_id: int, state: str) -> None:
+def set_guess_state(client: "_redis.Redis", join_code: str, round_id: int, player_id: int, state: dict) -> None:
     key = _guess_state_key(join_code, round_id)
-    client.hset(key, str(player_id), state)
+    client.hset(key, str(player_id), json.dumps(state))
     client.expire(key, ROOM_RUNTIME_TTL)
 
-def get_guess_state(client: "_redis.Redis", join_code: str, round_id: int, player_id: int) -> str | None:
+def get_guess_state(client: "_redis.Redis", join_code: str, round_id: int, player_id: int) -> dict | None:
     val = client.hget(_guess_state_key(join_code, round_id), str(player_id))
     if val is None:
         return None
-    return val.decode() if isinstance(val, bytes) else val
+    val_str = val.decode() if isinstance(val, bytes) else val
+    return json.loads(val_str)
 
-def get_all_guess_states(client: "_redis.Redis", join_code: str, round_id: int) -> dict[int, str]:
+def get_all_guess_states(client: "_redis.Redis", join_code: str, round_id: int) -> dict[int, dict]:
     raw = client.hgetall(_guess_state_key(join_code, round_id))
-    return {int(k.decode() if isinstance(k, bytes) else k): v.decode() if isinstance(v, bytes) else v for k, v in raw.items()}
+    return {
+        int(k.decode() if isinstance(k, bytes) else k): json.loads(v.decode() if isinstance(v, bytes) else v)
+        for k, v in raw.items()
+    }
 
 def clear_guess_state(client: "_redis.Redis", join_code: str, round_id: int) -> None:
     client.delete(_guess_state_key(join_code, round_id))

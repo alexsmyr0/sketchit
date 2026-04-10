@@ -156,10 +156,10 @@ class TurnStateTests(SimpleTestCase):
 class GuessStateTests(SimpleTestCase):
     def test_set_guess_state_stores_for_player_and_isolates(self):
         client = make_client()
-        game_redis.set_guess_state(client, JOIN_CODE, 1, PLAYER_A, "correct")
+        game_redis.set_guess_state(client, JOIN_CODE, 1, PLAYER_A, {"status": "correct", "attempts": 1})
         
         result = game_redis.get_guess_state(client, JOIN_CODE, 1, PLAYER_A)
-        self.assertEqual(result, "correct")
+        self.assertEqual(result, {"status": "correct", "attempts": 1})
         
         # Verify inter-room isolation
         self.assertIsNone(game_redis.get_guess_state(client, OTHER_CODE, 1, PLAYER_A))
@@ -176,23 +176,23 @@ class GuessStateTests(SimpleTestCase):
 
     def test_get_all_guess_states(self):
         client = make_client()
-        game_redis.set_guess_state(client, JOIN_CODE, 1, PLAYER_A, "correct")
-        game_redis.set_guess_state(client, JOIN_CODE, 1, PLAYER_B, "near_match")
+        game_redis.set_guess_state(client, JOIN_CODE, 1, PLAYER_A, {"status": "correct"})
+        game_redis.set_guess_state(client, JOIN_CODE, 1, PLAYER_B, {"status": "near_match"})
         
         result = game_redis.get_all_guess_states(client, JOIN_CODE, 1)
-        self.assertEqual(result, {PLAYER_A: "correct", PLAYER_B: "near_match"})
+        self.assertEqual(result, {PLAYER_A: {"status": "correct"}, PLAYER_B: {"status": "near_match"}})
 
     def test_clear_guess_state(self):
         client = make_client()
-        game_redis.set_guess_state(client, JOIN_CODE, 1, PLAYER_A, "correct")
-        game_redis.set_guess_state(client, OTHER_CODE, 1, PLAYER_B, "near_match")
-        game_redis.set_guess_state(client, JOIN_CODE, 2, PLAYER_C, "correct")
+        game_redis.set_guess_state(client, JOIN_CODE, 1, PLAYER_A, {"status": "correct"})
+        game_redis.set_guess_state(client, OTHER_CODE, 1, PLAYER_B, {"status": "near_match"})
+        game_redis.set_guess_state(client, JOIN_CODE, 2, PLAYER_C, {"status": "correct"})
         
         game_redis.clear_guess_state(client, JOIN_CODE, 1)
         
         self.assertEqual(game_redis.get_all_guess_states(client, JOIN_CODE, 1), {})
-        self.assertEqual(game_redis.get_all_guess_states(client, OTHER_CODE, 1), {PLAYER_B: "near_match"})
-        self.assertEqual(game_redis.get_all_guess_states(client, JOIN_CODE, 2), {PLAYER_C: "correct"})
+        self.assertEqual(game_redis.get_all_guess_states(client, OTHER_CODE, 1), {PLAYER_B: {"status": "near_match"}})
+        self.assertEqual(game_redis.get_all_guess_states(client, JOIN_CODE, 2), {PLAYER_C: {"status": "correct"}})
 
 
 # ---------------------------------------------------------------------------
