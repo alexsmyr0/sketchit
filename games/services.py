@@ -1,7 +1,8 @@
 import random
-from datetime import datetime
 from dataclasses import dataclass
+from datetime import datetime
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
@@ -57,8 +58,20 @@ class GuessEvaluationResult:
         }
 
 
+@dataclass(frozen=True)
+class IntermissionAdvanceResult:
+    join_code: str
+    game_id: int
+    game_finished: bool
+    next_round_id: int | None
+
+
 CORRECT_GUESSER_SCORE_DELTA = 1
 DRAWER_SCORE_DELTA_ON_CORRECT_GUESS = 1
+
+
+def _runtime_coordinator_enabled() -> bool:
+    return bool(getattr(settings, "SKETCHIT_ENABLE_RUNTIME_COORDINATOR", True))
 
 
 def _dedupe_snapshot_words_case_insensitive(word_texts: list[str]) -> list[str]:
@@ -134,21 +147,111 @@ def _get_remaining_eligible_drawers(game: Game) -> list[Player]:
     ]
 
 
-def _progress_game_after_round_completion(completed_round: Round) -> None:
-    locked_game = Game.objects.select_for_update().get(pk=completed_round.game_id)
-    if locked_game.status != GameStatus.IN_PROGRESS:
+def _get_round_eligible_guesser_ids(round: Round) -> list[int]:
+    return list(
+        Player.objects.filter(
+            room_id=round.game.room_id,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            created_at__lte=round.started_at,
+        )
+        .exclude(pk=round.drawer_participant_id)
+        .order_by("created_at", "id")
+        .values_list("id", flat=True)
+    )
+
+
+def _all_eligible_non_drawer_guessers_are_correct(
+    *,
+    locked_round: Round,
+    newest_correct_guesser_id: int,
+) -> bool:
+    if _runtime_coordinator_enabled():
+        from games import runtime as game_runtime
+
+        runtime_says_all_correct = game_runtime.mark_guesser_correct(
+            join_code=locked_round.game.room.join_code,
+            round_id=locked_round.id,
+            player_id=newest_correct_guesser_id,
+        )
+        if runtime_says_all_correct:
+            return True
+
+    eligible_guesser_ids = set(_get_round_eligible_guesser_ids(locked_round))
+    if not eligible_guesser_ids:
+        return False
+
+    correct_guesser_ids = set(
+        Guess.objects.filter(
+            round_id=locked_round.id,
+            is_correct=True,
+            player_id__in=eligible_guesser_ids,
+        ).values_list("player_id", flat=True)
+    )
+    return eligible_guesser_ids.issubset(correct_guesser_ids)
+
+
+def _schedule_round_runtime_start(round_id: int) -> None:
+    from games import runtime as game_runtime
+
+    game_runtime.start_round_runtime(round_id)
+
+
+def _schedule_round_intermission_start(
+    *,
+    join_code: str,
+    completed_round_id: int,
+    completed_round_sequence: int,
+    ended_at_iso: str,
+    completion_reason: str,
+) -> None:
+    from games import runtime as game_runtime
+
+    game_runtime.start_intermission(
+        join_code=join_code,
+        completed_round_id=completed_round_id,
+        completed_round_sequence=completed_round_sequence,
+        ended_at_iso=ended_at_iso,
+        completion_reason=completion_reason,
+    )
+
+
+def _handle_round_completed(locked_round: Round, *, completion_reason: str) -> None:
+    if _runtime_coordinator_enabled():
+        transaction.on_commit(
+            lambda: _schedule_round_intermission_start(
+                join_code=locked_round.game.room.join_code,
+                completed_round_id=locked_round.id,
+                completed_round_sequence=locked_round.sequence_number,
+                ended_at_iso=locked_round.ended_at.isoformat(),
+                completion_reason=completion_reason,
+            )
+        )
         return
 
+    _progress_game_after_round_completion(locked_round)
+
+
+def _progress_game_after_round_completion(completed_round: Round) -> Round | None:
+    locked_game = Game.objects.select_for_update().get(pk=completed_round.game_id)
     next_round_sequence_number = completed_round.sequence_number + 1
-    if locked_game.rounds.filter(sequence_number=next_round_sequence_number).exists():
-        return
+
+    existing_next_round = (
+        locked_game.rounds.select_related("selected_game_word", "game__room")
+        .filter(sequence_number=next_round_sequence_number)
+        .first()
+    )
+    if existing_next_round is not None:
+        return existing_next_round
+
+    if locked_game.status != GameStatus.IN_PROGRESS:
+        return None
 
     remaining_drawers = _get_remaining_eligible_drawers(locked_game)
     if not remaining_drawers:
         locked_game.status = GameStatus.FINISHED
         locked_game.ended_at = timezone.now()
         locked_game.save(update_fields=["status", "ended_at", "updated_at"])
-        return
+        return None
 
     available_words = list(
         locked_game.snapshot_words.select_for_update()
@@ -162,12 +265,30 @@ def _progress_game_after_round_completion(completed_round: Round) -> None:
 
     next_drawer = random.choice(remaining_drawers)
     next_word = random.choice(available_words)
-    Round.objects.create(
+    return Round.objects.create(
         game=locked_game,
         drawer_participant=next_drawer,
         drawer_nickname=next_drawer.display_name,
         selected_game_word=next_word,
         sequence_number=next_round_sequence_number,
+    )
+
+
+@transaction.atomic
+def advance_game_after_intermission(completed_round_id: int) -> IntermissionAdvanceResult:
+    completed_round = (
+        Round.objects.select_for_update()
+        .select_related("game__room")
+        .get(pk=completed_round_id)
+    )
+    next_round = _progress_game_after_round_completion(completed_round)
+    completed_round.game.refresh_from_db(fields=("status",))
+
+    return IntermissionAdvanceResult(
+        join_code=completed_round.game.room.join_code,
+        game_id=completed_round.game_id,
+        game_finished=completed_round.game.status == GameStatus.FINISHED,
+        next_round_id=next_round.id if next_round is not None else None,
     )
 
 
@@ -221,14 +342,34 @@ def start_game_for_room(room: Room) -> StartedGame:
     locked_room.status = Room.Status.IN_PROGRESS
     locked_room.save(update_fields=["status", "updated_at"])
 
+    if _runtime_coordinator_enabled():
+        transaction.on_commit(lambda: _schedule_round_runtime_start(first_round.id))
+
     return StartedGame(game=game, first_round=first_round)
+
+
+@transaction.atomic
+def complete_round_due_to_timer(round_id: int) -> bool:
+    locked_round = (
+        Round.objects.select_for_update()
+        .select_related("game__room")
+        .get(pk=round_id)
+    )
+    if locked_round.status is not None or locked_round.ended_at is not None:
+        return False
+
+    locked_round.status = RoundStatus.COMPLETED
+    locked_round.ended_at = timezone.now()
+    locked_round.save(update_fields=["status", "ended_at", "updated_at"])
+    _handle_round_completed(locked_round, completion_reason="timer_expired")
+    return True
 
 
 @transaction.atomic
 def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> GuessEvaluationResult:
     locked_round = (
         Round.objects.select_for_update()
-        .select_related("game", "selected_game_word")
+        .select_related("game__room", "selected_game_word")
         .get(pk=round.pk)
     )
     guessing_player = (
@@ -279,6 +420,20 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
             score_updates=(),
         )
 
+    if Guess.objects.filter(
+        round_id=locked_round.id,
+        player_id=guessing_player.id,
+        is_correct=True,
+    ).exists():
+        return _build_guess_evaluation_result(
+            guess=guess,
+            locked_round=locked_round,
+            is_correct=False,
+            round_completed_now=False,
+            winning_player_id=None,
+            score_updates=(),
+        )
+
     if _normalize_guess_text(guess.text) != _normalize_guess_text(locked_round.selected_game_word.text):
         return _build_guess_evaluation_result(
             guess=guess,
@@ -291,10 +446,6 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
 
     guess.is_correct = True
     guess.save(update_fields=["is_correct", "updated_at"])
-
-    locked_round.status = RoundStatus.COMPLETED
-    locked_round.ended_at = timezone.now()
-    locked_round.save(update_fields=["status", "ended_at", "updated_at"])
 
     score_deltas_by_participant_id = {
         guessing_player.id: CORRECT_GUESSER_SCORE_DELTA,
@@ -314,13 +465,28 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
         .order_by("id")
         .values("id", "current_score")
     )
-    _progress_game_after_round_completion(locked_round)
+
+    all_eligible_guessers_correct = _all_eligible_non_drawer_guessers_are_correct(
+        locked_round=locked_round,
+        newest_correct_guesser_id=guessing_player.id,
+    )
+    round_completed_now = False
+    if all_eligible_guessers_correct:
+        locked_round.status = RoundStatus.COMPLETED
+        locked_round.ended_at = timezone.now()
+        locked_round.save(update_fields=["status", "ended_at", "updated_at"])
+        round_completed_now = True
+        _handle_round_completed(locked_round, completion_reason="all_guessers_correct")
 
     return _build_guess_evaluation_result(
         guess=guess,
         locked_round=locked_round,
         is_correct=True,
-        round_completed_now=True,
-        winning_player_id=guessing_player.id,
+        round_completed_now=round_completed_now,
+        winning_player_id=(
+            _get_round_winning_player_id(locked_round.id)
+            if round_completed_now
+            else None
+        ),
         score_updates=updated_scores,
     )

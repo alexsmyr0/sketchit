@@ -406,6 +406,35 @@ class RoomConsumerConnectTests(TransactionTestCase):
         
         await communicator.disconnect()
 
+    async def test_room_group_server_event_is_forwarded_to_connected_clients(self):
+        communicator = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        connected, _ = await communicator.connect()
+        self.assertTrue(connected)
+
+        event_payload = {
+            "type": "round.timer",
+            "payload": {
+                "round_id": 7,
+                "remaining_seconds": 42,
+            },
+        }
+        await self.channel_layer.group_send(
+            _room_group_name(self.room.join_code),
+            {
+                "type": "room.server_event",
+                "event": event_payload,
+            },
+        )
+
+        forwarded = await communicator.receive_json_from()
+        self.assertEqual(forwarded, event_payload)
+
+        await communicator.disconnect()
+
 
 class RoomGroupNameTests(TransactionTestCase):
     """Tests for the room group naming helper."""

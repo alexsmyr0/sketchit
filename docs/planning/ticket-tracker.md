@@ -78,8 +78,8 @@ Use this as the default claim order for the next wave of work:
 ### Track K
 
 - [x] **K-01** P0 - Game Bootstrap & Basic Guess Service Baseline | Game creation, room word snapshot, first round, and placeholder guess resolution. (Depends on: A-01; A-02) | Blocks: N-03; K-03; K-04; K-05
-- [ ] **K-02** P1 - Public Room Directory API | Public-room discovery endpoint including in-progress public rooms. (Depends on: A-02) | Blocks: G-01
-- [ ] **K-03** P2 - Round Timer & Early-Finish Coordinator | Server-owned round timing, intermission countdown, and early-finish triggers. (Depends on: K-01; N-03) | Blocks: K-04; N-05; K-05; K-07; G-03
+- [x] **K-02** P1 - Public Room Directory API | Public-room discovery endpoint including in-progress public rooms. (Depends on: A-02) | Blocks: G-01
+- [x] **K-03** P2 - Round Timer & Early-Finish Coordinator | Server-owned round timing, intermission countdown, and early-finish triggers. (Depends on: K-01; N-03) | Blocks: K-04; N-05; K-05; K-07; G-03
 - [-] **K-04** P2 - Full Game Cycle Drawer Rotation & Word Uniqueness | Remaining-drawer tracking, unique words, and role-specific round-start payloads. (Depends on: K-01; N-03; K-03) | Blocks: A-07; K-07; A-08
 - [ ] **K-05** P3 - Time-Based Scoring & Multi-Guesser Round Resolution | Replace placeholder scoring with the final bounded time-based model. (Depends on: K-03; K-04; N-05) | Blocks: A-08; G-05
 - [ ] **K-06** P3 - Near-Match, Duplicate, And Correct-Once Guess Rules | Rich guess outcomes and per-player round guess-state rules. (Depends on: N-03; N-05) | Blocks: G-05
@@ -95,7 +95,7 @@ Use this as the default claim order for the next wave of work:
 
 ### Track G
 
-- [-] **G-01** P1 - Entry Screen & Public Room Discovery UI | Browser entry page, create/join forms, and public-room list rendering. (Depends on: A-02; K-02) | Blocks: G-02
+- [x] **G-01** P1 - Entry Screen & Public Room Discovery UI | Browser entry page, create/join forms, and public-room list rendering. (Depends on: A-02; K-02) | Blocks: G-02
 - [ ] **G-02** P1 - Live Lobby Page Template & Room Client | Lobby page, room socket client, derived join URL, and host controls. (Depends on: A-03; N-02; A-06; G-01) | Blocks: G-03; G-04
 - [ ] **G-03** P2 - Gameplay Page Shell, HUD, And Guess UI | Gameplay browser shell, timer/score HUD, and guess input/result rendering. (Depends on: A-06; K-03; K-04; N-05; G-02) | Blocks: G-05
 - [ ] **G-04** P2 - Browser Drawing Surface & Room Socket Integration | Drawer canvas UI, viewer drawing replay, and clear/end-stroke browser handling. (Depends on: N-04; G-02) | Blocks: G-05

@@ -179,3 +179,10 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                 "type": "echo_reply",
                 "message": f"Echo: {content.get('message', '')}"
             })
+
+    async def room_server_event(self, event: dict) -> None:
+        """Forward room-group server events to this socket client."""
+        server_event = event.get("event")
+        if not isinstance(server_event, dict):
+            return
+        await self.send_json(server_event)

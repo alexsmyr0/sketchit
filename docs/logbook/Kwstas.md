@@ -22,3 +22,8 @@
 ## Apr 9
 
 - Added public room directory API.
+- Added entry screen and public room discovery UI.
+
+## Apr 10
+
+- Added round timer and early-finish coordinator.

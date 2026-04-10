@@ -1,9 +1,14 @@
+import threading
+import time
 from datetime import timedelta
 
+import fakeredis
 from django.contrib import admin
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
+from games import redis as game_redis
+from games import runtime as game_runtime
 from games.admin import GameAdmin, GameWordAdmin, GuessAdmin, RoundAdmin
 from games.models import Game, GameStatus, GameWord, Guess, Round, RoundStatus
 from games.services import (
@@ -221,22 +226,28 @@ class StartGameServiceTests(TestCase):
         return first_round, self.host, self.member
 
     def _resolve_round_with_correct_guess(self, round_to_resolve: Round) -> None:
-        guesser = (
+        guessers = list(
             Player.objects.filter(
                 room=self.room,
-                connection_status=Player.ConnectionStatus.CONNECTED,
                 participation_status=Player.ParticipationStatus.PLAYING,
+                created_at__lte=round_to_resolve.started_at,
             )
             .exclude(pk=round_to_resolve.drawer_participant_id)
             .order_by("created_at", "id")
-            .first()
         )
-        self.assertIsNotNone(guesser)
-        evaluate_guess_for_round(
-            round_to_resolve,
-            guesser,
-            round_to_resolve.selected_game_word.text,
-        )
+        self.assertTrue(guessers)
+
+        for guesser in guessers:
+            evaluate_guess_for_round(
+                round_to_resolve,
+                guesser,
+                round_to_resolve.selected_game_word.text,
+            )
+            round_to_resolve.refresh_from_db()
+            if round_to_resolve.status is not None:
+                break
+
+        self.assertEqual(round_to_resolve.status, RoundStatus.COMPLETED)
 
     def test_correct_guess_ends_active_round_and_updates_scores(self):
         first_round, guesser, drawer = self._start_game_with_non_drawer_guesser()
@@ -425,6 +436,103 @@ class StartGameServiceTests(TestCase):
         self.assertEqual(drawer.current_score, 0)
         self.assertEqual(Guess.objects.filter(round=first_round).count(), 1)
 
+    def test_round_ends_only_after_all_eligible_non_drawers_are_correct(self):
+        Player.objects.create(
+            room=self.room,
+            session_key="third-eligible-session",
+            display_name="Third Eligible",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        started_game = start_game_for_room(self.room)
+        first_round = started_game.first_round
+
+        guessers = list(
+            Player.objects.filter(
+                room=self.room,
+                participation_status=Player.ParticipationStatus.PLAYING,
+                created_at__lte=first_round.started_at,
+            )
+            .exclude(pk=first_round.drawer_participant_id)
+            .order_by("created_at", "id")
+        )
+        self.assertEqual(len(guessers), 2)
+
+        first_result = evaluate_guess_for_round(
+            first_round,
+            guessers[0],
+            first_round.selected_game_word.text,
+        )
+        first_round.refresh_from_db()
+        self.assertTrue(first_result.is_correct)
+        self.assertFalse(first_result.round_completed_now)
+        self.assertIsNone(first_round.status)
+        self.assertIsNone(first_round.ended_at)
+
+        second_result = evaluate_guess_for_round(
+            first_round,
+            guessers[1],
+            first_round.selected_game_word.text,
+        )
+        first_round.refresh_from_db()
+        drawer = first_round.drawer_participant
+        drawer.refresh_from_db()
+        guessers[0].refresh_from_db()
+        guessers[1].refresh_from_db()
+
+        self.assertTrue(second_result.is_correct)
+        self.assertTrue(second_result.round_completed)
+        self.assertTrue(second_result.round_completed_now)
+        self.assertEqual(first_round.status, RoundStatus.COMPLETED)
+        self.assertIsNotNone(first_round.ended_at)
+        self.assertEqual(guessers[0].current_score, 1)
+        self.assertEqual(guessers[1].current_score, 1)
+        self.assertEqual(drawer.current_score, 2)
+
+    def test_disconnected_eligible_guesser_does_not_trigger_early_finish(self):
+        Player.objects.create(
+            room=self.room,
+            session_key="third-disconnect-session",
+            display_name="Third Disconnect",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        started_game = start_game_for_room(self.room)
+        first_round = started_game.first_round
+
+        guessers = list(
+            Player.objects.filter(
+                room=self.room,
+                participation_status=Player.ParticipationStatus.PLAYING,
+                created_at__lte=first_round.started_at,
+            )
+            .exclude(pk=first_round.drawer_participant_id)
+            .order_by("created_at", "id")
+        )
+        self.assertEqual(len(guessers), 2)
+
+        disconnected_guesser = guessers[1]
+        disconnected_guesser.connection_status = Player.ConnectionStatus.DISCONNECTED
+        disconnected_guesser.save(update_fields=("connection_status", "updated_at"))
+
+        result = evaluate_guess_for_round(
+            first_round,
+            guessers[0],
+            first_round.selected_game_word.text,
+        )
+
+        first_round.refresh_from_db()
+        guessers[0].refresh_from_db()
+
+        self.assertTrue(result.is_correct)
+        self.assertFalse(result.round_completed)
+        self.assertFalse(result.round_completed_now)
+        self.assertIsNone(first_round.status)
+        self.assertIsNone(first_round.ended_at)
+        self.assertEqual(guessers[0].current_score, 1)
+
     def test_evaluate_guess_rejects_spectating_participant(self):
         first_round, _guesser, _drawer = self._start_game_with_non_drawer_guesser()
 
@@ -472,3 +580,148 @@ class StartGameServiceTests(TestCase):
             evaluate_guess_for_round(first_round, outsider, first_round.selected_game_word.text)
 
         self.assertEqual(Guess.objects.filter(round=first_round).count(), 0)
+
+
+@override_settings(
+    SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True,
+    SKETCHIT_ROUND_DURATION_SECONDS=0.5,
+    SKETCHIT_INTERMISSION_DURATION_SECONDS=2,
+    SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.1,
+)
+class RoundTimerCoordinatorTests(TransactionTestCase):
+    def setUp(self):
+        super().setUp()
+        self.word_pack = WordPack.objects.create(name="Timer Test Pack")
+        for word_text in ("apple", "banana", "cherry"):
+            word = Word.objects.create(text=word_text)
+            WordPackEntry.objects.create(word_pack=self.word_pack, word=word)
+
+        self.room = Room.objects.create(
+            name="Timer Room",
+            join_code="TIME1234",
+            visibility=Room.Visibility.PRIVATE,
+            status=Room.Status.LOBBY,
+            word_pack=self.word_pack,
+        )
+        session_expires_at = timezone.now() + timedelta(hours=1)
+        self.host = Player.objects.create(
+            room=self.room,
+            session_key="timer-host-session",
+            display_name="Host",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=session_expires_at,
+        )
+        self.member = Player.objects.create(
+            room=self.room,
+            session_key="timer-member-session",
+            display_name="Member",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=session_expires_at,
+        )
+        self.room.host = self.host
+        self.room.save(update_fields=("host",))
+
+        game_runtime.reset_runtime_state_for_tests()
+        self.fake_redis = fakeredis.FakeRedis()
+        game_runtime._redis_client = self.fake_redis
+
+        self._event_log_lock = threading.Lock()
+        self.event_log: list[tuple[str, dict]] = []
+        self.original_broadcast = game_runtime.broadcast_room_event
+
+        def _capture_event(join_code: str, event_type: str, payload: dict) -> None:
+            with self._event_log_lock:
+                self.event_log.append((event_type, payload))
+
+        game_runtime.broadcast_room_event = _capture_event
+
+    def tearDown(self):
+        game_runtime.broadcast_room_event = self.original_broadcast
+        game_runtime.reset_runtime_state_for_tests()
+        super().tearDown()
+
+    def _wait_for(self, predicate, timeout_seconds: float = 3.0) -> None:
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            if predicate():
+                return
+            time.sleep(0.05)
+        self.fail("Timed out waiting for expected runtime condition.")
+
+    def _event_types(self) -> list[str]:
+        with self._event_log_lock:
+            return [event_type for event_type, _payload in self.event_log]
+
+    def test_server_timer_expires_round_and_starts_intermission(self):
+        started_game = start_game_for_room(self.room)
+        first_round = started_game.first_round
+
+        def _round_completed() -> bool:
+            first_round.refresh_from_db()
+            return first_round.status == RoundStatus.COMPLETED
+
+        self._wait_for(_round_completed, timeout_seconds=4)
+        self.assertIsNotNone(first_round.ended_at)
+        self.assertEqual(Guess.objects.filter(round=first_round).count(), 0)
+
+        turn_state = game_redis.get_turn_state(self.fake_redis, self.room.join_code)
+        self.assertEqual(turn_state.get("phase"), "intermission")
+        self.assertEqual(turn_state.get("round_id"), str(first_round.id))
+
+        self.assertIn("round.timer", self._event_types())
+        self.assertIn("round.ended", self._event_types())
+        self.assertIn("round.intermission_timer", self._event_types())
+
+    def test_all_eligible_guessers_correct_ends_round_before_timer_expiry(self):
+        Player.objects.create(
+            room=self.room,
+            session_key="timer-third-session",
+            display_name="Third",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        started_game = start_game_for_room(self.room)
+        first_round = started_game.first_round
+
+        guessers = list(
+            Player.objects.filter(
+                room=self.room,
+                participation_status=Player.ParticipationStatus.PLAYING,
+                created_at__lte=first_round.started_at,
+            )
+            .exclude(pk=first_round.drawer_participant_id)
+            .order_by("created_at", "id")
+        )
+        self.assertEqual(len(guessers), 2)
+
+        first_result = evaluate_guess_for_round(
+            first_round,
+            guessers[0],
+            first_round.selected_game_word.text,
+        )
+        first_round.refresh_from_db()
+        self.assertTrue(first_result.is_correct)
+        self.assertFalse(first_result.round_completed_now)
+        self.assertIsNone(first_round.status)
+
+        second_result = evaluate_guess_for_round(
+            first_round,
+            guessers[1],
+            first_round.selected_game_word.text,
+        )
+        first_round.refresh_from_db()
+        self.assertTrue(second_result.is_correct)
+        self.assertTrue(second_result.round_completed_now)
+        self.assertEqual(first_round.status, RoundStatus.COMPLETED)
+        self.assertIsNotNone(first_round.ended_at)
+
+        ended_events = [
+            payload
+            for event_type, payload in self.event_log
+            if event_type == "round.ended"
+        ]
+        self.assertTrue(ended_events)
+        self.assertEqual(ended_events[-1]["reason"], "all_guessers_correct")
