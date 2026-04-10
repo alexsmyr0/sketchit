@@ -11,12 +11,12 @@ room:{join_code}:game:drawer_pool
     Redis Set    Remaining drawer player IDs for the current game.
 room:{join_code}:round:turn_state
     Redis Hash   Active turn state for timers (e.g., ends_at, status).
-room:{join_code}:round:guess_state
-    Redis Hash   Live guess state per-round mapped by player_id.
+room:{join_code}:round:{round_id}:guess_state
+    Redis Hash   Live JSON guess state per-round mapped by player_id.
 room:{join_code}:round:payload:{role}
     Redis String JSON encoded payload for specific roles ("drawer" or "guesser").
-room:{join_code}:deadline
-    Redis String Timestamp string for cleanup deadline.
+room:{join_code}:deadline:{deadline_type}
+    Redis String ISO timestamp for specific deadline types.
 
 All keys carry a 24-hour TTL that is refreshed on every write.
 """
