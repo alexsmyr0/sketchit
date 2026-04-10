@@ -293,6 +293,10 @@ class JoinRoomViewTests(TestCase):
             player.session_expires_at.replace(microsecond=0),
             self.client.session.get_expiry_date().replace(microsecond=0),
         )
+        self.assertEqual(
+            player.connection_status,
+            Player.ConnectionStatus.DISCONNECTED,
+        )
         self.assertEqual(second_response.json()["join_code"], self.room.join_code)
 
     def test_join_room_allows_same_session_rejoin_even_when_room_is_full(self):
