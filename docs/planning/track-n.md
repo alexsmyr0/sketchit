@@ -15,7 +15,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### N-01: Redis Room Runtime Helper Baseline
-**Source Ticket**: `T-03`  
 **Priority**: High  
 **Phase**: P0 Existing Baseline  
 **Depends On**: `A-01`  
@@ -37,7 +36,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### N-02: Room WebSocket Consumer & Session Authorization
-**Source Ticket**: `T-09`  
 **Priority**: Critical  
 **Phase**: P1 Realtime Lobby  
 **Depends On**: `A-02`, `N-01`  
@@ -60,7 +58,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### N-03: Redis Round Runtime State
-**Source Ticket**: `T-11`  
 **Priority**: Critical  
 **Phase**: P2 Playable Round Loop  
 **Depends On**: `N-01`, `K-01`, `N-02`  
@@ -85,7 +82,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### N-04: Drawing Event Broadcast & Canvas Snapshot Sync
-**Source Ticket**: `T-12`  
 **Priority**: Critical  
 **Phase**: P2 Playable Round Loop  
 **Depends On**: `N-02`, `N-03`  
@@ -109,7 +105,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### N-05: Guess Submission Pipeline Over Room Socket
-**Source Ticket**: `T-15`  
 **Priority**: Critical  
 **Phase**: P2 Playable Round Loop  
 **Depends On**: `N-02`, `K-03`, `K-01`  
