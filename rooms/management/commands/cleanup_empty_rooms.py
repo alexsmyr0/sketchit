@@ -6,7 +6,7 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 import redis
 
-from rooms.services import cleanup_expired_empty_rooms
+from rooms.services import cleanup_expired_empty_rooms, purge_expired_participants
 
 
 _redis_client = None
@@ -27,11 +27,17 @@ class Command(BaseCommand):
     def handle(self, *args, **options) -> None:
         """Run one cleanup sweep and report how many rooms were deleted."""
 
+        redis_client = _get_redis_client()
+        purged_participants = purge_expired_participants(
+            redis_client=redis_client,
+        )
         deleted_count = cleanup_expired_empty_rooms(
-            redis_client=_get_redis_client(),
+            redis_client=redis_client,
         )
         self.stdout.write(
             self.style.SUCCESS(
+                "Purged "
+                f"{purged_participants} expired participant(s). "
                 f"Deleted {deleted_count} expired empty room(s)."
             )
         )

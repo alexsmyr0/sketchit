@@ -62,13 +62,60 @@ class CleanupEmptyRoomsCommandTests(TestCase):
         with patch("rooms.services.timezone.now", return_value=now):
             call_command("cleanup_empty_rooms", stdout=output)
 
-        self.assertIn("Deleted 1 expired empty room(s).", output.getvalue())
+        self.assertIn(
+            "Purged 0 expired participant(s). Deleted 1 expired empty room(s).",
+            output.getvalue(),
+        )
         self.assertFalse(Room.objects.filter(pk=expired_room.id).exists())
         self.assertTrue(Room.objects.filter(pk=fresh_room.id).exists())
         self.assertIsNone(
             game_redis.get_deadline(
                 fake_redis,
                 expired_room.join_code,
+                "cleanup",
+            )
+        )
+
+    @patch("rooms.management.commands.cleanup_empty_rooms._get_redis_client")
+    def test_cleanup_empty_rooms_command_purges_expired_participants_before_room_cleanup(
+        self,
+        get_redis_client,
+    ):
+        fake_redis = fakeredis.FakeRedis()
+        get_redis_client.return_value = fake_redis
+        now = timezone.now()
+        room = Room.objects.create(
+            name="Expiry Room",
+            join_code="EXPIRE01",
+            visibility=Room.Visibility.PRIVATE,
+        )
+        from rooms.models import Player
+
+        expired_player = Player.objects.create(
+            room=room,
+            session_key="expired-session",
+            display_name="Expired Alex",
+            session_expires_at=now - timedelta(minutes=1),
+        )
+        room.host = expired_player
+        room.save(update_fields=["host", "updated_at"])
+
+        output = StringIO()
+        with patch("rooms.services.timezone.now", return_value=now):
+            call_command("cleanup_empty_rooms", stdout=output)
+
+        room.refresh_from_db()
+        self.assertIn(
+            "Purged 1 expired participant(s). Deleted 0 expired empty room(s).",
+            output.getvalue(),
+        )
+        self.assertFalse(Player.objects.filter(pk=expired_player.id).exists())
+        self.assertEqual(room.status, Room.Status.EMPTY_GRACE)
+        self.assertIsNotNone(room.empty_since)
+        self.assertIsNotNone(
+            game_redis.get_deadline(
+                fake_redis,
+                room.join_code,
                 "cleanup",
             )
         )

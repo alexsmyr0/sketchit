@@ -71,6 +71,109 @@ def _clear_empty_room_cleanup_deadline(*, redis_client, join_code: str) -> None:
     game_redis.clear_deadline(redis_client, join_code, "cleanup")
 
 
+def _cancel_non_resumable_active_games_for_room(*, room_id: int) -> None:
+    """Cancel any in-progress games that became non-resumable after room emptying.
+
+    The SDS says a room that emptied out must come back as a clean lobby on
+    rejoin. That means any active game tied to the old room state must be
+    marked cancelled instead of being silently resumed.
+    """
+
+    from games.models import Game, GameStatus, Round, RoundStatus
+
+    cancelled_at = timezone.now()
+    active_game_ids = list(
+        Game.objects.select_for_update()
+        .filter(room_id=room_id, status=GameStatus.IN_PROGRESS)
+        .order_by("started_at", "id")
+        .values_list("id", flat=True)
+    )
+    if not active_game_ids:
+        return
+
+    Round.objects.select_for_update().filter(
+        game_id__in=active_game_ids,
+        status__isnull=True,
+        ended_at__isnull=True,
+    ).update(
+        status=RoundStatus.CANCELLED,
+        ended_at=cancelled_at,
+        updated_at=cancelled_at,
+    )
+    Game.objects.filter(
+        id__in=active_game_ids,
+        status=GameStatus.IN_PROGRESS,
+    ).update(
+        status=GameStatus.CANCELLED,
+        ended_at=cancelled_at,
+        updated_at=cancelled_at,
+    )
+
+
+def _teardown_room_game_runtime(
+    *,
+    redis_client,
+    join_code: str,
+    include_cleanup_deadline: bool,
+) -> None:
+    """Delegate room-wide gameplay runtime cleanup to the games runtime module."""
+
+    from games import runtime as game_runtime
+
+    game_runtime.teardown_room_runtime(
+        join_code,
+        redis_client=redis_client,
+        include_cleanup_deadline=include_cleanup_deadline,
+    )
+
+
+def _schedule_empty_room_cleanup_deadline_after_commit(
+    *,
+    redis_client,
+    join_code: str,
+    deadline_at: datetime,
+) -> None:
+    """Write the empty-room cleanup deadline only after the DB commit succeeds."""
+
+    transaction.on_commit(
+        lambda: _set_empty_room_cleanup_deadline(
+            redis_client=redis_client,
+            join_code=join_code,
+            deadline_at=deadline_at,
+        )
+    )
+
+
+def _schedule_restore_runtime_cleanup_after_commit(*, redis_client, join_code: str) -> None:
+    """Clear empty-room runtime state only after the restore transaction commits."""
+
+    transaction.on_commit(
+        lambda: (
+            _teardown_room_game_runtime(
+                redis_client=redis_client,
+                join_code=join_code,
+                include_cleanup_deadline=False,
+            ),
+            _clear_empty_room_cleanup_deadline(
+                redis_client=redis_client,
+                join_code=join_code,
+            ),
+        )
+    )
+
+
+def _schedule_delete_runtime_cleanup_after_commit(*, redis_client, join_code: str) -> None:
+    """Clear room runtime state only after the room delete has committed."""
+
+    transaction.on_commit(
+        lambda: _teardown_room_game_runtime(
+            redis_client=redis_client,
+            join_code=join_code,
+            include_cleanup_deadline=True,
+        )
+    )
+
+
 def _validate_room_presence_identity(
     *,
     player: Player,
@@ -155,7 +258,7 @@ def enter_empty_room_grace(
     room.empty_since = empty_since
     room.save(update_fields=["status", "empty_since", "updated_at"])
 
-    _set_empty_room_cleanup_deadline(
+    _schedule_empty_room_cleanup_deadline_after_commit(
         redis_client=redis_client,
         join_code=room.join_code,
         deadline_at=get_empty_room_cleanup_deadline(empty_since=empty_since),
@@ -176,10 +279,13 @@ def restore_room_from_empty_grace(*, redis_client, room_id: int) -> Room:
     if room.status != Room.Status.EMPTY_GRACE:
         raise ValueError("Only rooms in empty grace can be restored.")
 
+    # A revived room must become a clean lobby, not a hidden continuation of
+    # the abandoned game that was active before everyone left.
+    _cancel_non_resumable_active_games_for_room(room_id=room.id)
     room.status = Room.Status.LOBBY
     room.empty_since = None
     room.save(update_fields=["status", "empty_since", "updated_at"])
-    _clear_empty_room_cleanup_deadline(
+    _schedule_restore_runtime_cleanup_after_commit(
         redis_client=redis_client,
         join_code=room.join_code,
     )
@@ -221,11 +327,46 @@ def delete_room_if_empty_grace_expired(
 
     join_code = room.join_code
     room.delete()
-    _clear_empty_room_cleanup_deadline(
+    # Runtime teardown waits until commit so Redis/game runtime never move
+    # ahead of a database delete that later rolls back.
+    _schedule_delete_runtime_cleanup_after_commit(
         redis_client=redis_client,
         join_code=join_code,
     )
     return True
+
+
+def purge_expired_participants(
+    *,
+    redis_client,
+    now: datetime | None = None,
+) -> int:
+    """Permanently remove participants whose Django guest session has expired.
+
+    This routes expiry cleanup through ``leave_participant`` so host handoff and
+    empty-room grace behave exactly like any other permanent leave path.
+    """
+
+    current_time = now or timezone.now()
+    expired_player_ids = list(
+        Player.objects.filter(session_expires_at__lte=current_time)
+        .order_by("session_expires_at", "id")
+        .values_list("id", flat=True)
+    )
+
+    purged_count = 0
+    for player_id in expired_player_ids:
+        try:
+            leave_participant(
+                redis_client=redis_client,
+                player_id=player_id,
+            )
+        except Player.DoesNotExist:
+            # A concurrent cleanup may have already removed this participant.
+            continue
+        purged_count += 1
+
+    return purged_count
 
 
 def cleanup_expired_empty_rooms(
