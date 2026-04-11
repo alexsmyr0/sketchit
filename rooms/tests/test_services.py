@@ -29,6 +29,12 @@ from rooms.services import (
 class ParticipantLifecycleServiceTests(TestCase):
     """Service-level coverage for participant connection lifecycle rules."""
 
+    def _execute_on_commit(self, callback):
+        """Run code and immediately execute any on-commit callbacks it registers."""
+
+        with self.captureOnCommitCallbacks(execute=True):
+            callback()
+
     def setUp(self):
         self.redis_client = fakeredis.FakeRedis()
         self.room = Room.objects.create(
@@ -197,9 +203,11 @@ class ParticipantLifecycleServiceTests(TestCase):
             connection_id="chan-2",
         )
 
-        leave_participant(
-            redis_client=self.redis_client,
-            player_id=self.player.id,
+        self._execute_on_commit(
+            lambda: leave_participant(
+                redis_client=self.redis_client,
+                player_id=self.player.id,
+            )
         )
 
         self.assertFalse(Player.objects.filter(pk=self.player.id).exists())
@@ -316,6 +324,12 @@ class ParticipantLifecycleServiceTests(TestCase):
 class EmptyRoomGraceServiceTests(TestCase):
     """Service-level coverage for empty-room grace entry, restore, and expiry."""
 
+    def _execute_on_commit(self, callback):
+        """Run code and immediately execute any on-commit callbacks it registers."""
+
+        with self.captureOnCommitCallbacks(execute=True):
+            callback()
+
     def setUp(self):
         self.redis_client = fakeredis.FakeRedis()
         self.room = Room.objects.create(
@@ -327,10 +341,12 @@ class EmptyRoomGraceServiceTests(TestCase):
     def test_enter_empty_room_grace_sets_status_timestamp_and_cleanup_deadline(self):
         entered_at = timezone.now()
 
-        enter_empty_room_grace(
-            redis_client=self.redis_client,
-            room_id=self.room.id,
-            now=entered_at,
+        self._execute_on_commit(
+            lambda: enter_empty_room_grace(
+                redis_client=self.redis_client,
+                room_id=self.room.id,
+                now=entered_at,
+            )
         )
 
         self.room.refresh_from_db()
@@ -352,10 +368,12 @@ class EmptyRoomGraceServiceTests(TestCase):
         self.room.empty_since = original_empty_since
         self.room.save(update_fields=["status", "empty_since", "updated_at"])
 
-        enter_empty_room_grace(
-            redis_client=self.redis_client,
-            room_id=self.room.id,
-            now=timezone.now(),
+        self._execute_on_commit(
+            lambda: enter_empty_room_grace(
+                redis_client=self.redis_client,
+                room_id=self.room.id,
+                now=timezone.now(),
+            )
         )
 
         self.room.refresh_from_db()
@@ -391,15 +409,19 @@ class EmptyRoomGraceServiceTests(TestCase):
             )
 
     def test_restore_room_from_empty_grace_returns_room_to_lobby(self):
-        enter_empty_room_grace(
-            redis_client=self.redis_client,
-            room_id=self.room.id,
-            now=timezone.now(),
+        self._execute_on_commit(
+            lambda: enter_empty_room_grace(
+                redis_client=self.redis_client,
+                room_id=self.room.id,
+                now=timezone.now(),
+            )
         )
 
-        restore_room_from_empty_grace(
-            redis_client=self.redis_client,
-            room_id=self.room.id,
+        self._execute_on_commit(
+            lambda: restore_room_from_empty_grace(
+                redis_client=self.redis_client,
+                room_id=self.room.id,
+            )
         )
 
         self.room.refresh_from_db()
@@ -471,9 +493,11 @@ class EmptyRoomGraceServiceTests(TestCase):
             get_empty_room_cleanup_deadline(empty_since=entered_at).isoformat(),
         )
 
-        restore_room_from_empty_grace(
-            redis_client=self.redis_client,
-            room_id=self.room.id,
+        self._execute_on_commit(
+            lambda: restore_room_from_empty_grace(
+                redis_client=self.redis_client,
+                room_id=self.room.id,
+            )
         )
 
         self.room.refresh_from_db()
@@ -519,10 +543,12 @@ class EmptyRoomGraceServiceTests(TestCase):
 
     def test_delete_room_if_empty_grace_expired_keeps_room_before_deadline(self):
         entered_at = timezone.now()
-        enter_empty_room_grace(
-            redis_client=self.redis_client,
-            room_id=self.room.id,
-            now=entered_at,
+        self._execute_on_commit(
+            lambda: enter_empty_room_grace(
+                redis_client=self.redis_client,
+                room_id=self.room.id,
+                now=entered_at,
+            )
         )
 
         deleted = delete_room_if_empty_grace_expired(
@@ -536,19 +562,27 @@ class EmptyRoomGraceServiceTests(TestCase):
 
     def test_delete_room_if_empty_grace_expired_deletes_room_after_deadline(self):
         entered_at = timezone.now()
-        enter_empty_room_grace(
-            redis_client=self.redis_client,
-            room_id=self.room.id,
-            now=entered_at,
+        self._execute_on_commit(
+            lambda: enter_empty_room_grace(
+                redis_client=self.redis_client,
+                room_id=self.room.id,
+                now=entered_at,
+            )
         )
 
-        deleted = delete_room_if_empty_grace_expired(
-            redis_client=self.redis_client,
-            room_id=self.room.id,
-            now=entered_at + timedelta(minutes=10),
+        deleted: list[bool] = []
+        self._execute_on_commit(
+            lambda: deleted.append(
+                delete_room_if_empty_grace_expired(
+                    redis_client=self.redis_client,
+                    room_id=self.room.id,
+                    now=entered_at + timedelta(minutes=10),
+                )
+            )
         )
+        deleted_result = deleted[0]
 
-        self.assertTrue(deleted)
+        self.assertTrue(deleted_result)
         self.assertFalse(Room.objects.filter(pk=self.room.id).exists())
         self.assertIsNone(
             game_redis.get_deadline(
@@ -612,13 +646,19 @@ class EmptyRoomGraceServiceTests(TestCase):
             get_empty_room_cleanup_deadline(empty_since=entered_at).isoformat(),
         )
 
-        deleted = delete_room_if_empty_grace_expired(
-            redis_client=self.redis_client,
-            room_id=self.room.id,
-            now=timezone.now(),
+        deleted: list[bool] = []
+        self._execute_on_commit(
+            lambda: deleted.append(
+                delete_room_if_empty_grace_expired(
+                    redis_client=self.redis_client,
+                    room_id=self.room.id,
+                    now=timezone.now(),
+                )
+            )
         )
+        deleted_result = deleted[0]
 
-        self.assertTrue(deleted)
+        self.assertTrue(deleted_result)
         self.assertFalse(Room.objects.filter(pk=self.room.id).exists())
         self.assertEqual(game_redis.get_turn_state(self.redis_client, self.room.join_code), {})
         self.assertEqual(game_redis.get_drawer_pool(self.redis_client, self.room.join_code), set())
@@ -700,10 +740,16 @@ class EmptyRoomGraceServiceTests(TestCase):
             occupied_deadline,
         )
 
-        deleted_count = cleanup_expired_empty_rooms(
-            redis_client=self.redis_client,
-            now=now,
+        deleted_counts: list[int] = []
+        self._execute_on_commit(
+            lambda: deleted_counts.append(
+                cleanup_expired_empty_rooms(
+                    redis_client=self.redis_client,
+                    now=now,
+                )
+            )
         )
+        deleted_count = deleted_counts[0]
 
         self.assertEqual(deleted_count, 1)
         self.assertFalse(Room.objects.filter(pk=expired_room.id).exists())
@@ -745,10 +791,16 @@ class EmptyRoomGraceServiceTests(TestCase):
         self.room.host = expired_player
         self.room.save(update_fields=["host", "updated_at"])
 
-        purged_count = purge_expired_participants(
-            redis_client=self.redis_client,
-            now=timezone.now(),
+        purged_counts: list[int] = []
+        self._execute_on_commit(
+            lambda: purged_counts.append(
+                purge_expired_participants(
+                    redis_client=self.redis_client,
+                    now=timezone.now(),
+                )
+            )
         )
+        purged_count = purged_counts[0]
 
         self.room.refresh_from_db()
         self.assertEqual(purged_count, 1)

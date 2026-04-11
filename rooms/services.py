@@ -110,6 +110,21 @@ def _cancel_non_resumable_active_games_for_room(*, room_id: int) -> None:
     )
 
 
+def _delete_room_game_history(*, room_id: int) -> None:
+    """Delete all game-owned records for one room in dependency-safe order.
+
+    ``Round.selected_game_word`` uses ``PROTECT``, so deleting the room alone is
+    not enough. We must remove dependent rows from the leaves inward.
+    """
+
+    from games.models import Game, GameWord, Guess, Round
+
+    Guess.objects.filter(round__game__room_id=room_id).delete()
+    Round.objects.filter(game__room_id=room_id).delete()
+    GameWord.objects.filter(game__room_id=room_id).delete()
+    Game.objects.filter(room_id=room_id).delete()
+
+
 def _teardown_room_game_runtime(
     *,
     redis_client,
@@ -325,6 +340,7 @@ def delete_room_if_empty_grace_expired(
     if current_time < deadline_at:
         return False
 
+    _delete_room_game_history(room_id=room.id)
     join_code = room.join_code
     room.delete()
     # Runtime teardown waits until commit so Redis/game runtime never move

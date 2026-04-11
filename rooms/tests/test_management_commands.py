@@ -19,6 +19,13 @@ from rooms.services import get_empty_room_cleanup_deadline
 class CleanupEmptyRoomsCommandTests(TestCase):
     """Verify the empty-room cleanup management command delegates correctly."""
 
+    def _call_cleanup_command_and_execute_on_commit(self, *, now, output):
+        """Run the cleanup command and flush any on-commit callbacks it registers."""
+
+        with patch("rooms.services.timezone.now", return_value=now):
+            with self.captureOnCommitCallbacks(execute=True):
+                call_command("cleanup_empty_rooms", stdout=output)
+
     @patch("rooms.management.commands.cleanup_empty_rooms._get_redis_client")
     def test_cleanup_empty_rooms_command_deletes_expired_rooms_and_reports_count(
         self,
@@ -59,8 +66,7 @@ class CleanupEmptyRoomsCommandTests(TestCase):
         )
 
         output = StringIO()
-        with patch("rooms.services.timezone.now", return_value=now):
-            call_command("cleanup_empty_rooms", stdout=output)
+        self._call_cleanup_command_and_execute_on_commit(now=now, output=output)
 
         self.assertIn(
             "Purged 0 expired participant(s). Deleted 1 expired empty room(s).",
@@ -101,8 +107,7 @@ class CleanupEmptyRoomsCommandTests(TestCase):
         room.save(update_fields=["host", "updated_at"])
 
         output = StringIO()
-        with patch("rooms.services.timezone.now", return_value=now):
-            call_command("cleanup_empty_rooms", stdout=output)
+        self._call_cleanup_command_and_execute_on_commit(now=now, output=output)
 
         room.refresh_from_db()
         self.assertIn(

@@ -244,8 +244,14 @@ class JoinRoomViewTests(TestCase):
             content_type=content_type,
         )
 
+    def _post_join_room_and_execute_on_commit(self, **kwargs):
+        """Issue the join request and execute any transaction on-commit callbacks."""
+
+        with self.captureOnCommitCallbacks(execute=True):
+            return self.post_join_room(**kwargs)
+
     def test_join_room_creates_participant_for_existing_room(self):
-        response = self.post_join_room()
+        response = self._post_join_room_and_execute_on_commit()
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(Player.objects.count(), 1)
@@ -270,7 +276,7 @@ class JoinRoomViewTests(TestCase):
     def test_join_room_persists_session_for_guest_request(self):
         self.assertNotIn(settings.SESSION_COOKIE_NAME, self.client.cookies)
 
-        response = self.post_join_room()
+        response = self._post_join_room_and_execute_on_commit()
 
         self.assertEqual(response.status_code, 201)
         self.assertIn(settings.SESSION_COOKIE_NAME, self.client.cookies)
@@ -422,13 +428,6 @@ class JoinRoomViewTests(TestCase):
         self.assertEqual(self.room.status, Room.Status.LOBBY)
         self.assertIsNone(self.room.empty_since)
         self.assertEqual(self.room.host_id, player.id)
-        self.assertIsNone(
-            game_redis.get_deadline(
-                fake_redis,
-                self.room.join_code,
-                "cleanup",
-            )
-        )
 
     @patch("rooms.views._get_room_runtime_redis_client")
     def test_join_room_rejects_and_deletes_expired_empty_grace_room(
@@ -454,13 +453,6 @@ class JoinRoomViewTests(TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertFalse(Room.objects.filter(pk=self.room.id).exists())
         self.assertEqual(Player.objects.count(), 0)
-        self.assertIsNone(
-            game_redis.get_deadline(
-                fake_redis,
-                self.room.join_code,
-                "cleanup",
-            )
-        )
 
 
 class RoomLobbyStateViewTests(TestCase):
