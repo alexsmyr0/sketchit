@@ -304,3 +304,12 @@ def leave_participant(*, redis_client, player_id: int) -> None:
         player.session_key,
     )
     player.delete()
+
+    # Empty-room grace starts only when membership truly reaches zero. A plain
+    # socket disconnect is not enough because the participant row still exists
+    # and the room must remain reclaimable by the same session.
+    if not Player.objects.filter(room_id=room.id).exists():
+        enter_empty_room_grace(
+            redis_client=redis_client,
+            room_id=room.id,
+        )

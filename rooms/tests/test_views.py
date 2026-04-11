@@ -2,14 +2,17 @@ import json
 from datetime import timedelta
 from unittest.mock import patch
 
+import fakeredis
 from django.contrib import admin
 from django.conf import settings
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
+from games import redis as game_redis
 from games.models import Game, GameWord, Round
 from rooms.admin import PlayerAdmin, RoomAdmin
 from rooms.models import MVP_DEFAULT_WORD_PACK_NAME, Player, Room
+from rooms.services import get_empty_room_cleanup_deadline
 from words.models import Word, WordPack, WordPackEntry
 
 
@@ -390,6 +393,74 @@ class JoinRoomViewTests(TestCase):
 
         self.assertEqual(response.status_code, 405)
         self.assertEqual(Player.objects.count(), 0)
+
+    @patch("rooms.views._get_room_runtime_redis_client")
+    def test_join_room_restores_empty_grace_room_and_assigns_new_host(
+        self,
+        get_redis_client,
+    ):
+        fake_redis = fakeredis.FakeRedis()
+        get_redis_client.return_value = fake_redis
+        entered_at = timezone.now() - timedelta(minutes=5)
+        self.room.status = Room.Status.EMPTY_GRACE
+        self.room.empty_since = entered_at
+        self.room.host = None
+        self.room.save(update_fields=["status", "empty_since", "host", "updated_at"])
+        game_redis.set_deadline(
+            fake_redis,
+            self.room.join_code,
+            "cleanup",
+            get_empty_room_cleanup_deadline(empty_since=entered_at).isoformat(),
+        )
+
+        response = self.post_join_room()
+
+        self.assertEqual(response.status_code, 201)
+        self.room.refresh_from_db()
+        player = Player.objects.get(room=self.room)
+
+        self.assertEqual(self.room.status, Room.Status.LOBBY)
+        self.assertIsNone(self.room.empty_since)
+        self.assertEqual(self.room.host_id, player.id)
+        self.assertIsNone(
+            game_redis.get_deadline(
+                fake_redis,
+                self.room.join_code,
+                "cleanup",
+            )
+        )
+
+    @patch("rooms.views._get_room_runtime_redis_client")
+    def test_join_room_rejects_and_deletes_expired_empty_grace_room(
+        self,
+        get_redis_client,
+    ):
+        fake_redis = fakeredis.FakeRedis()
+        get_redis_client.return_value = fake_redis
+        entered_at = timezone.now() - timedelta(minutes=10, seconds=1)
+        self.room.status = Room.Status.EMPTY_GRACE
+        self.room.empty_since = entered_at
+        self.room.host = None
+        self.room.save(update_fields=["status", "empty_since", "host", "updated_at"])
+        game_redis.set_deadline(
+            fake_redis,
+            self.room.join_code,
+            "cleanup",
+            get_empty_room_cleanup_deadline(empty_since=entered_at).isoformat(),
+        )
+
+        response = self.post_join_room()
+
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse(Room.objects.filter(pk=self.room.id).exists())
+        self.assertEqual(Player.objects.count(), 0)
+        self.assertIsNone(
+            game_redis.get_deadline(
+                fake_redis,
+                self.room.join_code,
+                "cleanup",
+            )
+        )
 
 
 class RoomLobbyStateViewTests(TestCase):

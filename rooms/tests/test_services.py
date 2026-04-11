@@ -218,6 +218,15 @@ class ParticipantLifecycleServiceTests(TestCase):
         )
         self.room.refresh_from_db()
         self.assertIsNone(self.room.host)
+        self.assertEqual(self.room.status, Room.Status.EMPTY_GRACE)
+        self.assertIsNotNone(self.room.empty_since)
+        self.assertIsNotNone(
+            game_redis.get_deadline(
+                self.redis_client,
+                self.room.join_code,
+                "cleanup",
+            )
+        )
 
     @patch("rooms.services.random.choice")
     def test_leave_participant_reassigns_host_when_current_host_leaves(
@@ -248,6 +257,8 @@ class ParticipantLifecycleServiceTests(TestCase):
         self.room.refresh_from_db()
 
         self.assertEqual(self.room.host_id, third_player.id)
+        self.assertEqual(self.room.status, Room.Status.LOBBY)
+        self.assertIsNone(self.room.empty_since)
         self.assertFalse(Player.objects.filter(pk=self.player.id).exists())
         random_choice.assert_called_once()
 
@@ -268,6 +279,8 @@ class ParticipantLifecycleServiceTests(TestCase):
         self.room.refresh_from_db()
 
         self.assertEqual(self.room.host_id, self.player.id)
+        self.assertEqual(self.room.status, Room.Status.LOBBY)
+        self.assertIsNone(self.room.empty_since)
         self.assertFalse(Player.objects.filter(pk=non_host_player.id).exists())
 
     def test_connect_participant_rejects_mismatched_session_key(self):
