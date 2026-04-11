@@ -486,7 +486,6 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
         .order_by("id")
         .values("id", "current_score")
     )
-<<<<<<< HEAD
     all_eligible_guessers_correct = _all_eligible_non_drawer_guessers_are_correct(
         locked_round=locked_round,
         newest_correct_guesser_id=guessing_player.id,
