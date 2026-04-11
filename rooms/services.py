@@ -7,12 +7,17 @@ consumers, and later background tasks all apply the same rules.
 from __future__ import annotations
 
 import random
+from datetime import datetime, timedelta
 
 from django.db import transaction
 from django.utils import timezone
 
+from games import redis as game_redis
 from rooms import redis as room_redis
 from rooms.models import Player, Room
+
+
+EMPTY_ROOM_GRACE_PERIOD = timedelta(minutes=10)
 
 
 def _get_locked_player(player_id: int) -> Player:
@@ -32,11 +37,38 @@ def _get_locked_player(player_id: int) -> Player:
 def _get_locked_room(room_id: int) -> Room:
     """Return the room row locked for update.
 
-    The leave flow updates host ownership, so the room row must be locked while
-    we decide whether a host handoff is required.
+    Room lifecycle writes such as host handoff and empty-room grace must lock
+    the row so concurrent updates cannot overwrite each other.
     """
 
     return Room.objects.select_for_update().get(pk=room_id)
+
+
+def get_empty_room_cleanup_deadline(*, empty_since: datetime) -> datetime:
+    """Return the hard-delete deadline for a room already in empty grace.
+
+    The deadline is derived from the durable ``empty_since`` timestamp so the
+    cleanup policy survives process restarts and Redis cache loss.
+    """
+
+    return empty_since + EMPTY_ROOM_GRACE_PERIOD
+
+
+def _set_empty_room_cleanup_deadline(*, redis_client, join_code: str, deadline_at: datetime) -> None:
+    """Mirror the empty-room cleanup deadline into Redis runtime state."""
+
+    game_redis.set_deadline(
+        redis_client,
+        join_code,
+        "cleanup",
+        deadline_at.isoformat(),
+    )
+
+
+def _clear_empty_room_cleanup_deadline(*, redis_client, join_code: str) -> None:
+    """Remove the Redis-side empty-room cleanup deadline for one room."""
+
+    game_redis.clear_deadline(redis_client, join_code, "cleanup")
 
 
 def _validate_room_presence_identity(
@@ -49,6 +81,8 @@ def _validate_room_presence_identity(
 
     The consumer already resolved the player from the room + session pair, but
     this guard keeps the service honest if another caller wires it incorrectly.
+    That matters because presence is keyed by room/session identity; updating
+    the wrong participant would corrupt both Redis and the durable row state.
     """
 
     if player.room.join_code != join_code.upper():
@@ -79,6 +113,9 @@ def connect_participant(
         join_code=join_code,
         session_key=session_key,
     )
+    # Always use the canonical join code from the database row when touching
+    # Redis so callers cannot accidentally split presence across differently
+    # cased keys like "ABCD1234" and "abcd1234".
     room_join_code = player.room.join_code
 
     room_redis.add_presence(
@@ -94,6 +131,97 @@ def connect_participant(
 
 
 @transaction.atomic
+def enter_empty_room_grace(
+    *,
+    redis_client,
+    room_id: int,
+    now: datetime | None = None,
+) -> Room:
+    """Move an already-empty room into its 10-minute grace window.
+
+    Callers must use this only after they have removed the final participant.
+    The service refuses non-empty rooms because resetting the grace timer for a
+    room that still has members would hide a real lifecycle bug.
+    """
+
+    room = _get_locked_room(room_id)
+    if room.participants.exists():
+        raise ValueError("Cannot move a non-empty room into empty grace.")
+
+    # Re-entering the service for a room already in grace must not extend the
+    # deadline. We always preserve the first durable timestamp if it exists.
+    empty_since = room.empty_since or now or timezone.now()
+    room.status = Room.Status.EMPTY_GRACE
+    room.empty_since = empty_since
+    room.save(update_fields=["status", "empty_since", "updated_at"])
+
+    _set_empty_room_cleanup_deadline(
+        redis_client=redis_client,
+        join_code=room.join_code,
+        deadline_at=get_empty_room_cleanup_deadline(empty_since=empty_since),
+    )
+    return room
+
+
+@transaction.atomic
+def restore_room_from_empty_grace(*, redis_client, room_id: int) -> Room:
+    """Return an empty-grace room to the lobby and clear cleanup timing.
+
+    Batch 2 will call this when a participant rejoins before the deadline.
+    Restricting it to ``empty_grace`` rooms keeps later callers from silently
+    rewriting unrelated room states such as ``in_progress``.
+    """
+
+    room = _get_locked_room(room_id)
+    if room.status != Room.Status.EMPTY_GRACE:
+        raise ValueError("Only rooms in empty grace can be restored.")
+
+    room.status = Room.Status.LOBBY
+    room.empty_since = None
+    room.save(update_fields=["status", "empty_since", "updated_at"])
+    _clear_empty_room_cleanup_deadline(
+        redis_client=redis_client,
+        join_code=room.join_code,
+    )
+    return room
+
+
+@transaction.atomic
+def delete_room_if_empty_grace_expired(
+    *,
+    redis_client,
+    room_id: int,
+    now: datetime | None = None,
+) -> bool:
+    """Hard-delete an empty-grace room once its deadline has passed.
+
+    Returns ``True`` only when the room was actually deleted. Returning a
+    boolean keeps future cleanup jobs simple: they can count deletions without
+    needing to infer intent from exceptions.
+    """
+
+    room = _get_locked_room(room_id)
+    if room.status != Room.Status.EMPTY_GRACE or room.empty_since is None:
+        return False
+
+    if room.participants.exists():
+        return False
+
+    current_time = now or timezone.now()
+    deadline_at = get_empty_room_cleanup_deadline(empty_since=room.empty_since)
+    if current_time < deadline_at:
+        return False
+
+    join_code = room.join_code
+    room.delete()
+    _clear_empty_room_cleanup_deadline(
+        redis_client=redis_client,
+        join_code=join_code,
+    )
+    return True
+
+
+@transaction.atomic
 def disconnect_participant(
     *,
     redis_client,
@@ -105,7 +233,9 @@ def disconnect_participant(
     """Mark one participant socket as disconnected.
 
     A participant only becomes fully disconnected after the final socket for
-    that same session leaves the room.
+    that same session leaves the room. Temporary disconnects should not delete
+    the participant row or trigger host reassignment; those behaviors belong to
+    a permanent leave only.
     """
 
     player = _get_locked_player(player_id)
@@ -122,6 +252,8 @@ def disconnect_participant(
         session_key,
         connection_id=connection_id,
     )
+    # Redis knows about individual sockets, while MySQL stores the room-level
+    # answer of whether this participant is still connected anywhere right now.
     connection_still_present = room_redis.is_present(
         redis_client,
         room_join_code,
@@ -156,6 +288,10 @@ def leave_participant(*, redis_client, player_id: int) -> None:
             .exclude(pk=player.id)
             .order_by("created_at", "id")
         )
+        # Host handoff happens only on permanent leave. A plain disconnect keeps
+        # the same host so temporary network loss does not silently transfer
+        # lobby ownership to somebody else.
+        #
         # The PRD/SDS require a random remaining participant to become host.
         room.host = random.choice(remaining_participants) if remaining_participants else None
         room.save(update_fields=["host", "updated_at"])
