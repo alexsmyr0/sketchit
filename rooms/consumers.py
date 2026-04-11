@@ -34,6 +34,8 @@ from rooms.models import Player, Room
 from rooms.services import connect_participant, disconnect_participant
 from rooms import redis as room_redis
 from games import redis as game_redis
+from games import services as game_services
+from games.models import Round
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +214,8 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                 await self.send_json(event)
         elif message_type in ("drawing.stroke", "drawing.end_stroke", "drawing.clear"):
             await self._handle_drawing_event(content)
+        elif message_type == "guess.submit":
+            await self._handle_guess_submission(content)
 
     async def _handle_drawing_event(self, content: dict) -> None:
         """Process and broadcast drawer-authorized drawing events."""
@@ -312,3 +316,67 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
     @database_sync_to_async
     def _get_redis_snapshot(self) -> list[bytes]:
         return room_redis.get_canvas_snapshot(get_redis_client(), self.join_code)
+
+    async def _handle_guess_submission(self, content: dict) -> None:
+        """Process a guess submission from a participant."""
+        payload = content.get("payload", {})
+        guess_text = payload.get("text", "").strip()
+        
+        if not guess_text:
+            return
+
+        # 1. Fetch active round from Redis turn state
+        client = get_redis_client()
+        turn_state = await database_sync_to_async(game_redis.get_turn_state)(client, self.join_code)
+        round_id_str = turn_state.get("round_id")
+        
+        if not round_id_str:
+            # No active round to guess on
+            return
+
+        # 2. Evaluate the guess via the game service
+        try:
+            active_round = await self._resolve_round(int(round_id_str))
+            if not active_round:
+                return
+
+            evaluation_result = await database_sync_to_async(game_services.evaluate_guess_for_round)(
+                active_round, self.player, guess_text
+            )
+            
+            # 3. Broadcast result to all participants
+            await self.channel_layer.group_send(
+                self.room_group,
+                {
+                    "type": "guess_broadcast",
+                    "player_id": self.player.id,
+                    "player_nickname": self.player.display_name,
+                    "text": guess_text,
+                    "is_correct": evaluation_result.is_correct,
+                    "round_completed": evaluation_result.round_completed,
+                    "score_updates": [
+                        {"player_id": s.player_id, "current_score": s.current_score}
+                        for s in evaluation_result.score_updates
+                    ]
+                }
+            )
+        except Exception:
+            logger.exception(f"Error evaluating guess from player {self.player.id} in room {self.join_code}")
+
+    async def guess_broadcast(self, event: dict) -> None:
+        """Relay a guess result broadcast to the connected WebSocket client."""
+        await self.send_json({
+            "type": "guess.result",
+            "payload": {
+                "player_id": event["player_id"],
+                "player_nickname": event["player_nickname"],
+                "text": event["text"],
+                "is_correct": event["is_correct"],
+                "round_completed": event["round_completed"],
+                "score_updates": event["score_updates"]
+            }
+        })
+
+    @database_sync_to_async
+    def _resolve_round(self, round_id: int) -> Round | None:
+        return Round.objects.filter(pk=round_id).select_related("game__room", "selected_game_word").first()
