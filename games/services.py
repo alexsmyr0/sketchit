@@ -8,6 +8,13 @@ from django.utils import timezone
 
 from games.models import Game, GameStatus, GameWord, Guess, Round, RoundStatus
 from rooms.models import Player, Room
+from rooms import redis as room_redis
+from games import redis as game_redis
+from django.conf import settings
+import redis
+
+def _get_redis_client():
+    return redis.Redis.from_url(settings.REDIS_URL)
 
 
 class StartGameError(Exception):
@@ -162,13 +169,21 @@ def _progress_game_after_round_completion(completed_round: Round) -> None:
 
     next_drawer = random.choice(remaining_drawers)
     next_word = random.choice(available_words)
-    Round.objects.create(
+    new_round = Round.objects.create(
         game=locked_game,
         drawer_participant=next_drawer,
         drawer_nickname=next_drawer.display_name,
         selected_game_word=next_word,
         sequence_number=next_round_sequence_number,
     )
+    
+    # Initialize turn state in Redis so the consumer knows who the drawer is
+    client = _get_redis_client()
+    game_redis.set_turn_state(client, locked_game.room.join_code, {
+        "drawer_id": next_drawer.id,
+        "round_id": new_round.id,
+        "game_id": locked_game.id
+    })
 
 
 @transaction.atomic
@@ -220,6 +235,14 @@ def start_game_for_room(room: Room) -> StartedGame:
 
     locked_room.status = Room.Status.IN_PROGRESS
     locked_room.save(update_fields=["status", "updated_at"])
+
+    # Initialize turn state in Redis for the first round
+    client = _get_redis_client()
+    game_redis.set_turn_state(client, locked_room.join_code, {
+        "drawer_id": first_drawer.id,
+        "round_id": first_round.id,
+        "game_id": game.id
+    })
 
     return StartedGame(game=game, first_round=first_round)
 
@@ -314,6 +337,11 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
         .order_by("id")
         .values("id", "current_score")
     )
+    # Clear round-specific Redis state when it completes
+    client = _get_redis_client()
+    room_redis.clear_canvas_snapshot(client, locked_round.game.room.join_code)
+    game_redis.clear_turn_state(client, locked_round.game.room.join_code)
+
     _progress_game_after_round_completion(locked_round)
 
     return _build_guess_evaluation_result(

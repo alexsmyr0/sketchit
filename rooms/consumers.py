@@ -15,6 +15,23 @@ All connections to the same room share one channel group named
 connected participant.
 
 Close codes
+"""
+WebSocket consumer for room-scoped real-time communication.
+
+A single RoomConsumer instance handles one WebSocket connection to a room.
+On connect it resolves the room from the URL join_code, validates that the
+connecting Django session belongs to that room as a participant, then adds the
+channel to a stable room-scoped group.
+
+Later issues (#29, #30, #31) will add event handlers on top of this skeleton.
+
+Group naming
+------------
+All connections to the same room share one channel group named
+``room_{join_code}``.  Broadcasting to this group reaches every currently
+connected participant.
+
+Close codes
 -----------
 4001  No session key found in the request (unauthenticated guest).
 4003  Session is not a participant in the target room (forbidden).
@@ -26,6 +43,10 @@ from django.utils import timezone
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 import redis
+import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 from rooms.models import Player, Room
 from rooms import redis as room_redis
@@ -219,18 +240,17 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
 
     @database_sync_to_async
     def _is_active_drawer(self) -> bool:
-        """Return True if the connected player is the active drawer."""
-        # 1. Room must be in progress
-        # Since self.room is an ORM object from connect(), we should refresh or trust logic.
-        # For N-04, we'll fetch the status from DB to be safe or just trust the connect-time snapshot.
-        # Actually, let's refresh to be authoritative.
-        self.room.refresh_from_db()
-        if self.room.status != Room.Status.IN_PROGRESS:
-            return False
-
-        # 2. Match player ID against Redis turn state
+        """Return True if the connected player is the active drawer.
+        
+        This check is performed against Redis turn state to avoid database
+        load during high-frequency drawing events.
+        """
+        # 1. Match player ID against Redis turn state
         client = get_redis_client()
         turn_state = game_redis.get_turn_state(client, self.join_code)
+        
+        # turn_state is only populated when a round is active. 
+        # If it's empty, no one can draw.
         drawer_id_str = turn_state.get("drawer_id")
         
         if not drawer_id_str:
@@ -245,26 +265,34 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         if message_type == "drawing.clear":
             room_redis.clear_canvas_snapshot(client, self.join_code)
         else:
-            # We assume the payload contains the snapshot or data needed for it.
-            # Convert payload to bytes for room_redis.set_canvas_snapshot.
-            snapshot_data = json.dumps(payload).encode()
-            room_redis.set_canvas_snapshot(client, self.join_code, snapshot_data)
+            # message_type is drawing.stroke or drawing.end_stroke.
+            # We wrap the payload with its type for semantic reconstruction by late joiners.
+            data = {
+                "type": message_type,
+                "payload": payload
+            }
+            snapshot_data = json.dumps(data).encode()
+            room_redis.append_canvas_stroke(client, self.join_code, snapshot_data)
 
     async def _send_initial_canvas_snapshot(self) -> None:
-        """Send the current canvas state to a newly connected client."""
-        snapshot = await self._get_redis_snapshot()
-        if snapshot:
+        """Send the current canvas state to a newly connected client.
+        
+        Only sends if there is an active round in progress.
+        """
+        # Check if a round is active before sending snapshot
+        client = get_redis_client()
+        turn_state = await database_sync_to_async(game_redis.get_turn_state)(client, self.join_code)
+        if not turn_state:
+            return
+
+        snapshots = await self._get_redis_snapshot()
+        for snapshot_bytes in snapshots:
             try:
-                # Assuming the snapshot was a JSON string encoded as bytes
-                payload = json.loads(snapshot.decode())
-                await self.send_json({
-                    "type": "drawing.snapshot",
-                    "payload": payload,
-                })
+                event_data = json.loads(snapshot_bytes.decode())
+                await self.send_json(event_data)
             except (json.JSONDecodeError, UnicodeDecodeError):
-                # If it's not JSON, skip or send as raw? SDS says snapshot is for sync.
-                pass
+                logger.warning(f"Corrupted drawing snapshot in room {self.join_code}")
 
     @database_sync_to_async
-    def _get_redis_snapshot(self) -> bytes | None:
+    def _get_redis_snapshot(self) -> list[bytes]:
         return room_redis.get_canvas_snapshot(get_redis_client(), self.join_code)

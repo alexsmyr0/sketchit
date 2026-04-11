@@ -142,31 +142,30 @@ def clear_presence(client: "_redis.Redis", join_code: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def set_canvas_snapshot(
+def append_canvas_stroke(
     client: "_redis.Redis", join_code: str, data: bytes
 ) -> None:
-    """Store *data* as the latest canvas snapshot for *join_code*.
+    """Append *data* to the canvas stroke list for *join_code*.
 
-    Overwrites any previously stored snapshot and resets the TTL.
-    *data* is expected to be raw bytes (e.g. a serialised drawing command
-    list or a binary canvas export).  Pass ``b""`` to initialise the key as
-    a placeholder with no real content yet.
+    Appends to the Redis List and resets the TTL on the key.
+    *data* is expected to be a serialized drawing command (stroke).
     """
     key = _canvas_key(join_code)
-    client.set(key, data, ex=ROOM_KEY_TTL)
+    client.rpush(key, data)
+    client.expire(key, ROOM_KEY_TTL)
 
 
-def get_canvas_snapshot(client: "_redis.Redis", join_code: str) -> bytes | None:
-    """Return the stored canvas snapshot for *join_code*, or ``None``.
+def get_canvas_snapshot(client: "_redis.Redis", join_code: str) -> list[bytes]:
+    """Return the accumulated canvas strokes for *join_code*.
 
-    Returns raw bytes when a snapshot exists.  Returns ``None`` when the key
-    is absent (the room has never had a snapshot written, or the key expired).
+    Returns a list of raw bytes (one per stroke). Returns an empty list
+    if the key is absent or empty.
     """
-    value = client.get(_canvas_key(join_code))
-    if value is None:
-        return None
-    # redis-py may return str when decode_responses=True; normalise to bytes.
-    return value.encode() if isinstance(value, str) else value
+    key = _canvas_key(join_code)
+    raw_list: list[bytes | str] = client.lrange(key, 0, -1)
+    
+    # Normalise all elements to bytes
+    return [v.encode() if isinstance(v, str) else v for v in raw_list]
 
 
 def clear_canvas_snapshot(client: "_redis.Redis", join_code: str) -> None:

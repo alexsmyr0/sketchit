@@ -11,12 +11,13 @@ import fakeredis
 from channels.testing import WebsocketCommunicator
 from django.test import TransactionTestCase
 
-from config.routing import _TEST_APP
+from asgiref.sync import async_to_sync
 from rooms.models import Player, Room
-from rooms.tests.test_consumers import _ws_url, _session_headers, _create_room_member
+from rooms.tests.test_consumers import _ws_url, _session_headers, _create_room_member, _TEST_APP
 from rooms import consumers as room_consumers
 from rooms import redis as room_redis
 from games import redis as game_redis
+from words.models import Word, WordPack, WordPackEntry
 
 
 class DrawingEventTests(TransactionTestCase):
@@ -26,17 +27,23 @@ class DrawingEventTests(TransactionTestCase):
         self.fake_redis = fakeredis.FakeRedis()
         room_consumers._redis_client = self.fake_redis
 
+        # Set up a word pack for the room
+        self.word_pack = WordPack.objects.create(name="Test Pack")
+        test_word = Word.objects.create(text="rocket")
+        WordPackEntry.objects.create(word_pack=self.word_pack, word=test_word)
+
         self.room = Room.objects.create(
             name="Drawing Room",
             join_code="DRAW1234",
             status=Room.Status.IN_PROGRESS,  # Active game needed for drawing
+            word_pack=self.word_pack,
         )
         
-        # Create two participants
-        self.drawer_session_key = _create_room_member(self.room.id, "Drawer")
+        # Create two participants with proper synchronization
+        self.drawer_session_key = async_to_sync(_create_room_member)(self.room.id, "Drawer")
         self.drawer_player = Player.objects.get(room=self.room, session_key=self.drawer_session_key)
         
-        self.viewer_session_key = _create_room_member(self.room.id, "Viewer")
+        self.viewer_session_key = async_to_sync(_create_room_member)(self.room.id, "Viewer")
         self.viewer_player = Player.objects.get(room=self.room, session_key=self.viewer_session_key)
 
         # Set the active drawer in Redis turn state
@@ -77,6 +84,75 @@ class DrawingEventTests(TransactionTestCase):
 
         await drawer_socket.disconnect()
         await viewer_socket.disconnect()
+
+    async def test_drawing_end_stroke_broadcast(self):
+        drawer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.drawer_session_key),
+        )
+        viewer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.viewer_session_key),
+        )
+        
+        await drawer_socket.connect()
+        await viewer_socket.connect()
+
+        # Drawer sends an end stroke
+        await drawer_socket.send_json_to({
+            "type": "drawing.end_stroke",
+            "payload": {}
+        })
+
+        # Viewer should receive the broadcast
+        response = await viewer_socket.receive_json_from()
+        self.assertEqual(response["type"], "drawing.end_stroke")
+
+        await drawer_socket.disconnect()
+        await viewer_socket.disconnect()
+
+    async def test_multiple_viewers_receive_broadcast(self):
+        # Create a second viewer
+        second_viewer_key = await _create_room_member(self.room.id, "Viewer 2")
+        
+        drawer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.drawer_session_key),
+        )
+        viewer1_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.viewer_session_key),
+        )
+        viewer2_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(second_viewer_key),
+        )
+        
+        await drawer_socket.connect()
+        await viewer1_socket.connect()
+        await viewer2_socket.connect()
+
+        stroke_data = {"lines": [[0,0], [10,10]]}
+        await drawer_socket.send_json_to({
+            "type": "drawing.stroke",
+            "payload": stroke_data
+        })
+
+        # Both viewers should receive the broadcast
+        resp1 = await viewer1_socket.receive_json_from()
+        resp2 = await viewer2_socket.receive_json_from()
+        
+        self.assertEqual(resp1["payload"], stroke_data)
+        self.assertEqual(resp2["payload"], stroke_data)
+
+        await drawer_socket.disconnect()
+        await viewer1_socket.disconnect()
+        await viewer2_socket.disconnect()
 
     async def test_non_drawer_cannot_broadcast_stroke(self):
         drawer_socket = WebsocketCommunicator(
@@ -120,13 +196,15 @@ class DrawingEventTests(TransactionTestCase):
         # Drawer clears the canvas
         await drawer_socket.send_json_to({"type": "drawing.clear"})
         
-        # Give it a tiny bit of time to process
-        await drawer_socket.receive_nothing() # Wait for possible async task
+        # Viewer should receive the clear event broadcast
+        response = await viewer_socket.receive_json_from()
+        self.assertEqual(response["type"], "drawing.clear")
 
         # Snapshot should be gone from Redis
-        self.assertIsNone(room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code))
+        self.assertEqual(len(room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code)), 0)
 
         await drawer_socket.disconnect()
+        await viewer_socket.disconnect()
 
     async def test_drawing_not_allowed_in_lobby(self):
         # Move room back to lobby
@@ -203,6 +281,76 @@ class SnapshotSyncTests(TransactionTestCase):
         self.assertEqual(response["payload"], snapshot_payload)
 
         await communicator.disconnect()
+
+    async def test_snapshot_accumulation(self):
+        drawer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.drawer_session_key),
+        )
+        await drawer_socket.connect()
+
+        # Send 2 strokes and an end_stroke
+        strokes = [
+            {"type": "drawing.stroke", "payload": {"id": 1}},
+            {"type": "drawing.stroke", "payload": {"id": 2}},
+            {"type": "drawing.end_stroke", "payload": {}},
+        ]
+        for s in strokes:
+            await drawer_socket.send_json_to(s)
+
+        # Connect a new viewer
+        new_viewer_key = await _create_room_member(self.room.id, "Late Bob")
+        viewer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(new_viewer_key),
+        )
+        
+        connected, _ = await viewer_socket.connect()
+        self.assertTrue(connected)
+
+        # Should receive all 3 messages in order
+        for expected in strokes:
+            response = await viewer_socket.receive_json_from()
+            self.assertEqual(response, expected)
+
+        await drawer_socket.disconnect()
+        await viewer_socket.disconnect()
+
+    async def test_snapshot_isolation_between_rounds(self):
+        # 1. Start round, send drawing
+        game_redis.set_turn_state(self.fake_redis, self.room.join_code, {"drawer_id": self.drawer_player.id})
+        
+        drawer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.drawer_session_key),
+        )
+        await drawer_socket.connect()
+        await drawer_socket.send_json_to({"type": "drawing.stroke", "payload": {"test": 1}})
+        
+        # Verify snapshot exists
+        self.assertEqual(len(room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code)), 1)
+        
+        # 2. Simulate round end (clear turn state and snapshot - this happens in games.services)
+        game_redis.clear_turn_state(self.fake_redis, self.room.join_code)
+        room_redis.clear_canvas_snapshot(self.fake_redis, self.room.join_code)
+        
+        # 3. New viewer connects during intermission (no active round)
+        new_viewer_key = await _create_room_member(self.room.id, "Intermission Bob")
+        viewer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(new_viewer_key),
+        )
+        await viewer_socket.connect()
+        
+        # Viewer should receive NOTHING (no snapshot from old round)
+        self.assertTrue(await viewer_socket.receive_nothing())
+
+        await drawer_socket.disconnect()
+        await viewer_socket.disconnect()
 
     async def test_no_snapshot_sent_if_redis_empty(self):
         # Redis is empty
