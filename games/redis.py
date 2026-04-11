@@ -48,6 +48,11 @@ def _turn_state_key(join_code: str) -> str:
     return f"room:{join_code}:round:turn_state"
 
 
+def get_turn_state_key(join_code: str) -> str:
+    """Return the public Redis key for the room turn-state hash."""
+    return _turn_state_key(join_code)
+
+
 def _guess_state_key(join_code: str, round_id: int) -> str:
     """Return the Redis key for the active guess state hash of *join_code* and *round_id*."""
     return f"room:{join_code}:round:{round_id}:guess_state"
@@ -94,6 +99,23 @@ def set_turn_state(client: "_redis.Redis", join_code: str, state_dict: dict[str,
         # Convert all to strings/bytes for consistent hash storage
         client.hset(key, mapping=state_dict)
         client.expire(key, ROOM_RUNTIME_TTL)
+
+def update_turn_state_fields(
+    client: "_redis.Redis",
+    join_code: str,
+    state_fields: dict[str, str | int],
+) -> None:
+    """Update specific fields on the room turn-state hash.
+
+    Unlike ``set_turn_state`` this preserves untouched fields and is safer for
+    concurrent runtime writers that only need to mutate one or two values.
+    """
+    if not state_fields:
+        return
+
+    key = _turn_state_key(join_code)
+    client.hset(key, mapping=state_fields)
+    client.expire(key, ROOM_RUNTIME_TTL)
 
 def get_turn_state(client: "_redis.Redis", join_code: str) -> dict[str, str]:
     raw = client.hgetall(_turn_state_key(join_code))
