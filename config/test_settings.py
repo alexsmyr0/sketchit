@@ -18,3 +18,7 @@ CHANNEL_LAYERS = {
         "BACKEND": "channels.layers.InMemoryChannelLayer",
     }
 }
+
+# Most tests exercise synchronous service behavior and should not spawn
+# background timer threads.
+SKETCHIT_ENABLE_RUNTIME_COORDINATOR = False

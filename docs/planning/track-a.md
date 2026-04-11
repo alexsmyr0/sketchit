@@ -15,7 +15,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### A-01: Persistent Domain Models & Word Setup Baseline
-**Source Ticket**: `T-01`  
 **Priority**: Critical  
 **Phase**: P0 Existing Baseline  
 **Depends On**: None  
@@ -38,7 +37,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### A-02: Room Entry HTTP Baseline
-**Source Ticket**: `T-02`  
 **Priority**: Critical  
 **Phase**: P0 Existing Baseline  
 **Depends On**: `A-01`  
@@ -62,7 +60,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### A-03: Lobby Settings Update API
-**Source Ticket**: `T-06`  
 **Priority**: Medium  
 **Phase**: P1 Realtime Lobby  
 **Depends On**: `A-02`  
@@ -84,7 +81,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### A-04: Host Reassignment & Participant Connection Lifecycle
-**Source Ticket**: `T-07`  
 **Priority**: Critical  
 **Phase**: P1 Realtime Lobby  
 **Depends On**: `A-02`  
@@ -107,7 +103,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### A-05: Empty-Room Grace Lifecycle
-**Source Ticket**: `T-08`  
 **Priority**: High  
 **Phase**: P1 Realtime Lobby  
 **Depends On**: `N-01`, `A-04`  
@@ -129,7 +124,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### A-06: Live Lobby State Broadcast
-**Source Ticket**: `T-10`  
 **Priority**: Critical  
 **Phase**: P1 Realtime Lobby  
 **Depends On**: `A-04`, `N-02`  
@@ -151,7 +145,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### A-07: Mid-Game Joiners, Spectators, And Reconnect Reclaim
-**Source Ticket**: `T-18`  
 **Priority**: Critical  
 **Phase**: P3 Full Game Rules  
 **Depends On**: `A-04`, `N-03`, `K-04`  
@@ -174,7 +167,6 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 ---
 
 #### A-08: Game Finish, Leaderboard Cooldown, And Auto-Restart
-**Source Ticket**: `T-20`  
 **Priority**: Critical  
 **Phase**: P3 Full Game Rules  
 **Depends On**: `K-04`, `K-05`, `A-07`, `K-07`  

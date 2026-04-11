@@ -15,6 +15,7 @@ the production ASGI app includes (that validator checks the HTTP Origin header
 which WebsocketCommunicator omits by default).
 """
 
+from datetime import timedelta
 import json
 
 import fakeredis
@@ -25,9 +26,13 @@ from channels.layers import get_channel_layer
 from channels.routing import URLRouter
 from channels.testing import WebsocketCommunicator
 from django.contrib.sessions.backends.db import SessionStore
-from django.test import TransactionTestCase
+from django.test import TransactionTestCase, override_settings
+from django.utils import timezone
 
 from config.routing import websocket_urlpatterns
+from games import runtime as game_runtime
+from games.models import Round
+from games.services import evaluate_guess_for_round, start_game_for_room
 from rooms.consumers import _room_group_name
 from rooms.models import Player, Room
 from words.models import Word, WordPack, WordPackEntry
@@ -73,6 +78,46 @@ def _create_room_member(room_id: int, display_name: str) -> str:
     return session.session_key
 
 
+@database_sync_to_async
+def _create_connected_room_member(room_id: int, display_name: str) -> str:
+    session = SessionStore()
+    session.save()
+    room = Room.objects.get(pk=room_id)
+    Player.objects.create(
+        room=room,
+        session_key=session.session_key,
+        display_name=display_name,
+        connection_status=Player.ConnectionStatus.CONNECTED,
+        session_expires_at=timezone.now() + timedelta(hours=1),
+    )
+    return session.session_key
+
+
+@database_sync_to_async
+def _start_game(room_id: int):
+    room = Room.objects.get(pk=room_id)
+    started = start_game_for_room(room)
+    return started.first_round.id
+
+
+@database_sync_to_async
+def _end_round_by_correct_guess(round_id: int) -> None:
+    round = Round.objects.select_related("selected_game_word").get(pk=round_id)
+    guesser = (
+        Player.objects.filter(
+            room_id=round.game.room_id,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            created_at__lte=round.started_at,
+        )
+        .exclude(pk=round.drawer_participant_id)
+        .order_by("created_at", "id")
+        .first()
+    )
+    assert guesser is not None
+    evaluate_guess_for_round(round, guesser, round.selected_game_word.text)
+
+
 # ---------------------------------------------------------------------------
 # Test cases
 # ---------------------------------------------------------------------------
@@ -86,8 +131,10 @@ class RoomConsumerConnectTests(TransactionTestCase):
         async_to_sync(self.channel_layer.flush)()
 
         from rooms import consumers as room_consumers
+        game_runtime.reset_runtime_state_for_tests()
         self.fake_redis = fakeredis.FakeRedis()
         room_consumers._redis_client = self.fake_redis
+        game_runtime._redis_client = self.fake_redis
 
         self.word_pack = WordPack.objects.create(name="Test Pack")
         test_word = Word.objects.create(text="rocket")
@@ -113,12 +160,20 @@ class RoomConsumerConnectTests(TransactionTestCase):
 
     def tearDown(self):
         async_to_sync(self.channel_layer.flush)()
+        game_runtime.reset_runtime_state_for_tests()
         super().tearDown()
         from rooms import consumers as room_consumers
         room_consumers._redis_client = None
 
     def _group_members(self, group_name: str) -> dict[str, float]:
         return self.channel_layer.groups.get(group_name, {})
+
+    async def _receive_until_type(self, communicator, event_type: str, attempts: int = 20):
+        for _ in range(attempts):
+            event = await communicator.receive_json_from(timeout=1)
+            if event.get("type") == event_type:
+                return event
+        self.fail(f"Did not receive expected event type '{event_type}'.")
 
     async def test_connect_accepts_valid_room_member(self):
         communicator = WebsocketCommunicator(
@@ -268,6 +323,79 @@ class RoomConsumerConnectTests(TransactionTestCase):
         presence = room_redis.get_presence(self.fake_redis, self.room.join_code)
         self.assertNotIn(self.session_key, presence)
 
+    async def test_disconnect_does_not_reassign_host(self):
+        second_session_key = await _create_room_member(self.room.id, "Bob")
+        second_player = await database_sync_to_async(Player.objects.get)(
+            room=self.room,
+            session_key=second_session_key,
+        )
+        self.room.host = self.player
+        await database_sync_to_async(self.room.save)(update_fields=["host"])
+
+        host_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        member_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(second_session_key),
+        )
+
+        host_connected, _ = await host_socket.connect()
+        member_connected, _ = await member_socket.connect()
+        self.assertTrue(host_connected)
+        self.assertTrue(member_connected)
+
+        await host_socket.disconnect()
+
+        await database_sync_to_async(self.room.refresh_from_db)()
+        self.assertEqual(self.room.host_id, self.player.id)
+        self.assertNotEqual(self.room.host_id, second_player.id)
+
+        await member_socket.disconnect()
+
+    async def test_reconnect_reuses_same_participant_row(self):
+        first_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        connected, _ = await first_socket.connect()
+        self.assertTrue(connected)
+
+        original_player_id = self.player.id
+
+        await first_socket.disconnect()
+        await database_sync_to_async(self.player.refresh_from_db)()
+        self.assertEqual(
+            self.player.connection_status,
+            Player.ConnectionStatus.DISCONNECTED,
+        )
+
+        second_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        reconnected, _ = await second_socket.connect()
+        self.assertTrue(reconnected)
+
+        refreshed_player = await database_sync_to_async(Player.objects.get)(
+            room=self.room,
+            session_key=self.session_key,
+        )
+        self.assertEqual(refreshed_player.id, original_player_id)
+        self.assertEqual(
+            await database_sync_to_async(
+                Player.objects.filter(room=self.room, session_key=self.session_key).count
+            )(),
+            1,
+        )
+
+        await second_socket.disconnect()
+
     async def test_presence_stays_connected_until_last_same_session_socket_disconnects(self):
         first = WebsocketCommunicator(
             _TEST_APP,
@@ -332,6 +460,109 @@ class RoomConsumerConnectTests(TransactionTestCase):
         self.assertEqual(response["message"], "Echo: hello world")
         
         await communicator.disconnect()
+
+    async def test_room_group_server_event_is_forwarded_to_connected_clients(self):
+        communicator = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        connected, _ = await communicator.connect()
+        self.assertTrue(connected)
+
+        event_payload = {
+            "type": "round.timer",
+            "payload": {
+                "round_id": 7,
+                "remaining_seconds": 42,
+            },
+        }
+        await self.channel_layer.group_send(
+            _room_group_name(self.room.join_code),
+            {
+                "type": "room.server_event",
+                "event": event_payload,
+            },
+        )
+
+        forwarded = await communicator.receive_json_from()
+        self.assertEqual(forwarded, event_payload)
+
+        await communicator.disconnect()
+
+    @override_settings(
+        SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True,
+        SKETCHIT_ROUND_DURATION_SECONDS=3,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=3,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.1,
+    )
+    async def test_runtime_generated_round_events_reach_socket_end_to_end(self):
+        await _create_connected_room_member(self.room.id, "Bob")
+        communicator = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        connected, _ = await communicator.connect()
+        self.assertTrue(connected)
+
+        await _start_game(self.room.id)
+
+        round_started = None
+        round_timer = None
+        for _ in range(25):
+            event = await communicator.receive_json_from(timeout=1)
+            if event.get("type") == "round.started" and round_started is None:
+                round_started = event
+            if event.get("type") == "round.timer" and round_timer is None:
+                round_timer = event
+            if round_started is not None and round_timer is not None:
+                break
+
+        self.assertIsNotNone(round_started)
+        self.assertIsNotNone(round_timer)
+        self.assertIn("server_timestamp", round_started["payload"])
+        self.assertIn("tick_sequence", round_timer["payload"])
+        self.assertGreaterEqual(round_timer["payload"]["tick_sequence"], 1)
+
+        await communicator.disconnect()
+
+    @override_settings(
+        SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True,
+        SKETCHIT_ROUND_DURATION_SECONDS=5,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=2,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.1,
+    )
+    async def test_connect_mid_intermission_receives_round_state_sync_snapshot(self):
+        await _create_connected_room_member(self.room.id, "Bob")
+        initial_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        connected, _ = await initial_socket.connect()
+        self.assertTrue(connected)
+
+        first_round_id = await _start_game(self.room.id)
+        await self._receive_until_type(initial_socket, "round.started")
+        await _end_round_by_correct_guess(first_round_id)
+        await self._receive_until_type(initial_socket, "round.intermission_started")
+        await initial_socket.disconnect()
+
+        reconnect_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        reconnected, _ = await reconnect_socket.connect()
+        self.assertTrue(reconnected)
+
+        round_state = await self._receive_until_type(reconnect_socket, "round.state")
+        self.assertEqual(round_state["payload"]["phase"], "intermission")
+        self.assertIn("tick_sequence", round_state["payload"])
+        self.assertIn("server_timestamp", round_state["payload"])
+
+        await reconnect_socket.disconnect()
 
 
 class RoomGroupNameTests(TransactionTestCase):

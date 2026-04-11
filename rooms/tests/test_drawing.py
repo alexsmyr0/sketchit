@@ -46,8 +46,8 @@ class DrawingEventTests(TransactionTestCase):
         self.viewer_session_key = async_to_sync(_create_room_member)(self.room.id, "Viewer")
         self.viewer_player = Player.objects.get(room=self.room, session_key=self.viewer_session_key)
 
-        # Set the active drawer in Redis turn state
-        game_redis.set_turn_state(self.fake_redis, self.room.join_code, {"drawer_id": self.drawer_player.id})
+        # Set the active drawer in Redis turn state using the new runtime field name
+        game_redis.set_turn_state(self.fake_redis, self.room.join_code, {"drawer_participant_id": self.drawer_player.id})
 
     def tearDown(self):
         room_consumers._redis_client = None
@@ -320,7 +320,7 @@ class SnapshotSyncTests(TransactionTestCase):
 
     async def test_snapshot_isolation_between_rounds(self):
         # 1. Start round, send drawing
-        game_redis.set_turn_state(self.fake_redis, self.room.join_code, {"drawer_id": self.drawer_player.id})
+        game_redis.set_turn_state(self.fake_redis, self.room.join_code, {"drawer_participant_id": self.drawer_player.id})
         
         drawer_socket = WebsocketCommunicator(
             _TEST_APP,

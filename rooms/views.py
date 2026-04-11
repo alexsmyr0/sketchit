@@ -26,6 +26,11 @@ class JoinRoomForm(forms.Form):
     display_name = forms.CharField(max_length=24)
 
 
+class UpdateLobbySettingsForm(forms.Form):
+    name = forms.CharField(max_length=255)
+    visibility = forms.ChoiceField(choices=Room.Visibility.choices)
+
+
 def _parse_json_payload(request):
     # Both create_room and join_room expect JSON requests.
     if request.content_type != "application/json":
@@ -189,6 +194,9 @@ def create_room(request):
             room=room,
             session_key=session_key,
             display_name=cleaned_data["display_name"],
+            # Room membership starts disconnected until the browser opens the
+            # room socket and the realtime layer confirms live presence.
+            connection_status=Player.ConnectionStatus.DISCONNECTED,
             session_expires_at=request.session.get_expiry_date(),
         )
         # The first participant is also the initial host.
@@ -250,6 +258,8 @@ def join_room(request, join_code):
         room=room,
         session_key=session_key,
         display_name=form.cleaned_data["display_name"],
+        # Joining the room via HTTP alone should not count as live presence.
+        connection_status=Player.ConnectionStatus.DISCONNECTED,
         session_expires_at=request.session.get_expiry_date(),
     )
 
@@ -285,6 +295,55 @@ def room_lobby_state(request, join_code):
                 "participants": participants,
             },
         )
+
+    return _build_room_lobby_state_response(room)
+
+
+@transaction.atomic
+def update_lobby_settings(request, join_code):
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    try:
+        room = (
+            Room.objects.select_for_update()
+            .select_related("host")
+            .get(join_code=join_code.upper())
+        )
+    except Room.DoesNotExist:
+        return JsonResponse({"detail": "Room not found."}, status=404)
+
+    session_key = _get_or_create_session_key(request)
+    requester = room.participants.filter(session_key=session_key).first()
+    if requester is None:
+        return JsonResponse(
+            {"detail": "This guest session is not a participant in this room."},
+            status=403,
+        )
+
+    if room.host_id != requester.id:
+        return JsonResponse(
+            {"detail": "Only the room host can update settings."},
+            status=403,
+        )
+
+    if room.status != Room.Status.LOBBY:
+        return JsonResponse(
+            {"detail": "Room settings can only be updated while in the lobby."},
+            status=409,
+        )
+
+    payload, error_response = _parse_json_payload(request)
+    if error_response is not None:
+        return error_response
+
+    form = UpdateLobbySettingsForm(payload)
+    if not form.is_valid():
+        return JsonResponse({"errors": form.errors}, status=400)
+
+    room.name = form.cleaned_data["name"]
+    room.visibility = form.cleaned_data["visibility"]
+    room.save(update_fields=["name", "visibility", "updated_at"])
 
     return _build_room_lobby_state_response(room)
 
