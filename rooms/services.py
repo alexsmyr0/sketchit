@@ -79,10 +79,11 @@ def connect_participant(
         join_code=join_code,
         session_key=session_key,
     )
+    room_join_code = player.room.join_code
 
     room_redis.add_presence(
         redis_client,
-        join_code,
+        room_join_code,
         session_key,
         connection_id=connection_id,
     )
@@ -113,16 +114,17 @@ def disconnect_participant(
         join_code=join_code,
         session_key=session_key,
     )
+    room_join_code = player.room.join_code
 
     room_redis.remove_presence(
         redis_client,
-        join_code,
+        room_join_code,
         session_key,
         connection_id=connection_id,
     )
     connection_still_present = room_redis.is_present(
         redis_client,
-        join_code,
+        room_join_code,
         session_key,
     )
     Player.objects.filter(pk=player.id).update(

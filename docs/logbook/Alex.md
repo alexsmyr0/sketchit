@@ -30,6 +30,13 @@ Implemented issue #24 by building the backend room-creation flow for guest hosts
 
 Implemented issue #25 by building the room join flow using `join_code` and Django session identity, including participant create-or-reuse behavior, room-capacity enforcement, prevention of one session joining multiple rooms, and nickname persistence on first join.
 
-## 07/04
+## 08/04
 
 Removed the remaining SQLite usage from the active project setup by deleting the SQLite test database override, removing stray `db.sqlite3` and `test.sqlite3` files, and updating the documentation so the repo now clearly states that MySQL is the database target for development, runtime, and tests. Also removed a redundant example code directory we were using to take inspiration for some database functionality
+
+## 10/04
+Graded and suggested changes for ticket NO3 for Nikos. He implemented my suggestions and I approved and merged.
+
+## 11/04
+Reviewed two pull requests from Kostas and Nikos regarding the respective tickets K03 and NO4. Found functionality and testing gaps. I commented on the pull quest.
+Both implemented my suggestions and I have now approved and merged. 
