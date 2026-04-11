@@ -83,6 +83,11 @@ def _room_group_name(join_code: str) -> str:
     return f"room_{join_code}"
 
 
+def _player_group_name(join_code: str, player_id: int) -> str:
+    """Return the per-player channel group for one room participant."""
+    return f"room_{join_code}_player_{player_id}"
+
+
 @database_sync_to_async
 def _resolve_room_and_player(
     join_code: str, session_key: str
@@ -104,6 +109,14 @@ def _resolve_room_and_player(
         .first()
     )
     return room, player
+
+
+@database_sync_to_async
+def _get_runtime_sync_events(join_code: str, player_id: int) -> list[dict]:
+    """Return server-authoritative runtime sync events for one participant."""
+    from games import runtime as game_runtime
+
+    return game_runtime.get_sync_events_for_player(join_code, player_id)
 
 
 class RoomConsumer(AsyncJsonWebsocketConsumer):
@@ -143,9 +156,11 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         self.room: Room = room
         self.player: Player = player
         self.room_group: str = _room_group_name(self.join_code)
+        self.player_group: str = _player_group_name(self.join_code, self.player.id)
         self.session_key: str = session_key
 
         await self.channel_layer.group_add(self.room_group, self.channel_name)
+        await self.channel_layer.group_add(self.player_group, self.channel_name)
         await _mark_participant_connected(
             self.player.id,
             self.join_code,
@@ -154,10 +169,17 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         )
         await self.accept()
 
+        # A reconnecting/late-joining client needs an immediate phase snapshot
+        # so timer UI does not depend on waiting for the next periodic tick.
+        for event in await _get_runtime_sync_events(self.join_code, self.player.id):
+            await self.send_json(event)
+
     async def disconnect(self, code: int) -> None:
         """Remove this channel from the room group on disconnect."""
         if hasattr(self, "room_group"):
             await self.channel_layer.group_discard(self.room_group, self.channel_name)
+        if hasattr(self, "player_group"):
+            await self.channel_layer.group_discard(self.player_group, self.channel_name)
         if hasattr(self, "player") and hasattr(self, "session_key"):
             await _mark_participant_disconnected(
                 self.player.id,
@@ -179,6 +201,12 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                 "type": "echo_reply",
                 "message": f"Echo: {content.get('message', '')}"
             })
+            return
+
+        if message_type == "round.sync_request":
+            for event in await _get_runtime_sync_events(self.join_code, self.player.id):
+                await self.send_json(event)
+            return
 
     async def room_server_event(self, event: dict) -> None:
         """Forward room-group server events to this socket client."""

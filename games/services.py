@@ -176,6 +176,16 @@ def _all_eligible_non_drawer_guessers_are_correct(
         if runtime_says_all_correct:
             return True
 
+        runtime_correctness_state = game_runtime.get_round_correctness_state(
+            join_code=locked_round.game.room.join_code,
+            round_id=locked_round.id,
+        )
+        if runtime_correctness_state is not None:
+            eligible_guesser_ids, correct_guesser_ids = runtime_correctness_state
+            return bool(eligible_guesser_ids) and eligible_guesser_ids.issubset(
+                correct_guesser_ids
+            )
+
     eligible_guesser_ids = set(_get_round_eligible_guesser_ids(locked_round))
     if not eligible_guesser_ids:
         return False
