@@ -48,6 +48,11 @@ def _turn_state_key(join_code: str) -> str:
     return f"room:{join_code}:round:turn_state"
 
 
+def get_turn_state_key(join_code: str) -> str:
+    """Return the public Redis key for the room turn-state hash."""
+    return _turn_state_key(join_code)
+
+
 def _guess_state_key(join_code: str, round_id: int) -> str:
     """Return the Redis key for the active guess state hash of *join_code* and *round_id*."""
     return f"room:{join_code}:round:{round_id}:guess_state"

@@ -24,6 +24,7 @@ Close codes
 from django.conf import settings
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
+from core.realtime_groups import player_group_name, room_group_name
 import redis
 
 from rooms.models import Player, Room
@@ -80,12 +81,12 @@ def _mark_participant_disconnected(
 
 def _room_group_name(join_code: str) -> str:
     """Return the channel group name for *join_code*."""
-    return f"room_{join_code}"
+    return room_group_name(join_code)
 
 
 def _player_group_name(join_code: str, player_id: int) -> str:
     """Return the per-player channel group for one room participant."""
-    return f"room_{join_code}_player_{player_id}"
+    return player_group_name(join_code, player_id)
 
 
 @database_sync_to_async

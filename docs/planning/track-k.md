@@ -79,6 +79,12 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 - [ ] Add tests for timer expiry and all-guessers-correct early completion behavior.
 - [ ] Verification gate: round completion is driven by the server and not by client clocks.
 
+Implementation note:
+The current K-03 runtime timer coordinator is process-local (in-memory timer
+handles + module-level Redis client cache). This is acceptable for single
+process runtime and test environments, but multi-process production deployment
+requires distributed timer ownership/locking.
+
 ---
 
 #### K-04: Full Game Cycle Drawer Rotation & Word Uniqueness

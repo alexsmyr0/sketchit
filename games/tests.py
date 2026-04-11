@@ -663,6 +663,40 @@ class RuntimeCoordinatorHelperTests(SimpleTestCase):
         state = game_redis.get_turn_state(self.fake_redis, "HELP1234")
         self.assertEqual(state.get("correct_guesser_ids"), "[]")
 
+    def test_mark_guesser_correct_handles_concurrent_updates_without_corrupting_state(self):
+        game_redis.set_turn_state(
+            self.fake_redis,
+            "HELP1234",
+            {
+                "phase": "round",
+                "round_id": "11",
+                "eligible_guesser_ids": "[22, 33]",
+                "correct_guesser_ids": "[]",
+            },
+        )
+
+        threads = [
+            threading.Thread(
+                target=game_runtime.mark_guesser_correct,
+                kwargs={
+                    "join_code": "HELP1234",
+                    "round_id": 11,
+                    "player_id": 22,
+                },
+            )
+            for _ in range(6)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=1)
+
+        updated_state = game_redis.get_turn_state(self.fake_redis, "HELP1234")
+        self.assertEqual(
+            set(json.loads(updated_state["correct_guesser_ids"])),
+            {22},
+        )
+
 
 @override_settings(
     SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True,

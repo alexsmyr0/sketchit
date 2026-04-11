@@ -1,3 +1,14 @@
+"""Server-owned round timer and intermission runtime coordinator.
+
+This module currently uses in-process threads and module-level state for timer
+handles and the Redis client cache. That means timers are process-local: this
+implementation is suitable for single-process runtime environments and tests.
+
+For multi-process deployments, timer ownership must move to a distributed
+coordinator/worker model with shared locking so only one worker owns each room
+timer at a time.
+"""
+
 from __future__ import annotations
 
 import json
@@ -9,8 +20,10 @@ from datetime import datetime, timedelta
 import redis
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
+from core.realtime_groups import player_group_name, room_group_name
 from django.conf import settings
 from django.utils import timezone
+from redis.exceptions import WatchError
 
 from games import redis as game_redis
 from games.models import Round
@@ -66,6 +79,15 @@ def _decode_json_int_list(raw_value: str | None) -> set[int]:
     return {int(item) for item in decoded}
 
 
+def _decode_hash_to_str_dict(raw_state: dict) -> dict[str, str]:
+    return {
+        (key.decode() if isinstance(key, bytes) else key): (
+            value.decode() if isinstance(value, bytes) else value
+        )
+        for key, value in raw_state.items()
+    }
+
+
 def _parse_int(raw_value: str | None) -> int | None:
     if raw_value in (None, ""):
         return None
@@ -86,14 +108,6 @@ def _parse_iso_datetime(raw_value: str | None) -> datetime | None:
 
 def _remaining_seconds(deadline_at: datetime) -> int:
     return max(0, int(math.ceil((deadline_at - timezone.now()).total_seconds())))
-
-
-def _room_group_name(join_code: str) -> str:
-    return f"room_{join_code}"
-
-
-def _player_group_name(join_code: str, player_id: int) -> str:
-    return f"room_{join_code}_player_{player_id}"
 
 
 def _stop_thread(
@@ -191,7 +205,7 @@ def broadcast_room_event(join_code: str, event_type: str, payload: dict) -> None
         return
 
     async_to_sync(channel_layer.group_send)(
-        _room_group_name(join_code),
+        room_group_name(join_code),
         {
             "type": "room.server_event",
             "event": {
@@ -213,7 +227,7 @@ def broadcast_player_event(
         return
 
     async_to_sync(channel_layer.group_send)(
-        _player_group_name(join_code, player_id),
+        player_group_name(join_code, player_id),
         {
             "type": "room.server_event",
             "event": {
@@ -683,40 +697,72 @@ def mark_guesser_correct(*, join_code: str, round_id: int, player_id: int) -> bo
         return False
 
     client = get_redis_client()
-    turn_state = game_redis.get_turn_state(client, join_code)
-    if not turn_state:
-        return False
-    if turn_state.get("phase") != "round":
-        return False
-    if turn_state.get("round_id") != str(round_id):
-        return False
+    turn_state_key = game_redis.get_turn_state_key(join_code)
+    max_retries = 8
 
-    eligible_guesser_ids = _decode_json_int_list(turn_state.get("eligible_guesser_ids"))
-    if player_id not in eligible_guesser_ids:
-        return False
+    for _ in range(max_retries):
+        with client.pipeline() as pipeline:
+            try:
+                pipeline.watch(turn_state_key)
+                raw_turn_state = pipeline.hgetall(turn_state_key)
+                turn_state = _decode_hash_to_str_dict(raw_turn_state)
+                if not turn_state:
+                    pipeline.unwatch()
+                    return False
+                if turn_state.get("phase") != "round":
+                    pipeline.unwatch()
+                    return False
+                if turn_state.get("round_id") != str(round_id):
+                    pipeline.unwatch()
+                    return False
 
-    correct_guesser_ids = _decode_json_int_list(turn_state.get("correct_guesser_ids"))
-    if player_id not in correct_guesser_ids:
-        correct_guesser_ids.add(player_id)
-        game_redis.update_turn_state_fields(
-            client,
-            join_code,
-            {
-                "correct_guesser_ids": json.dumps(sorted(correct_guesser_ids)),
-            },
-        )
-        game_redis.set_guess_state(
-            client,
-            join_code,
-            round_id,
-            player_id,
-            {
-                "status": "correct",
-                "recorded_at": timezone.now().isoformat(),
-            },
-        )
+                eligible_guesser_ids = _decode_json_int_list(
+                    turn_state.get("eligible_guesser_ids")
+                )
+                if player_id not in eligible_guesser_ids:
+                    pipeline.unwatch()
+                    return False
 
-    return bool(eligible_guesser_ids) and eligible_guesser_ids.issubset(correct_guesser_ids)
+                correct_guesser_ids = _decode_json_int_list(
+                    turn_state.get("correct_guesser_ids")
+                )
+                if player_id in correct_guesser_ids:
+                    pipeline.unwatch()
+                    return bool(eligible_guesser_ids) and eligible_guesser_ids.issubset(
+                        correct_guesser_ids
+                    )
+
+                correct_guesser_ids.add(player_id)
+                pipeline.multi()
+                pipeline.hset(
+                    turn_state_key,
+                    mapping={
+                        "correct_guesser_ids": json.dumps(
+                            sorted(correct_guesser_ids)
+                        ),
+                    },
+                )
+                pipeline.expire(turn_state_key, game_redis.ROOM_RUNTIME_TTL)
+                pipeline.execute()
+
+                game_redis.set_guess_state(
+                    client,
+                    join_code,
+                    round_id,
+                    player_id,
+                    {
+                        "status": "correct",
+                        "recorded_at": timezone.now().isoformat(),
+                    },
+                )
+                return bool(eligible_guesser_ids) and eligible_guesser_ids.issubset(
+                    correct_guesser_ids
+                )
+            except WatchError:
+                continue
+
+    # If contention is high we fail safe without force-writing guesser state.
+    return False
 
 
 def start_intermission(
