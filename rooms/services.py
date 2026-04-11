@@ -200,7 +200,14 @@ def delete_room_if_empty_grace_expired(
     needing to infer intent from exceptions.
     """
 
-    room = _get_locked_room(room_id)
+    try:
+        room = _get_locked_room(room_id)
+    except Room.DoesNotExist:
+        # Cleanup workers may race with each other or with a join path that
+        # already deleted the expired room. Missing rows are therefore a
+        # no-op, not an error.
+        return False
+
     if room.status != Room.Status.EMPTY_GRACE or room.empty_since is None:
         return False
 
@@ -219,6 +226,40 @@ def delete_room_if_empty_grace_expired(
         join_code=join_code,
     )
     return True
+
+
+def cleanup_expired_empty_rooms(
+    *,
+    redis_client,
+    now: datetime | None = None,
+) -> int:
+    """Delete every room whose empty-grace deadline has already expired.
+
+    The command path uses one shared ``now`` timestamp for the whole sweep so
+    every candidate is evaluated against the same cutoff.
+    """
+
+    current_time = now or timezone.now()
+    expired_room_ids = list(
+        Room.objects.filter(
+            status=Room.Status.EMPTY_GRACE,
+            empty_since__isnull=False,
+            empty_since__lte=current_time - EMPTY_ROOM_GRACE_PERIOD,
+        )
+        .order_by("empty_since", "id")
+        .values_list("id", flat=True)
+    )
+
+    deleted_count = 0
+    for room_id in expired_room_ids:
+        if delete_room_if_empty_grace_expired(
+            redis_client=redis_client,
+            room_id=room_id,
+            now=current_time,
+        ):
+            deleted_count += 1
+
+    return deleted_count
 
 
 @transaction.atomic

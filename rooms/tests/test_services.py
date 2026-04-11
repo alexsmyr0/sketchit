@@ -13,6 +13,7 @@ from games import redis as game_redis
 from rooms import redis as room_redis
 from rooms.models import Player, Room
 from rooms.services import (
+    cleanup_expired_empty_rooms,
     connect_participant,
     delete_room_if_empty_grace_expired,
     disconnect_participant,
@@ -460,4 +461,96 @@ class EmptyRoomGraceServiceTests(TestCase):
                 "GRACE123",
                 "cleanup",
             )
+        )
+
+    def test_cleanup_expired_empty_rooms_deletes_only_expired_candidates(self):
+        now = timezone.now()
+        expired_room = Room.objects.create(
+            name="Expired Grace Room",
+            join_code="EXPIR123",
+            visibility=Room.Visibility.PRIVATE,
+            status=Room.Status.EMPTY_GRACE,
+            empty_since=now - timedelta(minutes=10, seconds=1),
+        )
+        fresh_room = Room.objects.create(
+            name="Fresh Grace Room",
+            join_code="FRESH123",
+            visibility=Room.Visibility.PRIVATE,
+            status=Room.Status.EMPTY_GRACE,
+            empty_since=now - timedelta(minutes=2),
+        )
+        occupied_room = Room.objects.create(
+            name="Occupied Grace Room",
+            join_code="BUSY1234",
+            visibility=Room.Visibility.PRIVATE,
+            status=Room.Status.EMPTY_GRACE,
+            empty_since=now - timedelta(minutes=12),
+        )
+        Player.objects.create(
+            room=occupied_room,
+            session_key="occupied-session",
+            display_name="Occupied",
+            connection_status=Player.ConnectionStatus.DISCONNECTED,
+            session_expires_at=now + timedelta(hours=1),
+        )
+
+        expired_deadline = get_empty_room_cleanup_deadline(
+            empty_since=expired_room.empty_since,
+        ).isoformat()
+        fresh_deadline = get_empty_room_cleanup_deadline(
+            empty_since=fresh_room.empty_since,
+        ).isoformat()
+        occupied_deadline = get_empty_room_cleanup_deadline(
+            empty_since=occupied_room.empty_since,
+        ).isoformat()
+        game_redis.set_deadline(
+            self.redis_client,
+            expired_room.join_code,
+            "cleanup",
+            expired_deadline,
+        )
+        game_redis.set_deadline(
+            self.redis_client,
+            fresh_room.join_code,
+            "cleanup",
+            fresh_deadline,
+        )
+        game_redis.set_deadline(
+            self.redis_client,
+            occupied_room.join_code,
+            "cleanup",
+            occupied_deadline,
+        )
+
+        deleted_count = cleanup_expired_empty_rooms(
+            redis_client=self.redis_client,
+            now=now,
+        )
+
+        self.assertEqual(deleted_count, 1)
+        self.assertFalse(Room.objects.filter(pk=expired_room.id).exists())
+        self.assertTrue(Room.objects.filter(pk=fresh_room.id).exists())
+        self.assertTrue(Room.objects.filter(pk=occupied_room.id).exists())
+        self.assertIsNone(
+            game_redis.get_deadline(
+                self.redis_client,
+                expired_room.join_code,
+                "cleanup",
+            )
+        )
+        self.assertEqual(
+            game_redis.get_deadline(
+                self.redis_client,
+                fresh_room.join_code,
+                "cleanup",
+            ),
+            fresh_deadline,
+        )
+        self.assertEqual(
+            game_redis.get_deadline(
+                self.redis_client,
+                occupied_room.join_code,
+                "cleanup",
+            ),
+            occupied_deadline,
         )
