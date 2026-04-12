@@ -70,4 +70,4 @@ Graded and suggested changes for ticket NO3 for Nikos. He implemented my suggest
 Reviewed two pull requests from Kostas and Nikos regarding the respective tickets K03 and NO4. Found functionality and testing gaps. I commented on the pull quest.
 Both implemented my suggestions and I have now approved and merged.
 
-
+Implemented A05 empty-room grace: empty rooms now enter empty_grace, persist empty_since, store a Redis cleanup deadline, restore cleanly to lobby on timely rejoin, cancel abandoned game state instead of resuming it, and hard-delete after the grace period through the cleanup flow.
