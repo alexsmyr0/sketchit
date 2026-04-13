@@ -393,6 +393,11 @@ class StartGameServiceTests(TestCase):
         self.assertIsNotNone(game.ended_at)
         self.assertEqual(game.rounds.count(), 2)
         self.assertFalse(game.rounds.filter(sequence_number=3).exists())
+        selected_word_ids = list(
+            game.rounds.order_by("sequence_number").values_list("selected_game_word_id", flat=True)
+        )
+        self.assertEqual(len(selected_word_ids), 2)
+        self.assertEqual(len(selected_word_ids), len(set(selected_word_ids)))
         self.assertEqual(self.host.current_score, 2)
         self.assertEqual(self.member.current_score, 2)
         self.assertEqual(self.spectator.current_score, 0)

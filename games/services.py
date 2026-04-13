@@ -287,8 +287,8 @@ def _progress_game_after_round_completion(completed_round: Round) -> Round | Non
 
     remaining_drawers = _get_remaining_eligible_drawers(locked_game)
     remaining_drawer_ids = [participant.id for participant in remaining_drawers]
-    _set_remaining_drawer_pool(join_code=join_code, participant_ids=remaining_drawer_ids)
     if not remaining_drawers:
+        _set_remaining_drawer_pool(join_code=join_code, participant_ids=[])
         locked_game.status = GameStatus.FINISHED
         locked_game.ended_at = timezone.now()
         locked_game.save(update_fields=["status", "ended_at", "updated_at"])
