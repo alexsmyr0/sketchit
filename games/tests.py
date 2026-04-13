@@ -10,6 +10,7 @@ from django.utils import timezone
 
 from games import redis as game_redis
 from games import runtime as game_runtime
+from games import services as game_services
 from games.admin import GameAdmin, GameWordAdmin, GuessAdmin, RoundAdmin
 from games.models import Game, GameStatus, GameWord, Guess, Round, RoundStatus
 from games.services import (
@@ -76,6 +77,10 @@ class GamesAdminRegistrationTests(SimpleTestCase):
 
 class StartGameServiceTests(TestCase):
     def setUp(self):
+        self._original_services_redis_client = game_services._redis_client
+        self.fake_redis = fakeredis.FakeRedis()
+        game_services._redis_client = self.fake_redis
+
         self.word_pack = WordPack.objects.create(name="Test Pack")
         for word_text in ("apple", "banana", "cherry"):
             word = Word.objects.create(text=word_text)
@@ -118,6 +123,10 @@ class StartGameServiceTests(TestCase):
         )
         self.room.host = self.host
         self.room.save(update_fields=("host",))
+
+    def tearDown(self):
+        game_services._redis_client = self._original_services_redis_client
+        super().tearDown()
 
     def test_start_game_creates_snapshot_and_first_active_round(self):
         started_game = start_game_for_room(self.room)
@@ -251,6 +260,9 @@ class StartGameServiceTests(TestCase):
 
         self.assertEqual(round_to_resolve.status, RoundStatus.COMPLETED)
 
+    def _runtime_redis_client(self):
+        return self.fake_redis
+
     def test_correct_guess_ends_active_round_and_updates_scores(self):
         first_round, guesser, drawer = self._start_game_with_non_drawer_guesser()
         guess_text = f"  {first_round.selected_game_word.text.upper()}  "
@@ -280,6 +292,68 @@ class StartGameServiceTests(TestCase):
         self.assertEqual(result.as_round_result()["winning_player_id"], guesser.id)
         self.assertEqual(Guess.objects.filter(round=first_round).count(), 1)
         self.assertTrue(Guess.objects.get(round=first_round).is_correct)
+
+    def test_start_game_initializes_remaining_drawer_pool_excluding_current_drawer(self):
+        started_game = start_game_for_room(self.room)
+
+        drawer_pool = game_redis.get_drawer_pool(
+            self._runtime_redis_client(),
+            self.room.join_code,
+        )
+        expected_remaining = {self.host.id, self.member.id}
+        expected_remaining.discard(started_game.first_round.drawer_participant_id)
+
+        self.assertSetEqual(drawer_pool, expected_remaining)
+
+    def test_drawer_pool_updates_after_each_round_and_clears_on_game_finish(self):
+        third_player = Player.objects.create(
+            room=self.room,
+            session_key="third-drawer-pool-session",
+            display_name="Third Pool",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            current_score=0,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        started_game = start_game_for_room(self.room)
+        game = started_game.game
+        redis_client = self._runtime_redis_client()
+        all_drawer_ids = {self.host.id, self.member.id, third_player.id}
+
+        first_round = started_game.first_round
+        self._resolve_round_with_correct_guess(first_round)
+        second_round = game.rounds.get(sequence_number=2)
+
+        drawer_pool_after_second_round_created = game_redis.get_drawer_pool(
+            redis_client,
+            self.room.join_code,
+        )
+        self.assertSetEqual(
+            drawer_pool_after_second_round_created,
+            all_drawer_ids
+            - {
+                first_round.drawer_participant_id,
+                second_round.drawer_participant_id,
+            },
+        )
+
+        self._resolve_round_with_correct_guess(second_round)
+        third_round = game.rounds.get(sequence_number=3)
+        drawer_pool_after_third_round_created = game_redis.get_drawer_pool(
+            redis_client,
+            self.room.join_code,
+        )
+        self.assertSetEqual(drawer_pool_after_third_round_created, set())
+
+        self._resolve_round_with_correct_guess(third_round)
+        game.refresh_from_db()
+        drawer_pool_after_game_finished = game_redis.get_drawer_pool(
+            redis_client,
+            self.room.join_code,
+        )
+
+        self.assertEqual(game.status, GameStatus.FINISHED)
+        self.assertSetEqual(drawer_pool_after_game_finished, set())
 
     def test_completed_round_creates_next_round_with_unused_drawer_and_word(self):
         started_game = start_game_for_room(self.room)
@@ -319,6 +393,11 @@ class StartGameServiceTests(TestCase):
         self.assertIsNotNone(game.ended_at)
         self.assertEqual(game.rounds.count(), 2)
         self.assertFalse(game.rounds.filter(sequence_number=3).exists())
+        selected_word_ids = list(
+            game.rounds.order_by("sequence_number").values_list("selected_game_word_id", flat=True)
+        )
+        self.assertEqual(len(selected_word_ids), 2)
+        self.assertEqual(len(selected_word_ids), len(set(selected_word_ids)))
         self.assertEqual(self.host.current_score, 2)
         self.assertEqual(self.member.current_score, 2)
         self.assertEqual(self.spectator.current_score, 0)
@@ -877,6 +956,101 @@ class RoundTimerCoordinatorTests(TransactionTestCase):
         self.assertEqual(drawer_payload["round_id"], first_round.id)
         self.assertEqual(drawer_payload["word"], first_round.selected_game_word.text)
 
+    def test_round_start_stores_role_specific_payloads_without_word_leak_to_guessers(self):
+        started_game = start_game_for_room(self.room)
+        first_round = Round.objects.select_related("selected_game_word").get(
+            pk=started_game.first_round.id
+        )
+
+        def _round_started_emitted() -> bool:
+            return bool(self._event_payloads("round.started"))
+
+        self._wait_for(_round_started_emitted, timeout_seconds=3)
+        guesser_round_started_payload = self._event_payloads("round.started")[-1]
+
+        drawer_payload = game_redis.get_round_payload(
+            self.fake_redis,
+            self.room.join_code,
+            "drawer",
+        )
+        guesser_payload = game_redis.get_round_payload(
+            self.fake_redis,
+            self.room.join_code,
+            "guesser",
+        )
+
+        self.assertIsNotNone(drawer_payload)
+        self.assertIsNotNone(guesser_payload)
+        self.assertEqual(drawer_payload["round_id"], first_round.id)
+        self.assertEqual(guesser_payload["round_id"], first_round.id)
+        self.assertEqual(drawer_payload["word"], first_round.selected_game_word.text)
+        self.assertEqual(guesser_payload["masked_word"], drawer_payload["masked_word"])
+        self.assertNotEqual(guesser_payload["masked_word"], first_round.selected_game_word.text)
+        self.assertNotIn("word", guesser_payload)
+        self.assertEqual(guesser_round_started_payload, guesser_payload)
+
+    def test_runtime_sync_events_return_role_specific_round_started_payloads(self):
+        started_game = start_game_for_room(self.room)
+        first_round = Round.objects.select_related("selected_game_word").get(
+            pk=started_game.first_round.id
+        )
+
+        def _round_payloads_ready() -> bool:
+            return bool(
+                game_redis.get_round_payload(
+                    self.fake_redis,
+                    self.room.join_code,
+                    "drawer",
+                )
+            ) and bool(
+                game_redis.get_round_payload(
+                    self.fake_redis,
+                    self.room.join_code,
+                    "guesser",
+                )
+            )
+
+        self._wait_for(_round_payloads_ready, timeout_seconds=3)
+
+        drawer_id = first_round.drawer_participant_id
+        guesser_id = self.member.id if drawer_id == self.host.id else self.host.id
+
+        drawer_sync_events = game_runtime.get_sync_events_for_player(
+            self.room.join_code,
+            drawer_id,
+        )
+        guesser_sync_events = game_runtime.get_sync_events_for_player(
+            self.room.join_code,
+            guesser_id,
+        )
+
+        drawer_round_started = next(
+            event for event in drawer_sync_events if event["type"] == "round.started"
+        )
+        guesser_round_started = next(
+            event for event in guesser_sync_events if event["type"] == "round.started"
+        )
+        drawer_word_event = next(
+            event for event in drawer_sync_events if event["type"] == "round.drawer_word"
+        )
+
+        self.assertEqual(drawer_round_started["payload"]["role"], "drawer")
+        self.assertEqual(guesser_round_started["payload"]["role"], "guesser")
+        self.assertEqual(
+            drawer_round_started["payload"]["word"],
+            first_round.selected_game_word.text,
+        )
+        self.assertNotIn("word", guesser_round_started["payload"])
+        self.assertEqual(
+            drawer_round_started["payload"]["masked_word"],
+            guesser_round_started["payload"]["masked_word"],
+        )
+        self.assertEqual(drawer_word_event["payload"]["round_id"], first_round.id)
+        self.assertEqual(
+            drawer_word_event["payload"]["word"],
+            first_round.selected_game_word.text,
+        )
+
     def test_all_eligible_guessers_correct_ends_round_before_timer_expiry(self):
         Player.objects.create(
             room=self.room,
@@ -1042,6 +1216,13 @@ class RoundTimerCoordinatorTests(TransactionTestCase):
 
         self.assertIn("game.finished", self._event_types())
         self.assertEqual(game_redis.get_turn_state(self.fake_redis, self.room.join_code), {})
+        self.assertEqual(game_redis.get_drawer_pool(self.fake_redis, self.room.join_code), set())
+        self.assertIsNone(
+            game_redis.get_round_payload(self.fake_redis, self.room.join_code, "drawer")
+        )
+        self.assertIsNone(
+            game_redis.get_round_payload(self.fake_redis, self.room.join_code, "guesser")
+        )
         self.assertIsNone(
             game_redis.get_deadline(self.fake_redis, self.room.join_code, "round_end")
         )

@@ -378,6 +378,8 @@ def _intermission_timer_worker(
     if result.game_finished:
         client = get_redis_client()
         game_redis.clear_turn_state(client, join_code)
+        game_redis.clear_round_payloads(client, join_code)
+        game_redis.clear_drawer_pool(client, join_code)
         game_redis.clear_deadline(client, join_code, "round_end")
         game_redis.clear_deadline(client, join_code, "intermission_end")
         broadcast_room_event(
@@ -476,6 +478,39 @@ def _eligible_guesser_ids_for_round(round: Round) -> list[int]:
         .order_by("created_at", "id")
         .values_list("id", flat=True)
     )
+
+
+def _mask_word_for_guessers(word_text: str) -> str:
+    return "".join("_" if character.isalnum() else character for character in word_text)
+
+
+def _build_round_start_payloads(
+    *,
+    round: Round,
+    deadline_at: datetime,
+) -> tuple[dict, dict]:
+    server_timestamp = timezone.now().isoformat()
+    masked_word = _mask_word_for_guessers(round.selected_game_word.text)
+    common_payload = {
+        "game_id": round.game_id,
+        "round_id": round.id,
+        "sequence_number": round.sequence_number,
+        "drawer_participant_id": round.drawer_participant_id,
+        "deadline_at": deadline_at.isoformat(),
+        "duration_seconds": _round_duration_seconds(),
+        "masked_word": masked_word,
+        "server_timestamp": server_timestamp,
+    }
+    drawer_payload = {
+        **common_payload,
+        "role": "drawer",
+        "word": round.selected_game_word.text,
+    }
+    guesser_payload = {
+        **common_payload,
+        "role": "guesser",
+    }
+    return drawer_payload, guesser_payload
 
 
 def get_round_correctness_state(
@@ -589,6 +624,29 @@ def get_sync_events_for_player(join_code: str, player_id: int) -> list[dict]:
 
     drawer_id = round_state_payload.get("drawer_participant_id")
     round_id = round_state_payload.get("round_id")
+    if round_state_payload["phase"] == "round":
+        role = "drawer" if drawer_id is not None and drawer_id == player_id else "guesser"
+        role_payload = game_redis.get_round_payload(client, join_code, role)
+        if role_payload is not None:
+            events.append(
+                {
+                    "type": "round.started",
+                    "payload": role_payload,
+                }
+            )
+            if role == "drawer":
+                events.append(
+                    {
+                        "type": "round.drawer_word",
+                        "payload": {
+                            "round_id": role_payload.get("round_id", round_id),
+                            "word": role_payload.get("word"),
+                            "server_timestamp": timezone.now().isoformat(),
+                        },
+                    }
+                )
+            return events
+
     if (
         round_state_payload["phase"] == "round"
         and drawer_id is not None
@@ -629,8 +687,13 @@ def start_round_runtime(round_id: int) -> None:
 
     join_code = round.game.room.join_code
     eligible_guesser_ids = _eligible_guesser_ids_for_round(round)
-    now_iso = timezone.now().isoformat()
-    deadline_at = timezone.now() + timedelta(seconds=_round_duration_seconds())
+    started_at = timezone.now()
+    now_iso = started_at.isoformat()
+    deadline_at = started_at + timedelta(seconds=_round_duration_seconds())
+    drawer_payload, guesser_payload = _build_round_start_payloads(
+        round=round,
+        deadline_at=deadline_at,
+    )
 
     client = get_redis_client()
     game_redis.clear_guess_state(client, join_code, round.id)
@@ -656,6 +719,12 @@ def start_round_runtime(round_id: int) -> None:
             "last_timer_server_timestamp": now_iso,
         },
     )
+    game_redis.set_round_payloads(
+        client,
+        join_code,
+        drawer_payload=drawer_payload,
+        guesser_payload=guesser_payload,
+    )
     game_redis.set_deadline(client, join_code, "round_end", deadline_at.isoformat())
     game_redis.clear_deadline(client, join_code, "intermission_end")
 
@@ -665,15 +734,7 @@ def start_round_runtime(round_id: int) -> None:
     broadcast_room_event(
         join_code,
         "round.started",
-        {
-            "game_id": round.game_id,
-            "round_id": round.id,
-            "sequence_number": round.sequence_number,
-            "drawer_participant_id": round.drawer_participant_id,
-            "deadline_at": deadline_at.isoformat(),
-            "duration_seconds": _round_duration_seconds(),
-            "server_timestamp": timezone.now().isoformat(),
-        },
+        guesser_payload,
     )
 
     if round.drawer_participant_id is not None:
@@ -685,9 +746,9 @@ def start_round_runtime(round_id: int) -> None:
             round.drawer_participant_id,
             "round.drawer_word",
             {
-                "round_id": round.id,
-                "word": round.selected_game_word.text,
-                "server_timestamp": timezone.now().isoformat(),
+                "round_id": drawer_payload["round_id"],
+                "word": drawer_payload["word"],
+                "server_timestamp": drawer_payload["server_timestamp"],
             },
         )
 
@@ -807,6 +868,7 @@ def start_intermission(
             "last_timer_server_timestamp": now_iso,
         },
     )
+    game_redis.clear_round_payloads(client, join_code)
     game_redis.clear_deadline(client, join_code, "round_end")
     game_redis.set_deadline(client, join_code, "intermission_end", deadline_at.isoformat())
 

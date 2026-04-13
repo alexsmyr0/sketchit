@@ -2,11 +2,14 @@ import random
 from dataclasses import dataclass
 from datetime import datetime
 
+import redis
 from django.conf import settings
 from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
+from redis.exceptions import RedisError
 
+from games import redis as game_redis
 from games.models import Game, GameStatus, GameWord, Guess, Round, RoundStatus
 from rooms.models import Player, Room
 
@@ -70,8 +73,33 @@ CORRECT_GUESSER_SCORE_DELTA = 1
 DRAWER_SCORE_DELTA_ON_CORRECT_GUESS = 1
 
 
+_redis_client: redis.Redis | None = None
+
+
 def _runtime_coordinator_enabled() -> bool:
     return bool(getattr(settings, "SKETCHIT_ENABLE_RUNTIME_COORDINATOR", True))
+
+
+def _get_redis_client() -> redis.Redis:
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = redis.Redis.from_url(settings.REDIS_URL)
+    return _redis_client
+
+
+def _set_remaining_drawer_pool(*, join_code: str, participant_ids: list[int]) -> None:
+    try:
+        game_redis.set_drawer_pool(_get_redis_client(), join_code, participant_ids)
+    except RedisError:
+        # Durable game progression remains DB-authoritative if Redis is unavailable.
+        return
+
+
+def _clear_round_runtime_payloads(join_code: str) -> None:
+    try:
+        game_redis.clear_round_payloads(_get_redis_client(), join_code)
+    except RedisError:
+        return
 
 
 def _dedupe_snapshot_words_case_insensitive(word_texts: list[str]) -> list[str]:
@@ -243,6 +271,7 @@ def _handle_round_completed(locked_round: Round, *, completion_reason: str) -> N
 
 def _progress_game_after_round_completion(completed_round: Round) -> Round | None:
     locked_game = Game.objects.select_for_update().get(pk=completed_round.game_id)
+    join_code = locked_game.room.join_code
     next_round_sequence_number = completed_round.sequence_number + 1
 
     existing_next_round = (
@@ -257,10 +286,13 @@ def _progress_game_after_round_completion(completed_round: Round) -> Round | Non
         return None
 
     remaining_drawers = _get_remaining_eligible_drawers(locked_game)
+    remaining_drawer_ids = [participant.id for participant in remaining_drawers]
     if not remaining_drawers:
+        _set_remaining_drawer_pool(join_code=join_code, participant_ids=[])
         locked_game.status = GameStatus.FINISHED
         locked_game.ended_at = timezone.now()
         locked_game.save(update_fields=["status", "ended_at", "updated_at"])
+        _clear_round_runtime_payloads(join_code)
         return None
 
     available_words = list(
@@ -274,6 +306,14 @@ def _progress_game_after_round_completion(completed_round: Round) -> Round | Non
         )
 
     next_drawer = random.choice(remaining_drawers)
+    _set_remaining_drawer_pool(
+        join_code=join_code,
+        participant_ids=[
+            participant_id
+            for participant_id in remaining_drawer_ids
+            if participant_id != next_drawer.id
+        ],
+    )
     next_word = random.choice(available_words)
     return Round.objects.create(
         game=locked_game,
@@ -348,6 +388,15 @@ def start_game_for_room(room: Room) -> StartedGame:
         selected_game_word=first_word,
         sequence_number=1,
     )
+    _set_remaining_drawer_pool(
+        join_code=locked_room.join_code,
+        participant_ids=[
+            participant.id
+            for participant in eligible_participants
+            if participant.id != first_drawer.id
+        ],
+    )
+    _clear_round_runtime_payloads(locked_room.join_code)
 
     locked_room.status = Room.Status.IN_PROGRESS
     locked_room.save(update_fields=["status", "updated_at"])
