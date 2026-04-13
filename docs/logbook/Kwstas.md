@@ -27,3 +27,7 @@
 ## Apr 10
 
 - Added round timer and early-finish coordinator.
+
+## Apr 13
+
+- Completed full game cycle drawer rotation.
