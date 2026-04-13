@@ -2,14 +2,17 @@ import json
 from datetime import timedelta
 from unittest.mock import patch
 
+import fakeredis
 from django.contrib import admin
 from django.conf import settings
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
+from games import redis as game_redis
 from games.models import Game, GameWord, Round
 from rooms.admin import PlayerAdmin, RoomAdmin
 from rooms.models import MVP_DEFAULT_WORD_PACK_NAME, Player, Room
+from rooms.services import get_empty_room_cleanup_deadline
 from words.models import Word, WordPack, WordPackEntry
 
 
@@ -241,8 +244,14 @@ class JoinRoomViewTests(TestCase):
             content_type=content_type,
         )
 
+    def _post_join_room_and_execute_on_commit(self, **kwargs):
+        """Issue the join request and execute any transaction on-commit callbacks."""
+
+        with self.captureOnCommitCallbacks(execute=True):
+            return self.post_join_room(**kwargs)
+
     def test_join_room_creates_participant_for_existing_room(self):
-        response = self.post_join_room()
+        response = self._post_join_room_and_execute_on_commit()
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(Player.objects.count(), 1)
@@ -267,7 +276,7 @@ class JoinRoomViewTests(TestCase):
     def test_join_room_persists_session_for_guest_request(self):
         self.assertNotIn(settings.SESSION_COOKIE_NAME, self.client.cookies)
 
-        response = self.post_join_room()
+        response = self._post_join_room_and_execute_on_commit()
 
         self.assertEqual(response.status_code, 201)
         self.assertIn(settings.SESSION_COOKIE_NAME, self.client.cookies)
@@ -389,6 +398,60 @@ class JoinRoomViewTests(TestCase):
         response = self.client.get(self.url)
 
         self.assertEqual(response.status_code, 405)
+        self.assertEqual(Player.objects.count(), 0)
+
+    @patch("rooms.views._get_room_runtime_redis_client")
+    def test_join_room_restores_empty_grace_room_and_assigns_new_host(
+        self,
+        get_redis_client,
+    ):
+        fake_redis = fakeredis.FakeRedis()
+        get_redis_client.return_value = fake_redis
+        entered_at = timezone.now() - timedelta(minutes=5)
+        self.room.status = Room.Status.EMPTY_GRACE
+        self.room.empty_since = entered_at
+        self.room.host = None
+        self.room.save(update_fields=["status", "empty_since", "host", "updated_at"])
+        game_redis.set_deadline(
+            fake_redis,
+            self.room.join_code,
+            "cleanup",
+            get_empty_room_cleanup_deadline(empty_since=entered_at).isoformat(),
+        )
+
+        response = self.post_join_room()
+
+        self.assertEqual(response.status_code, 201)
+        self.room.refresh_from_db()
+        player = Player.objects.get(room=self.room)
+
+        self.assertEqual(self.room.status, Room.Status.LOBBY)
+        self.assertIsNone(self.room.empty_since)
+        self.assertEqual(self.room.host_id, player.id)
+
+    @patch("rooms.views._get_room_runtime_redis_client")
+    def test_join_room_rejects_and_deletes_expired_empty_grace_room(
+        self,
+        get_redis_client,
+    ):
+        fake_redis = fakeredis.FakeRedis()
+        get_redis_client.return_value = fake_redis
+        entered_at = timezone.now() - timedelta(minutes=10, seconds=1)
+        self.room.status = Room.Status.EMPTY_GRACE
+        self.room.empty_since = entered_at
+        self.room.host = None
+        self.room.save(update_fields=["status", "empty_since", "host", "updated_at"])
+        game_redis.set_deadline(
+            fake_redis,
+            self.room.join_code,
+            "cleanup",
+            get_empty_room_cleanup_deadline(empty_since=entered_at).isoformat(),
+        )
+
+        response = self.post_join_room()
+
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse(Room.objects.filter(pk=self.room.id).exists())
         self.assertEqual(Player.objects.count(), 0)
 
 

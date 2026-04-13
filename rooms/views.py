@@ -3,15 +3,26 @@ import random
 import string
 
 from django import forms
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Count
 from django.db.utils import IntegrityError
 from django.http import HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import render
+from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
+import redis
 
 from games.services import StartGameError, start_game_for_room
 from rooms.models import Player, Room
+from rooms.services import (
+    delete_room_if_empty_grace_expired,
+    get_empty_room_cleanup_deadline,
+    restore_room_from_empty_grace,
+)
+
+
+_redis_client = None
 
 
 class CreateRoomForm(forms.Form):
@@ -29,6 +40,20 @@ class JoinRoomForm(forms.Form):
 class UpdateLobbySettingsForm(forms.Form):
     name = forms.CharField(max_length=255)
     visibility = forms.ChoiceField(choices=Room.Visibility.choices)
+
+
+def _get_room_runtime_redis_client() -> redis.Redis:
+    """Return a cached Redis client for room lifecycle runtime helpers.
+
+    The join flow occasionally needs Redis only for empty-room grace cleanup.
+    Caching keeps that path cheap without pushing Redis client construction
+    into every request that touches an empty-grace room.
+    """
+
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = redis.Redis.from_url(settings.REDIS_URL)
+    return _redis_client
 
 
 def _parse_json_payload(request):
@@ -222,46 +247,79 @@ def join_room(request, join_code):
     # The Django session is our guest identity for the MVP.
     session_key = _get_or_create_session_key(request)
 
-    try:
-        # Generated join codes are uppercase, so we normalize user input before
-        # querying to allow lowercase requests like "abc12345".
-        room = Room.objects.get(join_code=join_code.upper())
-    except Room.DoesNotExist:
-        return JsonResponse({"detail": "Room not found."}, status=404)
+    with transaction.atomic():
+        try:
+            # Generated join codes are uppercase, so we normalize user input
+            # before querying to allow lowercase requests like "abc12345".
+            room = (
+                Room.objects.select_for_update()
+                .select_related("host")
+                .get(join_code=join_code.upper())
+            )
+        except Room.DoesNotExist:
+            return JsonResponse({"detail": "Room not found."}, status=404)
 
-    # If the session already has a Player, we either reuse it for the same room
-    # or reject the request if it belongs to a different room.
-    player = Player.objects.filter(session_key=session_key).first()
-    if player is not None:
-        if player.room_id != room.id:
+        if room.status == Room.Status.EMPTY_GRACE:
+            current_time = timezone.now()
+            if (
+                room.empty_since is not None
+                and current_time >= get_empty_room_cleanup_deadline(
+                    empty_since=room.empty_since,
+                )
+            ):
+                # A join that arrives after the grace window should not revive a
+                # zombie room just because the async cleanup path has not run yet.
+                delete_room_if_empty_grace_expired(
+                    redis_client=_get_room_runtime_redis_client(),
+                    room_id=room.id,
+                    now=current_time,
+                )
+                return JsonResponse({"detail": "Room not found."}, status=404)
+
+            restore_room_from_empty_grace(
+                redis_client=_get_room_runtime_redis_client(),
+                room_id=room.id,
+            )
+            room.refresh_from_db()
+
+        # If the session already has a Player, we either reuse it for the same room
+        # or reject the request if it belongs to a different room.
+        player = Player.objects.filter(session_key=session_key).first()
+        if player is not None:
+            if player.room_id != room.id:
+                return JsonResponse(
+                    {"detail": "This guest session is already assigned to a room."},
+                    status=409,
+                )
+
+            # Rejoining the same room should not create a duplicate participant or
+            # change the original display name, but it should refresh the session
+            # expiry we store on the player record.
+            player.session_expires_at = request.session.get_expiry_date()
+            player.save(update_fields=["session_expires_at", "updated_at"])
+            return _build_room_response(room, status=200)
+
+        # Capacity only matters for brand-new joins, not same-session rejoin reuse.
+        if room.participants.count() >= room.max_players:
             return JsonResponse(
-                {"detail": "This guest session is already assigned to a room."},
+                {"detail": "This room is full."},
                 status=409,
             )
 
-        # Rejoining the same room should not create a duplicate participant or
-        # change the original display name, but it should refresh the session
-        # expiry we store on the player record.
-        player.session_expires_at = request.session.get_expiry_date()
-        player.save(update_fields=["session_expires_at", "updated_at"])
-        return _build_room_response(room, status=200)
-
-    # Capacity only matters for brand-new joins, not same-session rejoin reuse.
-    if room.participants.count() >= room.max_players:
-        return JsonResponse(
-            {"detail": "This room is full."},
-            status=409,
+        # No player exists for this session yet, so create a new participant row.
+        player = Player.objects.create(
+            room=room,
+            session_key=session_key,
+            display_name=form.cleaned_data["display_name"],
+            # Joining the room via HTTP alone should not count as live presence.
+            connection_status=Player.ConnectionStatus.DISCONNECTED,
+            session_expires_at=request.session.get_expiry_date(),
         )
-
-    # No player exists for this session yet, so create a new participant row.
-    Player.objects.create(
-        room=room,
-        session_key=session_key,
-        display_name=form.cleaned_data["display_name"],
-        # Joining the room via HTTP alone should not count as live presence.
-        connection_status=Player.ConnectionStatus.DISCONNECTED,
-        session_expires_at=request.session.get_expiry_date(),
-    )
+        # Empty-grace rooms have no active membership, so the first returning
+        # participant must become the new host to make the lobby usable again.
+        if room.host_id is None:
+            room.host = player
+            room.save(update_fields=["host", "updated_at"])
 
     return _build_room_response(room, status=201)
 

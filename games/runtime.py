@@ -179,6 +179,45 @@ def reset_runtime_state_for_tests() -> None:
     _redis_client = None
 
 
+def _clear_guess_state_keys_for_room(client: redis.Redis, join_code: str) -> None:
+    """Delete every per-round guess-state hash for one room.
+
+    Guess-state keys include the round id in the key name, so a room-wide
+    teardown must scan for them rather than clearing only one known round.
+    """
+
+    pattern = f"room:{join_code}:round:*:guess_state"
+    keys = list(client.scan_iter(match=pattern))
+    if keys:
+        client.delete(*keys)
+
+
+def teardown_room_runtime(
+    join_code: str,
+    *,
+    redis_client: redis.Redis | None = None,
+    include_cleanup_deadline: bool = False,
+) -> None:
+    """Stop local timer workers and clear Redis runtime state for one room.
+
+    This is used when a room is abandoned or deleted so stale timer threads do
+    not keep broadcasting for gameplay that is no longer valid.
+    """
+
+    _cancel_round_timer(join_code)
+    _cancel_intermission_timer(join_code)
+
+    client = redis_client or get_redis_client()
+    _clear_guess_state_keys_for_room(client, join_code)
+    game_redis.clear_turn_state(client, join_code)
+    game_redis.clear_drawer_pool(client, join_code)
+    game_redis.clear_round_payloads(client, join_code)
+    game_redis.clear_deadline(client, join_code, "round_end")
+    game_redis.clear_deadline(client, join_code, "intermission_end")
+    if include_cleanup_deadline:
+        game_redis.clear_deadline(client, join_code, "cleanup")
+
+
 def get_timer_status_for_tests(join_code: str) -> dict[str, bool]:
     with _room_timer_lock:
         handles = _room_timer_handles_by_join_code.get(join_code)

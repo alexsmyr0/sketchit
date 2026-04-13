@@ -35,7 +35,11 @@ _redis_client = None
 
 
 def get_redis_client() -> redis.Redis:
-    """Return a cached Redis client for room runtime state."""
+    """Return a cached Redis client for room runtime state.
+
+    Consumers are created per socket connection, so caching avoids rebuilding
+    the Redis client every time a participant connects or disconnects.
+    """
 
     global _redis_client
     if _redis_client is None:
@@ -98,6 +102,9 @@ def _resolve_room_and_player(
     Returns ``(None, None)`` if the room does not exist.
     Returns ``(room, None)`` if the session is not a participant.
     Returns ``(room, player)`` on success.
+
+    Reconnect reuse stays simple: if the same Django session reconnects, we
+    resolve the already-owned participant row instead of creating a new one.
     """
     try:
         room = Room.objects.get(join_code=join_code.upper())
@@ -160,6 +167,9 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         self.player_group: str = _player_group_name(self.join_code, self.player.id)
         self.session_key: str = session_key
 
+        # Group membership controls future fan-out delivery. The lifecycle
+        # service call below is the separate step that marks the participant as
+        # connected in Redis/MySQL.
         await self.channel_layer.group_add(self.room_group, self.channel_name)
         await self.channel_layer.group_add(self.player_group, self.channel_name)
         await _mark_participant_connected(
@@ -176,7 +186,12 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             await self.send_json(event)
 
     async def disconnect(self, code: int) -> None:
-        """Remove this channel from the room group on disconnect."""
+        """Remove this socket from channel groups and update lifecycle state.
+
+        Disconnect only closes this one socket. The service layer decides
+        whether the participant still counts as connected overall, because the
+        same guest session may still have another open tab/socket in the room.
+        """
         if hasattr(self, "room_group"):
             await self.channel_layer.group_discard(self.room_group, self.channel_name)
         if hasattr(self, "player_group"):

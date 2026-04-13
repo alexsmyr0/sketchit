@@ -9,17 +9,31 @@ import fakeredis
 from django.test import TestCase
 from django.utils import timezone
 
+from games import redis as game_redis
+from games.models import Game, GameStatus, GameWord, Round, RoundStatus
 from rooms import redis as room_redis
 from rooms.models import Player, Room
 from rooms.services import (
+    cleanup_expired_empty_rooms,
     connect_participant,
+    delete_room_if_empty_grace_expired,
     disconnect_participant,
+    enter_empty_room_grace,
+    get_empty_room_cleanup_deadline,
     leave_participant,
+    purge_expired_participants,
+    restore_room_from_empty_grace,
 )
 
 
 class ParticipantLifecycleServiceTests(TestCase):
     """Service-level coverage for participant connection lifecycle rules."""
+
+    def _execute_on_commit(self, callback):
+        """Run code and immediately execute any on-commit callbacks it registers."""
+
+        with self.captureOnCommitCallbacks(execute=True):
+            callback()
 
     def setUp(self):
         self.redis_client = fakeredis.FakeRedis()
@@ -55,6 +69,48 @@ class ParticipantLifecycleServiceTests(TestCase):
         )
         self.assertIsNotNone(self.player.last_seen_at)
         self.assertTrue(
+            room_redis.is_present(
+                self.redis_client,
+                self.room.join_code,
+                self.player.session_key,
+            )
+        )
+
+    def test_connect_and_disconnect_use_canonical_room_join_code_for_presence(self):
+        lowercase_join_code = self.room.join_code.lower()
+
+        connect_participant(
+            redis_client=self.redis_client,
+            player_id=self.player.id,
+            join_code=lowercase_join_code,
+            session_key=self.player.session_key,
+            connection_id="chan-1",
+        )
+
+        self.assertTrue(
+            room_redis.is_present(
+                self.redis_client,
+                self.room.join_code,
+                self.player.session_key,
+            )
+        )
+        self.assertFalse(
+            room_redis.is_present(
+                self.redis_client,
+                lowercase_join_code,
+                self.player.session_key,
+            )
+        )
+
+        disconnect_participant(
+            redis_client=self.redis_client,
+            player_id=self.player.id,
+            join_code=lowercase_join_code,
+            session_key=self.player.session_key,
+            connection_id="chan-1",
+        )
+
+        self.assertFalse(
             room_redis.is_present(
                 self.redis_client,
                 self.room.join_code,
@@ -147,9 +203,11 @@ class ParticipantLifecycleServiceTests(TestCase):
             connection_id="chan-2",
         )
 
-        leave_participant(
-            redis_client=self.redis_client,
-            player_id=self.player.id,
+        self._execute_on_commit(
+            lambda: leave_participant(
+                redis_client=self.redis_client,
+                player_id=self.player.id,
+            )
         )
 
         self.assertFalse(Player.objects.filter(pk=self.player.id).exists())
@@ -171,6 +229,15 @@ class ParticipantLifecycleServiceTests(TestCase):
         )
         self.room.refresh_from_db()
         self.assertIsNone(self.room.host)
+        self.assertEqual(self.room.status, Room.Status.EMPTY_GRACE)
+        self.assertIsNotNone(self.room.empty_since)
+        self.assertIsNotNone(
+            game_redis.get_deadline(
+                self.redis_client,
+                self.room.join_code,
+                "cleanup",
+            )
+        )
 
     @patch("rooms.services.random.choice")
     def test_leave_participant_reassigns_host_when_current_host_leaves(
@@ -201,6 +268,8 @@ class ParticipantLifecycleServiceTests(TestCase):
         self.room.refresh_from_db()
 
         self.assertEqual(self.room.host_id, third_player.id)
+        self.assertEqual(self.room.status, Room.Status.LOBBY)
+        self.assertIsNone(self.room.empty_since)
         self.assertFalse(Player.objects.filter(pk=self.player.id).exists())
         random_choice.assert_called_once()
 
@@ -221,6 +290,8 @@ class ParticipantLifecycleServiceTests(TestCase):
         self.room.refresh_from_db()
 
         self.assertEqual(self.room.host_id, self.player.id)
+        self.assertEqual(self.room.status, Room.Status.LOBBY)
+        self.assertIsNone(self.room.empty_since)
         self.assertFalse(Player.objects.filter(pk=non_host_player.id).exists())
 
     def test_connect_participant_rejects_mismatched_session_key(self):
@@ -235,3 +306,530 @@ class ParticipantLifecycleServiceTests(TestCase):
                 session_key="wrong-session",
                 connection_id="chan-1",
             )
+
+    def test_connect_participant_rejects_mismatched_join_code(self):
+        with self.assertRaisesMessage(
+            ValueError,
+            "Participant does not belong to the given room join code.",
+        ):
+            connect_participant(
+                redis_client=self.redis_client,
+                player_id=self.player.id,
+                join_code="WRONG123",
+                session_key=self.player.session_key,
+                connection_id="chan-1",
+            )
+
+
+class EmptyRoomGraceServiceTests(TestCase):
+    """Service-level coverage for empty-room grace entry, restore, and expiry."""
+
+    def _execute_on_commit(self, callback):
+        """Run code and immediately execute any on-commit callbacks it registers."""
+
+        with self.captureOnCommitCallbacks(execute=True):
+            callback()
+
+    def setUp(self):
+        self.redis_client = fakeredis.FakeRedis()
+        self.room = Room.objects.create(
+            name="Grace Room",
+            join_code="GRACE123",
+            visibility=Room.Visibility.PRIVATE,
+        )
+
+    def test_enter_empty_room_grace_sets_status_timestamp_and_cleanup_deadline(self):
+        entered_at = timezone.now()
+
+        self._execute_on_commit(
+            lambda: enter_empty_room_grace(
+                redis_client=self.redis_client,
+                room_id=self.room.id,
+                now=entered_at,
+            )
+        )
+
+        self.room.refresh_from_db()
+
+        self.assertEqual(self.room.status, Room.Status.EMPTY_GRACE)
+        self.assertEqual(self.room.empty_since, entered_at)
+        self.assertEqual(
+            game_redis.get_deadline(
+                self.redis_client,
+                self.room.join_code,
+                "cleanup",
+            ),
+            get_empty_room_cleanup_deadline(empty_since=entered_at).isoformat(),
+        )
+
+    def test_enter_empty_room_grace_preserves_existing_timestamp(self):
+        original_empty_since = timezone.now() - timedelta(minutes=3)
+        self.room.status = Room.Status.EMPTY_GRACE
+        self.room.empty_since = original_empty_since
+        self.room.save(update_fields=["status", "empty_since", "updated_at"])
+
+        self._execute_on_commit(
+            lambda: enter_empty_room_grace(
+                redis_client=self.redis_client,
+                room_id=self.room.id,
+                now=timezone.now(),
+            )
+        )
+
+        self.room.refresh_from_db()
+
+        self.assertEqual(self.room.empty_since, original_empty_since)
+        self.assertEqual(
+            game_redis.get_deadline(
+                self.redis_client,
+                self.room.join_code,
+                "cleanup",
+            ),
+            get_empty_room_cleanup_deadline(
+                empty_since=original_empty_since,
+            ).isoformat(),
+        )
+
+    def test_enter_empty_room_grace_rejects_non_empty_room(self):
+        Player.objects.create(
+            room=self.room,
+            session_key="session-123",
+            display_name="Alex",
+            connection_status=Player.ConnectionStatus.DISCONNECTED,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+
+        with self.assertRaisesMessage(
+            ValueError,
+            "Cannot move a non-empty room into empty grace.",
+        ):
+            enter_empty_room_grace(
+                redis_client=self.redis_client,
+                room_id=self.room.id,
+            )
+
+    def test_restore_room_from_empty_grace_returns_room_to_lobby(self):
+        self._execute_on_commit(
+            lambda: enter_empty_room_grace(
+                redis_client=self.redis_client,
+                room_id=self.room.id,
+                now=timezone.now(),
+            )
+        )
+
+        self._execute_on_commit(
+            lambda: restore_room_from_empty_grace(
+                redis_client=self.redis_client,
+                room_id=self.room.id,
+            )
+        )
+
+        self.room.refresh_from_db()
+
+        self.assertEqual(self.room.status, Room.Status.LOBBY)
+        self.assertIsNone(self.room.empty_since)
+        self.assertIsNone(
+            game_redis.get_deadline(
+                self.redis_client,
+                self.room.join_code,
+                "cleanup",
+            )
+        )
+
+    def test_restore_room_from_empty_grace_cancels_active_game_and_clears_runtime(self):
+        game = Game.objects.create(
+            room=self.room,
+            status=GameStatus.IN_PROGRESS,
+        )
+        game_word = GameWord.objects.create(
+            game=game,
+            text="rocket",
+        )
+        active_round = Round.objects.create(
+            game=game,
+            drawer_nickname="Drawer",
+            selected_game_word=game_word,
+            sequence_number=1,
+        )
+        entered_at = timezone.now()
+        self.room.status = Room.Status.EMPTY_GRACE
+        self.room.empty_since = entered_at
+        self.room.save(update_fields=["status", "empty_since", "updated_at"])
+        game_redis.set_turn_state(
+            self.redis_client,
+            self.room.join_code,
+            {
+                "phase": "round",
+                "status": "drawing",
+                "game_id": str(game.id),
+                "round_id": str(active_round.id),
+                "deadline_at": (entered_at + timedelta(minutes=1)).isoformat(),
+            },
+        )
+        game_redis.set_drawer_pool(self.redis_client, self.room.join_code, [1, 2])
+        game_redis.set_round_payloads(
+            self.redis_client,
+            self.room.join_code,
+            {"word": "rocket"},
+            {"mask": "r_____"},
+        )
+        game_redis.set_guess_state(
+            self.redis_client,
+            self.room.join_code,
+            active_round.id,
+            99,
+            {"status": "correct"},
+        )
+        game_redis.set_deadline(
+            self.redis_client,
+            self.room.join_code,
+            "round_end",
+            (entered_at + timedelta(minutes=1)).isoformat(),
+        )
+        game_redis.set_deadline(
+            self.redis_client,
+            self.room.join_code,
+            "cleanup",
+            get_empty_room_cleanup_deadline(empty_since=entered_at).isoformat(),
+        )
+
+        self._execute_on_commit(
+            lambda: restore_room_from_empty_grace(
+                redis_client=self.redis_client,
+                room_id=self.room.id,
+            )
+        )
+
+        self.room.refresh_from_db()
+        game.refresh_from_db()
+        active_round.refresh_from_db()
+
+        self.assertEqual(self.room.status, Room.Status.LOBBY)
+        self.assertIsNone(self.room.empty_since)
+        self.assertEqual(game.status, GameStatus.CANCELLED)
+        self.assertIsNotNone(game.ended_at)
+        self.assertEqual(active_round.status, RoundStatus.CANCELLED)
+        self.assertIsNotNone(active_round.ended_at)
+        self.assertEqual(game_redis.get_turn_state(self.redis_client, self.room.join_code), {})
+        self.assertEqual(game_redis.get_drawer_pool(self.redis_client, self.room.join_code), set())
+        self.assertIsNone(
+            game_redis.get_round_payload(self.redis_client, self.room.join_code, "drawer")
+        )
+        self.assertIsNone(
+            game_redis.get_guess_state(
+                self.redis_client,
+                self.room.join_code,
+                active_round.id,
+                99,
+            )
+        )
+        self.assertIsNone(
+            game_redis.get_deadline(
+                self.redis_client,
+                self.room.join_code,
+                "cleanup",
+            )
+        )
+
+    def test_restore_room_from_empty_grace_rejects_non_empty_grace_room(self):
+        with self.assertRaisesMessage(
+            ValueError,
+            "Only rooms in empty grace can be restored.",
+        ):
+            restore_room_from_empty_grace(
+                redis_client=self.redis_client,
+                room_id=self.room.id,
+            )
+
+    def test_delete_room_if_empty_grace_expired_keeps_room_before_deadline(self):
+        entered_at = timezone.now()
+        self._execute_on_commit(
+            lambda: enter_empty_room_grace(
+                redis_client=self.redis_client,
+                room_id=self.room.id,
+                now=entered_at,
+            )
+        )
+
+        deleted = delete_room_if_empty_grace_expired(
+            redis_client=self.redis_client,
+            room_id=self.room.id,
+            now=entered_at + timedelta(minutes=9, seconds=59),
+        )
+
+        self.assertFalse(deleted)
+        self.assertTrue(Room.objects.filter(pk=self.room.id).exists())
+
+    def test_delete_room_if_empty_grace_expired_deletes_room_after_deadline(self):
+        entered_at = timezone.now()
+        self._execute_on_commit(
+            lambda: enter_empty_room_grace(
+                redis_client=self.redis_client,
+                room_id=self.room.id,
+                now=entered_at,
+            )
+        )
+
+        deleted: list[bool] = []
+        self._execute_on_commit(
+            lambda: deleted.append(
+                delete_room_if_empty_grace_expired(
+                    redis_client=self.redis_client,
+                    room_id=self.room.id,
+                    now=entered_at + timedelta(minutes=10),
+                )
+            )
+        )
+        deleted_result = deleted[0]
+
+        self.assertTrue(deleted_result)
+        self.assertFalse(Room.objects.filter(pk=self.room.id).exists())
+        self.assertIsNone(
+            game_redis.get_deadline(
+                self.redis_client,
+                "GRACE123",
+                "cleanup",
+            )
+        )
+
+    def test_delete_room_if_empty_grace_expired_clears_game_runtime_state(self):
+        entered_at = timezone.now() - timedelta(minutes=10, seconds=1)
+        game = Game.objects.create(
+            room=self.room,
+            status=GameStatus.IN_PROGRESS,
+        )
+        game_word = GameWord.objects.create(game=game, text="planet")
+        active_round = Round.objects.create(
+            game=game,
+            drawer_nickname="Drawer",
+            selected_game_word=game_word,
+            sequence_number=1,
+        )
+        self.room.status = Room.Status.EMPTY_GRACE
+        self.room.empty_since = entered_at
+        self.room.save(update_fields=["status", "empty_since", "updated_at"])
+        game_redis.set_turn_state(
+            self.redis_client,
+            self.room.join_code,
+            {
+                "phase": "round",
+                "status": "drawing",
+                "game_id": str(game.id),
+                "round_id": str(active_round.id),
+                "deadline_at": (entered_at + timedelta(minutes=1)).isoformat(),
+            },
+        )
+        game_redis.set_drawer_pool(self.redis_client, self.room.join_code, [1, 2])
+        game_redis.set_round_payloads(
+            self.redis_client,
+            self.room.join_code,
+            {"word": "planet"},
+            {"mask": "p_____"},
+        )
+        game_redis.set_guess_state(
+            self.redis_client,
+            self.room.join_code,
+            active_round.id,
+            7,
+            {"status": "incorrect"},
+        )
+        game_redis.set_deadline(
+            self.redis_client,
+            self.room.join_code,
+            "round_end",
+            (entered_at + timedelta(minutes=1)).isoformat(),
+        )
+        game_redis.set_deadline(
+            self.redis_client,
+            self.room.join_code,
+            "cleanup",
+            get_empty_room_cleanup_deadline(empty_since=entered_at).isoformat(),
+        )
+
+        deleted: list[bool] = []
+        self._execute_on_commit(
+            lambda: deleted.append(
+                delete_room_if_empty_grace_expired(
+                    redis_client=self.redis_client,
+                    room_id=self.room.id,
+                    now=timezone.now(),
+                )
+            )
+        )
+        deleted_result = deleted[0]
+
+        self.assertTrue(deleted_result)
+        self.assertFalse(Room.objects.filter(pk=self.room.id).exists())
+        self.assertEqual(game_redis.get_turn_state(self.redis_client, self.room.join_code), {})
+        self.assertEqual(game_redis.get_drawer_pool(self.redis_client, self.room.join_code), set())
+        self.assertIsNone(
+            game_redis.get_round_payload(self.redis_client, self.room.join_code, "drawer")
+        )
+        self.assertIsNone(
+            game_redis.get_guess_state(
+                self.redis_client,
+                self.room.join_code,
+                active_round.id,
+                7,
+            )
+        )
+        self.assertIsNone(
+            game_redis.get_deadline(
+                self.redis_client,
+                self.room.join_code,
+                "cleanup",
+            )
+        )
+
+    def test_cleanup_expired_empty_rooms_deletes_only_expired_candidates(self):
+        now = timezone.now()
+        expired_room = Room.objects.create(
+            name="Expired Grace Room",
+            join_code="EXPIR123",
+            visibility=Room.Visibility.PRIVATE,
+            status=Room.Status.EMPTY_GRACE,
+            empty_since=now - timedelta(minutes=10, seconds=1),
+        )
+        fresh_room = Room.objects.create(
+            name="Fresh Grace Room",
+            join_code="FRESH123",
+            visibility=Room.Visibility.PRIVATE,
+            status=Room.Status.EMPTY_GRACE,
+            empty_since=now - timedelta(minutes=2),
+        )
+        occupied_room = Room.objects.create(
+            name="Occupied Grace Room",
+            join_code="BUSY1234",
+            visibility=Room.Visibility.PRIVATE,
+            status=Room.Status.EMPTY_GRACE,
+            empty_since=now - timedelta(minutes=12),
+        )
+        Player.objects.create(
+            room=occupied_room,
+            session_key="occupied-session",
+            display_name="Occupied",
+            connection_status=Player.ConnectionStatus.DISCONNECTED,
+            session_expires_at=now + timedelta(hours=1),
+        )
+
+        expired_deadline = get_empty_room_cleanup_deadline(
+            empty_since=expired_room.empty_since,
+        ).isoformat()
+        fresh_deadline = get_empty_room_cleanup_deadline(
+            empty_since=fresh_room.empty_since,
+        ).isoformat()
+        occupied_deadline = get_empty_room_cleanup_deadline(
+            empty_since=occupied_room.empty_since,
+        ).isoformat()
+        game_redis.set_deadline(
+            self.redis_client,
+            expired_room.join_code,
+            "cleanup",
+            expired_deadline,
+        )
+        game_redis.set_deadline(
+            self.redis_client,
+            fresh_room.join_code,
+            "cleanup",
+            fresh_deadline,
+        )
+        game_redis.set_deadline(
+            self.redis_client,
+            occupied_room.join_code,
+            "cleanup",
+            occupied_deadline,
+        )
+
+        deleted_counts: list[int] = []
+        self._execute_on_commit(
+            lambda: deleted_counts.append(
+                cleanup_expired_empty_rooms(
+                    redis_client=self.redis_client,
+                    now=now,
+                )
+            )
+        )
+        deleted_count = deleted_counts[0]
+
+        self.assertEqual(deleted_count, 1)
+        self.assertFalse(Room.objects.filter(pk=expired_room.id).exists())
+        self.assertTrue(Room.objects.filter(pk=fresh_room.id).exists())
+        self.assertTrue(Room.objects.filter(pk=occupied_room.id).exists())
+        self.assertIsNone(
+            game_redis.get_deadline(
+                self.redis_client,
+                expired_room.join_code,
+                "cleanup",
+            )
+        )
+        self.assertEqual(
+            game_redis.get_deadline(
+                self.redis_client,
+                fresh_room.join_code,
+                "cleanup",
+            ),
+            fresh_deadline,
+        )
+        self.assertEqual(
+            game_redis.get_deadline(
+                self.redis_client,
+                occupied_room.join_code,
+                "cleanup",
+            ),
+            occupied_deadline,
+        )
+
+    def test_purge_expired_participants_routes_last_expired_member_into_empty_grace(self):
+        expired_at = timezone.now() - timedelta(minutes=1)
+        expired_player = Player.objects.create(
+            room=self.room,
+            session_key="expired-session",
+            display_name="Expired Alex",
+            connection_status=Player.ConnectionStatus.DISCONNECTED,
+            session_expires_at=expired_at,
+        )
+        self.room.host = expired_player
+        self.room.save(update_fields=["host", "updated_at"])
+
+        purged_counts: list[int] = []
+        self._execute_on_commit(
+            lambda: purged_counts.append(
+                purge_expired_participants(
+                    redis_client=self.redis_client,
+                    now=timezone.now(),
+                )
+            )
+        )
+        purged_count = purged_counts[0]
+
+        self.room.refresh_from_db()
+        self.assertEqual(purged_count, 1)
+        self.assertFalse(Player.objects.filter(pk=expired_player.id).exists())
+        self.assertEqual(self.room.status, Room.Status.EMPTY_GRACE)
+        self.assertIsNotNone(self.room.empty_since)
+        self.assertIsNotNone(
+            game_redis.get_deadline(
+                self.redis_client,
+                self.room.join_code,
+                "cleanup",
+            )
+        )
+
+    def test_purge_expired_participants_keeps_unexpired_member(self):
+        active_player = Player.objects.create(
+            room=self.room,
+            session_key="active-session",
+            display_name="Active Alex",
+            connection_status=Player.ConnectionStatus.DISCONNECTED,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+
+        purged_count = purge_expired_participants(
+            redis_client=self.redis_client,
+            now=timezone.now(),
+        )
+
+        self.room.refresh_from_db()
+        self.assertEqual(purged_count, 0)
+        self.assertTrue(Player.objects.filter(pk=active_player.id).exists())
+        self.assertEqual(self.room.status, Room.Status.LOBBY)
