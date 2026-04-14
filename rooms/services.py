@@ -341,7 +341,7 @@ def connect_participant(
     join_code: str,
     session_key: str,
     connection_id: str,
-) -> None:
+) -> bool:
     """Mark one participant as connected for an active socket.
 
     Redis tracks the per-socket presence details. MySQL stores the durable
@@ -370,14 +370,11 @@ def connect_participant(
         connection_status=Player.ConnectionStatus.CONNECTED,
         last_seen_at=timezone.now(),
     )
-    if previous_connection_status != Player.ConnectionStatus.CONNECTED:
-        # Multiple tabs for the same session share one room-level participant.
-        # Opening an extra socket must not broadcast a fake reconnect when the
-        # participant was already connected from another tab.
-        schedule_room_state_broadcast_after_commit(
-            join_code=room_join_code,
-            room_id=player.room_id,
-        )
+    # Multiple tabs for the same session share one room-level participant.
+    # Returning whether the durable status changed lets the consumer broadcast
+    # to existing peers after the DB commit without treating extra tabs as a
+    # fake reconnect.
+    return previous_connection_status != Player.ConnectionStatus.CONNECTED
 
 
 @transaction.atomic

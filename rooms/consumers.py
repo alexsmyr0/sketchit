@@ -53,10 +53,10 @@ def _mark_participant_connected(
     join_code: str,
     session_key: str,
     connection_id: str,
-) -> None:
+) -> bool:
     """Delegate socket-connect lifecycle updates to the room service."""
 
-    connect_participant(
+    return connect_participant(
         redis_client=get_redis_client(),
         player_id=player_id,
         join_code=join_code,
@@ -181,12 +181,11 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         self.player_group: str = _player_group_name(self.join_code, self.player.id)
         self.session_key: str = session_key
 
-        # Group membership controls future fan-out delivery. The lifecycle
-        # service call below is the separate step that marks the participant as
-        # connected in Redis/MySQL.
-        await self.channel_layer.group_add(self.room_group, self.channel_name)
-        await self.channel_layer.group_add(self.player_group, self.channel_name)
-        await _mark_participant_connected(
+        # The lifecycle service call below marks the participant connected in
+        # Redis/MySQL and may schedule a room-wide ``room.state`` broadcast.
+        # We therefore wait to join the room group until after ``accept()`` and
+        # use the returned flag to broadcast only to already-connected peers.
+        connection_state_changed = await _mark_participant_connected(
             self.player.id,
             self.join_code,
             self.session_key,
@@ -200,7 +199,24 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         # This direct send is separate from room-group fan-out because the
         # connecting client must not depend on timing of any room-wide
         # broadcast to receive its initial authoritative lobby state.
-        await self.send_json(await _get_initial_room_state_event(self.room.id))
+        initial_room_state_event = await _get_initial_room_state_event(self.room.id)
+        await self.send_json(initial_room_state_event)
+
+        if connection_state_changed:
+            # The reconnect/connect update must reach existing peers, but this
+            # socket already received the same snapshot directly above. Sending
+            # to the room group before joining it prevents a duplicate event on
+            # the connecting client while still keeping peers in sync.
+            await self.channel_layer.group_send(
+                self.room_group,
+                {
+                    "type": "room.server_event",
+                    "event": initial_room_state_event,
+                },
+            )
+
+        await self.channel_layer.group_add(self.room_group, self.channel_name)
+        await self.channel_layer.group_add(self.player_group, self.channel_name)
 
         # A reconnecting/late-joining client needs an immediate phase snapshot
         # after the lobby snapshot so timer UI does not depend on waiting for

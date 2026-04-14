@@ -15,7 +15,6 @@ the production ASGI app includes (that validator checks the HTTP Origin header
 which WebsocketCommunicator omits by default).
 """
 
-import asyncio
 from datetime import timedelta
 import json
 
@@ -131,6 +130,19 @@ def _leave_room_member(*, redis_client, player_id: int) -> None:
     )
 
 
+@database_sync_to_async
+def _join_room_via_http(*, join_code: str, display_name: str) -> tuple[int, bytes]:
+    """Join a room through the sync Django test client from an async test."""
+
+    client = Client()
+    response = client.post(
+        f"/rooms/{join_code}/join/",
+        data=json.dumps({"display_name": display_name}),
+        content_type="application/json",
+    )
+    return response.status_code, response.content
+
+
 # ---------------------------------------------------------------------------
 # Test cases
 # ---------------------------------------------------------------------------
@@ -159,17 +171,17 @@ class RoomConsumerConnectTests(TransactionTestCase):
             visibility=Room.Visibility.PRIVATE,
             word_pack=self.word_pack,
         )
-
-        # Use the HTTP test client to create a real Django session so we can
-        # pass the session cookie to the WebSocket communicator.
-        response = self.client.post(
-            f"/rooms/{self.room.join_code}/join/",
-            data=json.dumps({"display_name": "Alice"}),
-            content_type="application/json",
+        session = SessionStore()
+        session.save()
+        self.session_key = session.session_key
+        self.player = Player.objects.create(
+            room=self.room,
+            session_key=self.session_key,
+            display_name="Alice",
+            session_expires_at=session.get_expiry_date(),
         )
-        self.assertEqual(response.status_code, 201, response.content)
-        self.session_key = self.client.session.session_key
-        self.player = Player.objects.get(room=self.room, session_key=self.session_key)
+        self.room.host = self.player
+        self.room.save(update_fields=["host", "updated_at"])
 
     def tearDown(self):
         async_to_sync(self.channel_layer.flush)()
@@ -198,14 +210,6 @@ class RoomConsumerConnectTests(TransactionTestCase):
         self.assertTrue(connected)
         room_state = await self._receive_until_type(communicator, "room.state")
         self.assertEqual(room_state["payload"]["room"]["join_code"], self.room.join_code)
-        if drain_duplicate_room_states:
-            while True:
-                try:
-                    next_event = await communicator.receive_json_from(timeout=0.05)
-                except asyncio.TimeoutError:
-                    break
-                self.assertEqual(next_event.get("type"), "room.state")
-                room_state = next_event
         return room_state
 
     async def test_connect_accepts_valid_room_member(self):
@@ -680,13 +684,11 @@ class RoomConsumerConnectTests(TransactionTestCase):
             drain_duplicate_room_states=True,
         )
 
-        second_client = Client()
-        response = second_client.post(
-            f"/rooms/{self.room.join_code}/join/",
-            data=json.dumps({"display_name": "Bob"}),
-            content_type="application/json",
+        status_code, response_content = await _join_room_via_http(
+            join_code=self.room.join_code,
+            display_name="Bob",
         )
-        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual(status_code, 201, response_content)
 
         room_state = await self._receive_until_type(communicator, "room.state")
         participant_names = [
