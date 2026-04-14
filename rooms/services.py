@@ -9,9 +9,12 @@ from __future__ import annotations
 import random
 from datetime import datetime, timedelta
 
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
 from django.db import transaction
 from django.utils import timezone
 
+from core.realtime_groups import room_group_name
 from games import redis as game_redis
 from rooms import redis as room_redis
 from rooms.models import Player, Room
@@ -186,6 +189,95 @@ def _schedule_delete_runtime_cleanup_after_commit(*, redis_client, join_code: st
             join_code=join_code,
             include_cleanup_deadline=True,
         )
+    )
+
+
+def _serialize_host_for_room_state(host: Player | None) -> dict | None:
+    """Return the A-06 host payload for ``room.state`` and ``host.changed``."""
+
+    if host is None:
+        return None
+
+    return {
+        "id": host.id,
+        "display_name": host.display_name,
+    }
+
+
+def _serialize_participant_for_room_state(player: Player) -> dict:
+    """Return the A-06 participant payload for one room member."""
+
+    return {
+        "id": player.id,
+        "display_name": player.display_name,
+        "connection_status": player.connection_status,
+        "participation_status": player.participation_status,
+    }
+
+
+def _get_room_state_snapshot(*, room_id: int) -> dict:
+    """Load the authoritative room snapshot used by A-06 live lobby events.
+
+    ``room.state`` intentionally reuses the existing HTTP lobby JSON shape so
+    the browser can consume one stable server-owned structure instead of
+    merging separate lobby schemas for REST and WebSocket updates.
+    """
+
+    room = Room.objects.select_related("host").get(pk=room_id)
+    participants = room.participants.order_by("created_at", "id")
+
+    return {
+        "room": {
+            "name": room.name,
+            "join_code": room.join_code,
+            "visibility": room.visibility,
+            "status": room.status,
+        },
+        "host": _serialize_host_for_room_state(room.host),
+        "participants": [
+            _serialize_participant_for_room_state(player)
+            for player in participants
+        ],
+    }
+
+
+def _build_room_state_event(*, room_id: int) -> dict:
+    """Build the A-06 ``room.state`` event from the latest committed room data."""
+
+    return {
+        "type": "room.state",
+        "payload": _get_room_state_snapshot(room_id=room_id),
+    }
+
+
+def _build_host_changed_event(*, host: Player | None) -> dict:
+    """Build the A-06 ``host.changed`` event payload."""
+
+    return {
+        "type": "host.changed",
+        "payload": {
+            "host": _serialize_host_for_room_state(host),
+        },
+    }
+
+
+def _publish_room_group_event(*, join_code: str, event: dict) -> None:
+    """Publish one A-06 room-group event to every connected participant.
+
+    Later batches will schedule these broadcasts with ``transaction.on_commit``
+    so sockets only see state that actually committed to the database.
+    """
+
+    channel_layer = get_channel_layer()
+    if channel_layer is None:
+        return
+
+    async_to_sync(channel_layer.group_send)(
+        room_group_name(join_code),
+        {
+            "type": "room.server_event",
+            "event": event,
+        },
     )
 
 
