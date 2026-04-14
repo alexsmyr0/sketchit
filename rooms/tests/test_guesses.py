@@ -120,10 +120,10 @@ class GuessPipelineTests(TransactionTestCase):
             "payload": {"text": self.secret_word_text}
         })
 
-        # Drawer should receive a result marked as incorrect (per service rules)
+        # Drawer should receive a guess.error (rejected by consumer before hitting service/DB)
         response = await drawer_socket.receive_json_from()
-        self.assertEqual(response["type"], "guess.result")
-        self.assertFalse(response["payload"]["is_correct"])
+        self.assertEqual(response["type"], "guess.error")
+        self.assertIn("Drawers cannot submit guesses", response["payload"]["message"])
 
         await drawer_socket.disconnect()
 
@@ -162,3 +162,47 @@ class GuessPipelineTests(TransactionTestCase):
 
         await guesser_socket.disconnect()
         await viewer_socket.disconnect()
+
+    async def test_guess_no_active_round(self):
+        # Clear round_id from Redis
+        game_redis.clear_turn_state(self.fake_redis, self.room.join_code)
+
+        guesser_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.guesser_key),
+        )
+        await guesser_socket.connect()
+
+        await guesser_socket.send_json_to({
+            "type": "guess.submit",
+            "payload": {"text": "something"}
+        })
+
+        # Should receive a guess.error instead of silent return
+        response = await guesser_socket.receive_json_from()
+        self.assertEqual(response["type"], "guess.error")
+        self.assertEqual(response["payload"]["message"], "No active round in progress.")
+
+        await guesser_socket.disconnect()
+
+    async def test_guess_empty_text(self):
+        guesser_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.guesser_key),
+        )
+        await guesser_socket.connect()
+
+        # Submit whitespace-only guess
+        await guesser_socket.send_json_to({
+            "type": "guess.submit",
+            "payload": {"text": "   "}
+        })
+
+        # Should receive a guess.error instead of silent return
+        response = await guesser_socket.receive_json_from()
+        self.assertEqual(response["type"], "guess.error")
+        self.assertEqual(response["payload"]["message"], "Guess text cannot be empty.")
+
+        await guesser_socket.disconnect()

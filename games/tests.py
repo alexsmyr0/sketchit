@@ -198,6 +198,62 @@ class StartGameServiceTests(TestCase):
         ):
             start_game_for_room(self.room)
 
+
+class GuessServiceIntegrationTests(TestCase):
+    def setUp(self):
+        self.word_pack = WordPack.objects.create(name="Guess Pack")
+        self.word = Word.objects.create(text="rocket")
+        WordPackEntry.objects.create(word_pack=self.word_pack, word=self.word)
+
+        self.room = Room.objects.create(
+            name="Guessing Room",
+            join_code="GUESS999",
+            status=Room.Status.IN_PROGRESS,
+            word_pack=self.word_pack,
+        )
+        session_expires_at = timezone.now() + timedelta(hours=1)
+        self.drawer = Player.objects.create(
+            room=self.room, session_key="drawer-session", display_name="Drawer",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=session_expires_at,
+        )
+        self.guesser = Player.objects.create(
+            room=self.room, session_key="guesser-session", display_name="Guesser",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=session_expires_at,
+        )
+        self.game = Game.objects.create(room=self.room, status=GameStatus.IN_PROGRESS)
+        self.game_word = GameWord.objects.create(game=self.game, text="rocket")
+        self.round = Round.objects.create(
+            game=self.game,
+            drawer_participant=self.drawer,
+            drawer_nickname=self.drawer.display_name,
+            selected_game_word=self.game_word,
+            sequence_number=1,
+        )
+
+    def test_evaluate_guess_returns_correct_fields_for_n05_broadcasts(self):
+        result = evaluate_guess_for_round(self.round, self.guesser, "rocket")
+
+        # Verify N-05 broadcast payload requirements
+        self.assertTrue(result.is_correct)
+        self.assertTrue(result.round_completed)
+        self.assertEqual(len(result.score_updates), 2)
+        
+        # Verify score_updates structure
+        scores_by_player = {s.player_id: s.current_score for s in result.score_updates}
+        self.assertEqual(scores_by_player[self.guesser.id], 1)
+        self.assertEqual(scores_by_player[self.drawer.id], 1)
+
+    def test_evaluate_guess_incorrect_payload(self):
+        result = evaluate_guess_for_round(self.round, self.guesser, "wrong")
+
+        self.assertFalse(result.is_correct)
+        self.assertFalse(result.round_completed)
+        self.assertEqual(len(result.score_updates), 0)
+
         self.assertEqual(Game.objects.filter(room=self.room).count(), 0)
 
     def test_start_game_dedupes_case_variant_words_in_snapshot(self):

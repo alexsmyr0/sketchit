@@ -26,6 +26,7 @@ import logging
 import redis
 
 from django.conf import settings
+from django.utils import timezone
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 
@@ -320,9 +321,14 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
     async def _handle_guess_submission(self, content: dict) -> None:
         """Process a guess submission from a participant."""
         payload = content.get("payload", {})
-        guess_text = payload.get("text", "").strip()
-        
         if not guess_text:
+            await self.send_json({
+                "type": "guess.error",
+                "payload": {
+                    "message": "Guess text cannot be empty.",
+                    "server_timestamp": timezone.now().isoformat()
+                }
+            })
             return
 
         # 1. Fetch active round from Redis turn state
@@ -331,20 +337,44 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         round_id_str = turn_state.get("round_id")
         
         if not round_id_str:
-            # No active round to guess on
+            await self.send_json({
+                "type": "guess.error",
+                "payload": {
+                    "message": "No active round in progress.",
+                    "server_timestamp": timezone.now().isoformat()
+                }
+            })
             return
 
-        # 2. Evaluate the guess via the game service
+        # 2. Prevent drawer from guessing (avoid DB pollution)
+        if await self._is_active_drawer():
+            await self.send_json({
+                "type": "guess.error",
+                "payload": {
+                    "message": "Drawers cannot submit guesses for their own round.",
+                    "server_timestamp": timezone.now().isoformat()
+                }
+            })
+            return
+
+        # 3. Evaluate the guess via the game service
         try:
             active_round = await self._resolve_round(int(round_id_str))
             if not active_round:
+                await self.send_json({
+                    "type": "guess.error",
+                    "payload": {
+                        "message": "The targeted round has already completed.",
+                        "server_timestamp": timezone.now().isoformat()
+                    }
+                })
                 return
 
             evaluation_result = await database_sync_to_async(game_services.evaluate_guess_for_round)(
                 active_round, self.player, guess_text
             )
             
-            # 3. Broadcast result to all participants
+            # 4. Broadcast result to all participants
             await self.channel_layer.group_send(
                 self.room_group,
                 {
@@ -360,8 +390,23 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                     ]
                 }
             )
+        except game_services.GuessEvaluationError as e:
+            await self.send_json({
+                "type": "guess.error",
+                "payload": {
+                    "message": str(e),
+                    "server_timestamp": timezone.now().isoformat()
+                }
+            })
         except Exception:
             logger.exception(f"Error evaluating guess from player {self.player.id} in room {self.join_code}")
+            await self.send_json({
+                "type": "guess.error",
+                "payload": {
+                    "message": "An unexpected error occurred while processing your guess.",
+                    "server_timestamp": timezone.now().isoformat()
+                }
+            })
 
     async def guess_broadcast(self, event: dict) -> None:
         """Relay a guess result broadcast to the connected WebSocket client."""
@@ -379,4 +424,4 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
 
     @database_sync_to_async
     def _resolve_round(self, round_id: int) -> Round | None:
-        return Round.objects.filter(pk=round_id).select_related("game__room", "selected_game_word").first()
+        return Round.objects.filter(pk=round_id, status__isnull=True).select_related("game__room", "selected_game_word").first()
