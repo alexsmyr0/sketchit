@@ -127,6 +127,20 @@ def _get_runtime_sync_events(join_code: str, player_id: int) -> list[dict]:
     return game_runtime.get_sync_events_for_player(join_code, player_id)
 
 
+@database_sync_to_async
+def _get_initial_room_state_event(room_id: int) -> dict:
+    """Return the direct A-06 ``room.state`` snapshot for one socket connect.
+
+    Reusing the room-service event builder keeps the direct post-connect
+    snapshot identical to the room-group broadcasts used for later lobby
+    updates.
+    """
+
+    from rooms.services import _build_room_state_event
+
+    return _build_room_state_event(room_id=room_id)
+
+
 class RoomConsumer(AsyncJsonWebsocketConsumer):
     """Session-aware WebSocket consumer for a single room.
 
@@ -180,8 +194,17 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         )
         await self.accept()
 
+        # The socket must be accepted before we try to send frames back to the
+        # browser; the direct snapshot therefore belongs after ``accept()``.
+        #
+        # This direct send is separate from room-group fan-out because the
+        # connecting client must not depend on timing of any room-wide
+        # broadcast to receive its initial authoritative lobby state.
+        await self.send_json(await _get_initial_room_state_event(self.room.id))
+
         # A reconnecting/late-joining client needs an immediate phase snapshot
-        # so timer UI does not depend on waiting for the next periodic tick.
+        # after the lobby snapshot so timer UI does not depend on waiting for
+        # the next periodic tick.
         for event in await _get_runtime_sync_events(self.join_code, self.player.id):
             await self.send_json(event)
 
