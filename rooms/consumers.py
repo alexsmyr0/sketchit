@@ -321,6 +321,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
     async def _handle_guess_submission(self, content: dict) -> None:
         """Process a guess submission from a participant."""
         payload = content.get("payload", {})
+        guess_text = payload.get("text", "").strip()
         if not guess_text:
             await self.send_json({
                 "type": "guess.error",
