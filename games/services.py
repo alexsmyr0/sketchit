@@ -363,6 +363,10 @@ def start_game_for_room(room: Room) -> StartedGame:
     locked_room.status = Room.Status.IN_PROGRESS
     locked_room.save(update_fields=["status", "updated_at"])
 
+    # Ensure a clean canvas when the game starts
+    client = _get_redis_client()
+    room_redis.clear_canvas_snapshot(client, locked_room.join_code)
+
     if _runtime_coordinator_enabled():
         transaction.on_commit(lambda: _schedule_round_runtime_start(first_round.id))
 

@@ -291,67 +291,61 @@ class ClearSessionPresenceTests(SimpleTestCase):
 # ---------------------------------------------------------------------------
 
 
-class SetCanvasSnapshotTests(SimpleTestCase):
-    def test_set_canvas_snapshot_stores_bytes(self):
+class AppendCanvasStrokeTests(SimpleTestCase):
+    def test_append_canvas_stroke_stores_bytes(self):
         client = make_client()
-        data = b"\x89PNG\r\nfake-image-data"
-        room_redis.set_canvas_snapshot(client, JOIN_CODE, data)
+        data = b'{"type":"stroke"}'
+        room_redis.append_canvas_stroke(client, JOIN_CODE, data)
 
-        stored = client.get(room_redis._canvas_key(JOIN_CODE))
-        self.assertEqual(stored, data)
+        stored = client.lrange(room_redis._canvas_key(JOIN_CODE), 0, -1)
+        self.assertIn(data, stored)
 
-    def test_set_canvas_snapshot_sets_ttl(self):
+    def test_append_canvas_stroke_sets_ttl(self):
         client = make_client()
-        room_redis.set_canvas_snapshot(client, JOIN_CODE, b"")
+        room_redis.append_canvas_stroke(client, JOIN_CODE, b"")
         ttl = client.ttl(room_redis._canvas_key(JOIN_CODE))
         self.assertAlmostEqual(ttl, room_redis.ROOM_KEY_TTL, delta=5)
 
-    def test_set_canvas_snapshot_overwrites_previous_value(self):
+    def test_append_canvas_stroke_accumulates_values(self):
         client = make_client()
-        room_redis.set_canvas_snapshot(client, JOIN_CODE, b"old-data")
-        room_redis.set_canvas_snapshot(client, JOIN_CODE, b"new-data")
+        room_redis.append_canvas_stroke(client, JOIN_CODE, b"data-1")
+        room_redis.append_canvas_stroke(client, JOIN_CODE, b"data-2")
 
         result = room_redis.get_canvas_snapshot(client, JOIN_CODE)
-        self.assertEqual(result, b"new-data")
-
-    def test_set_canvas_snapshot_placeholder_stores_empty_bytes(self):
-        client = make_client()
-        room_redis.set_canvas_snapshot(client, JOIN_CODE, b"")
-
-        result = room_redis.get_canvas_snapshot(client, JOIN_CODE)
-        self.assertEqual(result, b"")
+        self.assertEqual(result, [b"data-1", b"data-2"])
 
 
 class GetCanvasSnapshotTests(SimpleTestCase):
-    def test_get_canvas_snapshot_returns_stored_bytes(self):
+    def test_get_canvas_snapshot_returns_stored_list_of_bytes(self):
         client = make_client()
         data = b"some-canvas-payload"
-        room_redis.set_canvas_snapshot(client, JOIN_CODE, data)
+        room_redis.append_canvas_stroke(client, JOIN_CODE, data)
 
         result = room_redis.get_canvas_snapshot(client, JOIN_CODE)
 
-        self.assertEqual(result, data)
+        self.assertEqual(result, [data])
 
-    def test_get_canvas_snapshot_returns_none_when_key_absent(self):
+    def test_get_canvas_snapshot_returns_empty_list_when_key_absent(self):
         client = make_client()
         result = room_redis.get_canvas_snapshot(client, JOIN_CODE)
-        self.assertIsNone(result)
+        self.assertEqual(result, [])
 
-    def test_get_canvas_snapshot_returns_bytes_type(self):
+    def test_get_canvas_snapshot_returns_list_of_bytes_type(self):
         client = make_client()
-        room_redis.set_canvas_snapshot(client, JOIN_CODE, b"data")
+        room_redis.append_canvas_stroke(client, JOIN_CODE, b"data")
         result = room_redis.get_canvas_snapshot(client, JOIN_CODE)
-        self.assertIsInstance(result, bytes)
+        self.assertIsInstance(result, list)
+        self.assertIsInstance(result[0], bytes)
 
 
 class ClearCanvasSnapshotTests(SimpleTestCase):
     def test_clear_canvas_snapshot_deletes_the_key(self):
         client = make_client()
-        room_redis.set_canvas_snapshot(client, JOIN_CODE, b"data")
+        room_redis.append_canvas_stroke(client, JOIN_CODE, b"data")
 
         room_redis.clear_canvas_snapshot(client, JOIN_CODE)
 
-        self.assertIsNone(room_redis.get_canvas_snapshot(client, JOIN_CODE))
+        self.assertEqual(room_redis.get_canvas_snapshot(client, JOIN_CODE), [])
 
     def test_clear_canvas_snapshot_is_safe_when_key_absent(self):
         client = make_client()
@@ -359,10 +353,10 @@ class ClearCanvasSnapshotTests(SimpleTestCase):
 
     def test_clear_canvas_snapshot_does_not_affect_other_rooms(self):
         client = make_client()
-        room_redis.set_canvas_snapshot(client, "ROOM0001", b"data-1")
-        room_redis.set_canvas_snapshot(client, "ROOM0002", b"data-2")
+        room_redis.append_canvas_stroke(client, "ROOM0001", b"data-1")
+        room_redis.append_canvas_stroke(client, "ROOM0002", b"data-2")
 
         room_redis.clear_canvas_snapshot(client, "ROOM0001")
 
-        self.assertIsNone(room_redis.get_canvas_snapshot(client, "ROOM0001"))
-        self.assertEqual(room_redis.get_canvas_snapshot(client, "ROOM0002"), b"data-2")
+        self.assertEqual(room_redis.get_canvas_snapshot(client, "ROOM0001"), [])
+        self.assertEqual(room_redis.get_canvas_snapshot(client, "ROOM0002"), [b"data-2"])

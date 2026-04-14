@@ -13,10 +13,12 @@ from django.test import TransactionTestCase
 
 from asgiref.sync import async_to_sync
 from rooms.models import Player, Room
+from games.models import Game, GameWord, Round
 from rooms.tests.test_consumers import _ws_url, _session_headers, _create_room_member, _TEST_APP
 from rooms import consumers as room_consumers
 from rooms import redis as room_redis
 from games import redis as game_redis
+from games import services as game_services
 from words.models import Word, WordPack, WordPackEntry
 
 
@@ -26,6 +28,18 @@ class DrawingEventTests(TransactionTestCase):
     def setUp(self):
         self.fake_redis = fakeredis.FakeRedis()
         room_consumers._redis_client = self.fake_redis
+        from games import services as game_services
+        from games import runtime as game_runtime
+        self._orig_services_redis = game_services._get_redis_client
+        self._orig_runtime_redis = game_runtime._redis_client
+        game_services._get_redis_client = lambda: self.fake_redis
+        game_runtime._redis_client = self.fake_redis
+        from games import services as game_services
+        from games import runtime as game_runtime
+        self._orig_services_redis = game_services._get_redis_client
+        self._orig_runtime_redis = game_runtime._redis_client
+        game_services._get_redis_client = lambda: self.fake_redis
+        game_runtime._redis_client = self.fake_redis
 
         # Set up a word pack for the room
         self.word_pack = WordPack.objects.create(name="Test Pack")
@@ -51,6 +65,11 @@ class DrawingEventTests(TransactionTestCase):
 
     def tearDown(self):
         room_consumers._redis_client = None
+        from games import services as game_services
+        from games import runtime as game_runtime
+        game_services._get_redis_client = self._orig_services_redis
+        game_runtime._redis_client = self._orig_runtime_redis
+        super().tearDown()
 
     async def test_drawer_can_broadcast_stroke(self):
         drawer_socket = WebsocketCommunicator(
@@ -187,11 +206,22 @@ class DrawingEventTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.drawer_session_key),
         )
+        viewer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.viewer_session_key),
+        )
         await drawer_socket.connect()
+        await viewer_socket.connect()
 
-        # First, ensure there is a snapshot
-        room_redis.set_canvas_snapshot(self.fake_redis, self.room.join_code, b'{"some":"data"}')
-        self.assertIsNotNone(room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code))
+        # First, ensure there is a snapshot (it's now a list of JSON strings)
+        stroke_data = b'{"type":"drawing.stroke", "payload":{}}'
+        room_redis.append_canvas_stroke(self.fake_redis, self.room.join_code, stroke_data)
+        self.assertEqual(len(room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code)), 1)
+
+        # Viewer should receive the replayed stroke first
+        replay = await viewer_socket.receive_json_from()
+        self.assertEqual(replay["type"], "drawing.stroke")
 
         # Drawer clears the canvas
         await drawer_socket.send_json_to({"type": "drawing.clear"})
@@ -208,8 +238,12 @@ class DrawingEventTests(TransactionTestCase):
 
     async def test_drawing_not_allowed_in_lobby(self):
         # Move room back to lobby
+        from games import redis as game_redis
+        game_redis.clear_turn_state(self.fake_redis, self.room.join_code)
+        
+        from channels.db import database_sync_to_async
         self.room.status = Room.Status.LOBBY
-        self.room.save()
+        await database_sync_to_async(self.room.save)()
 
         drawer_socket = WebsocketCommunicator(
             _TEST_APP,
@@ -232,6 +266,7 @@ class DrawingEventTests(TransactionTestCase):
         })
 
         # Viewer should receive nothing
+                # Viewer should receive nothing
         self.assertTrue(await viewer_socket.receive_nothing())
 
         await drawer_socket.disconnect()
@@ -244,21 +279,52 @@ class SnapshotSyncTests(TransactionTestCase):
     def setUp(self):
         self.fake_redis = fakeredis.FakeRedis()
         room_consumers._redis_client = self.fake_redis
+        from games import services as game_services
+        from games import runtime as game_runtime
+        self._orig_services_redis = game_services._get_redis_client
+        self._orig_runtime_redis = game_runtime._redis_client
+        game_services._get_redis_client = lambda: self.fake_redis
+        game_runtime._redis_client = self.fake_redis
+
+        # Set up a word pack for the room
+        self.word_pack = WordPack.objects.create(name="Snapshot Pack")
+        test_word = Word.objects.create(text="rocket")
+        WordPackEntry.objects.create(word_pack=self.word_pack, word=test_word)
 
         self.room = Room.objects.create(
             name="Snapshot Room",
             join_code="SNAP1234",
             status=Room.Status.IN_PROGRESS,
+            word_pack=self.word_pack,
         )
-        self.session_key = _create_room_member(self.room.id, "Alice")
+        
+        # Create participants using async_to_sync
+        self.drawer_session_key = async_to_sync(_create_room_member)(self.room.id, "Drawer")
+        self.drawer_player = Player.objects.get(room=self.room, session_key=self.drawer_session_key)
+        
+        self.viewer_session_key = async_to_sync(_create_room_member)(self.room.id, "Viewer")
+        self.viewer_player = Player.objects.get(room=self.room, session_key=self.viewer_session_key)
+
+        # Seed turn state so consumer sees an active round
+        game_redis.set_turn_state(self.fake_redis, self.room.join_code, {
+            "phase": "round",
+            "round_id": "1",
+            "drawer_participant_id": str(self.drawer_player.id)
+        })
+        self.game = Game.objects.create(room=self.room)
 
     def tearDown(self):
         room_consumers._redis_client = None
+        from games import services as game_services
+        from games import runtime as game_runtime
+        game_services._get_redis_client = self._orig_services_redis
+        game_runtime._redis_client = self._orig_runtime_redis
+        super().tearDown()
 
     async def test_client_receives_snapshot_on_connect(self):
-        # Pre-seed a snapshot in Redis
-        snapshot_payload = {"all_strokes": "saved_data"}
-        room_redis.set_canvas_snapshot(
+        # Pre-seed a snapshot in Redis (list of JSON strings)
+        snapshot_payload = {"type": "drawing.stroke", "payload": {"data": "test"}}
+        room_redis.append_canvas_stroke(
             self.fake_redis, 
             self.room.join_code, 
             json.dumps(snapshot_payload).encode()
@@ -267,18 +333,15 @@ class SnapshotSyncTests(TransactionTestCase):
         communicator = WebsocketCommunicator(
             _TEST_APP,
             _ws_url(self.room.join_code),
-            headers=_session_headers(self.session_key),
+            headers=_session_headers(self.viewer_session_key),
         )
         
         connected, _ = await communicator.connect()
         self.assertTrue(connected)
 
-        # Client should receive the snapshot as the first message (or after presence updates)
-        # Note: Presence updates currently don't broadcast to self in connect/disconnect yet
-        # but they might in later tickets.
+        # Client should receive the replayed event
         response = await communicator.receive_json_from()
-        self.assertEqual(response["type"], "drawing.snapshot")
-        self.assertEqual(response["payload"], snapshot_payload)
+        self.assertEqual(response, snapshot_payload)
 
         await communicator.disconnect()
 
@@ -288,7 +351,14 @@ class SnapshotSyncTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.drawer_session_key),
         )
+        # Viewer to synchronize processing
+        sync_viewer = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.viewer_session_key),
+        )
         await drawer_socket.connect()
+        await sync_viewer.connect()
 
         # Send 2 strokes and an end_stroke
         strokes = [
@@ -298,6 +368,9 @@ class SnapshotSyncTests(TransactionTestCase):
         ]
         for s in strokes:
             await drawer_socket.send_json_to(s)
+            # Wait for broadcast to ensure Redis is updated
+            await sync_viewer.receive_json_from()
+        await sync_viewer.disconnect()
 
         # Connect a new viewer
         new_viewer_key = await _create_room_member(self.room.id, "Late Bob")
@@ -320,33 +393,60 @@ class SnapshotSyncTests(TransactionTestCase):
 
     async def test_snapshot_isolation_between_rounds(self):
         # 1. Start round, send drawing
-        game_redis.set_turn_state(self.fake_redis, self.room.join_code, {"drawer_participant_id": self.drawer_player.id})
-        
         drawer_socket = WebsocketCommunicator(
             _TEST_APP,
             _ws_url(self.room.join_code),
             headers=_session_headers(self.drawer_session_key),
         )
         await drawer_socket.connect()
+        # Viewer to synchronize processing
+        sync_viewer = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.viewer_session_key),
+        )
+        await sync_viewer.connect()
+
         await drawer_socket.send_json_to({"type": "drawing.stroke", "payload": {"test": 1}})
+        # Wait for broadcast
+        await sync_viewer.receive_json_from()
+        await sync_viewer.disconnect()
         
         # Verify snapshot exists
         self.assertEqual(len(room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code)), 1)
         
-        # 2. Simulate round end (clear turn state and snapshot - this happens in games.services)
-        game_redis.clear_turn_state(self.fake_redis, self.room.join_code)
-        room_redis.clear_canvas_snapshot(self.fake_redis, self.room.join_code)
+        # 2. Simulate round end using the actual service path
+        # We need a Round object for the service call
+        from channels.db import database_sync_to_async
+        game_word = await database_sync_to_async(GameWord.objects.create)(
+            game=self.game, text="rocket"
+        )
+        round_obj = await database_sync_to_async(Round.objects.create)(
+            game=self.game,
+            sequence_number=1,
+            drawer_participant=self.drawer_player,
+            drawer_nickname=self.drawer_player.display_name,
+            selected_game_word=game_word,
+)
+        # Wait, let's just use the service logic properly
+        await database_sync_to_async(game_services.complete_round_due_to_timer)(round_obj.id)
         
         # 3. New viewer connects during intermission (no active round)
-        new_viewer_key = await _create_room_member(self.room.id, "Intermission Bob")
+        # We manually seed an intermission turn state to ensure _send_initial_canvas_snapshot
+        # doesn't just return early due to missing turn_state (which would mask a leak).
+        game_redis.set_turn_state(self.fake_redis, self.room.join_code, {
+            "phase": "intermission",
+            "round_id": str(round_obj.id)
+        })
+
         viewer_socket = WebsocketCommunicator(
             _TEST_APP,
             _ws_url(self.room.join_code),
-            headers=_session_headers(new_viewer_key),
+            headers=_session_headers(self.viewer_session_key),
         )
         await viewer_socket.connect()
         
-        # Viewer should receive NOTHING (no snapshot from old round)
+        # Viewer should receive NOTHING (no snapshot from old round) because the service cleared it
         self.assertTrue(await viewer_socket.receive_nothing())
 
         await drawer_socket.disconnect()
@@ -357,7 +457,7 @@ class SnapshotSyncTests(TransactionTestCase):
         communicator = WebsocketCommunicator(
             _TEST_APP,
             _ws_url(self.room.join_code),
-            headers=_session_headers(self.session_key),
+            headers=_session_headers(self.viewer_session_key),
         )
         
         connected, _ = await communicator.connect()

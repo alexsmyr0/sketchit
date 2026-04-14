@@ -28,6 +28,7 @@ from redis.exceptions import WatchError
 from games import redis as game_redis
 from games.models import Round
 from rooms.models import Player
+from rooms import redis as room_redis
 
 
 _redis_client = None
@@ -633,6 +634,7 @@ def start_round_runtime(round_id: int) -> None:
     deadline_at = timezone.now() + timedelta(seconds=_round_duration_seconds())
 
     client = get_redis_client()
+    room_redis.clear_canvas_snapshot(client, join_code)
     game_redis.clear_guess_state(client, join_code, round.id)
     game_redis.set_turn_state(
         client,
