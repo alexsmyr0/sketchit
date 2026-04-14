@@ -19,6 +19,8 @@ from rooms.services import (
     delete_room_if_empty_grace_expired,
     get_empty_room_cleanup_deadline,
     restore_room_from_empty_grace,
+    schedule_host_changed_broadcast_after_commit,
+    schedule_room_state_broadcast_after_commit,
 )
 
 
@@ -320,6 +322,16 @@ def join_room(request, join_code):
         if room.host_id is None:
             room.host = player
             room.save(update_fields=["host", "updated_at"])
+            schedule_host_changed_broadcast_after_commit(
+                join_code=room.join_code,
+                host=room.host,
+            )
+        # Only a brand-new participant creation should fan out an A-06 lobby
+        # update. Same-session rejoin reuse returns early above and stays quiet.
+        schedule_room_state_broadcast_after_commit(
+            join_code=room.join_code,
+            room_id=room.id,
+        )
 
     return _build_room_response(room, status=201)
 

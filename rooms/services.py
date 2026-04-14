@@ -281,6 +281,37 @@ def _publish_room_group_event(*, join_code: str, event: dict) -> None:
     )
 
 
+def schedule_room_state_broadcast_after_commit(*, join_code: str, room_id: int) -> None:
+    """Broadcast the latest committed ``room.state`` snapshot after commit.
+
+    The room snapshot is built inside the on-commit callback so the payload is
+    derived from the database state that actually committed, not from in-memory
+    model instances that might later roll back.
+    """
+
+    transaction.on_commit(
+        lambda: _publish_room_group_event(
+            join_code=join_code,
+            event=_build_room_state_event(room_id=room_id),
+        )
+    )
+
+
+def schedule_host_changed_broadcast_after_commit(
+    *,
+    join_code: str,
+    host: Player | None,
+) -> None:
+    """Broadcast the committed A-06 ``host.changed`` event after commit."""
+
+    transaction.on_commit(
+        lambda: _publish_room_group_event(
+            join_code=join_code,
+            event=_build_host_changed_event(host=host),
+        )
+    )
+
+
 def _validate_room_presence_identity(
     *,
     player: Player,
@@ -327,6 +358,7 @@ def connect_participant(
     # Redis so callers cannot accidentally split presence across differently
     # cased keys like "ABCD1234" and "abcd1234".
     room_join_code = player.room.join_code
+    previous_connection_status = player.connection_status
 
     room_redis.add_presence(
         redis_client,
@@ -338,6 +370,14 @@ def connect_participant(
         connection_status=Player.ConnectionStatus.CONNECTED,
         last_seen_at=timezone.now(),
     )
+    if previous_connection_status != Player.ConnectionStatus.CONNECTED:
+        # Multiple tabs for the same session share one room-level participant.
+        # Opening an extra socket must not broadcast a fake reconnect when the
+        # participant was already connected from another tab.
+        schedule_room_state_broadcast_after_commit(
+            join_code=room_join_code,
+            room_id=player.room_id,
+        )
 
 
 @transaction.atomic
@@ -557,6 +597,14 @@ def disconnect_participant(
         ),
         last_seen_at=timezone.now(),
     )
+    if (
+        not connection_still_present
+        and player.connection_status != Player.ConnectionStatus.DISCONNECTED
+    ):
+        schedule_room_state_broadcast_after_commit(
+            join_code=room_join_code,
+            room_id=player.room_id,
+        )
 
 
 @transaction.atomic
@@ -570,6 +618,7 @@ def leave_participant(*, redis_client, player_id: int) -> None:
 
     player = _get_locked_player(player_id)
     room = _get_locked_room(player.room_id)
+    previous_host_id = room.host_id
 
     if room.host_id == player.id:
         remaining_participants = list(
@@ -594,6 +643,15 @@ def leave_participant(*, redis_client, player_id: int) -> None:
         player.session_key,
     )
     player.delete()
+    if room.host_id != previous_host_id:
+        schedule_host_changed_broadcast_after_commit(
+            join_code=room.join_code,
+            host=room.host,
+        )
+    schedule_room_state_broadcast_after_commit(
+        join_code=room.join_code,
+        room_id=room.id,
+    )
 
     # Empty-room grace starts only when membership truly reaches zero. A plain
     # socket disconnect is not enough because the participant row still exists
