@@ -135,6 +135,9 @@ class RoomConsumerConnectTests(TransactionTestCase):
         self.fake_redis = fakeredis.FakeRedis()
         room_consumers._redis_client = self.fake_redis
         game_runtime._redis_client = self.fake_redis
+        from games import services as game_services
+        self._orig_services_redis = game_services._get_redis_client
+        game_services._get_redis_client = lambda: self.fake_redis
 
         self.word_pack = WordPack.objects.create(name="Test Pack")
         test_word = Word.objects.create(text="rocket")
