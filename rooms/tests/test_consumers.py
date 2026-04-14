@@ -37,6 +37,7 @@ from games.models import Round
 from games.services import evaluate_guess_for_round, start_game_for_room
 from rooms.consumers import _room_group_name
 from rooms.models import Player, Room
+from rooms.services import leave_participant
 from words.models import Word, WordPack, WordPackEntry
 
 # ---------------------------------------------------------------------------
@@ -118,6 +119,16 @@ def _end_round_by_correct_guess(round_id: int) -> None:
     )
     assert guesser is not None
     evaluate_guess_for_round(round, guesser, round.selected_game_word.text)
+
+
+@database_sync_to_async
+def _leave_room_member(*, redis_client, player_id: int) -> None:
+    """Trigger the permanent leave lifecycle from the room service."""
+
+    leave_participant(
+        redis_client=redis_client,
+        player_id=player_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -816,6 +827,61 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await alice_second_socket.disconnect()
         await bob_socket.disconnect()
         await alice_primary_socket.disconnect()
+
+    async def test_host_leave_broadcasts_host_changed_then_room_state(self):
+        second_session_key = await _create_room_member(self.room.id, "Bob")
+        bob_player = await database_sync_to_async(Player.objects.get)(
+            room=self.room,
+            session_key=second_session_key,
+        )
+        bob_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(second_session_key),
+        )
+
+        await self._connect_and_receive_initial_room_state(
+            bob_socket,
+            drain_duplicate_room_states=True,
+        )
+
+        await _leave_room_member(
+            redis_client=self.fake_redis,
+            player_id=self.player.id,
+        )
+
+        host_changed = await bob_socket.receive_json_from(timeout=1)
+        self.assertEqual(host_changed["type"], "host.changed")
+        self.assertEqual(
+            host_changed["payload"]["host"],
+            {
+                "id": bob_player.id,
+                "display_name": bob_player.display_name,
+            },
+        )
+
+        room_state = await bob_socket.receive_json_from(timeout=1)
+        self.assertEqual(room_state["type"], "room.state")
+        self.assertEqual(
+            room_state["payload"]["host"],
+            {
+                "id": bob_player.id,
+                "display_name": bob_player.display_name,
+            },
+        )
+        self.assertEqual(
+            room_state["payload"]["participants"],
+            [
+                {
+                    "id": bob_player.id,
+                    "display_name": bob_player.display_name,
+                    "connection_status": Player.ConnectionStatus.CONNECTED,
+                    "participation_status": bob_player.participation_status,
+                }
+            ],
+        )
+
+        await bob_socket.disconnect()
 
 
 class RoomGroupNameTests(TransactionTestCase):
