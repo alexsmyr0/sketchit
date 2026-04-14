@@ -128,6 +128,21 @@ def _get_runtime_sync_events(join_code: str, player_id: int) -> list[dict]:
 
 
 @database_sync_to_async
+def _get_connected_peer_ids(room_id: int, player_id: int) -> list[int]:
+    """Return other currently connected participant ids for one room."""
+
+    return list(
+        Player.objects.filter(
+            room_id=room_id,
+            connection_status=Player.ConnectionStatus.CONNECTED,
+        )
+        .exclude(pk=player_id)
+        .order_by("created_at", "id")
+        .values_list("id", flat=True)
+    )
+
+
+@database_sync_to_async
 def _get_initial_room_state_event(room_id: int) -> dict:
     """Return the direct A-06 ``room.state`` snapshot for one socket connect.
 
@@ -202,21 +217,23 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         initial_room_state_event = await _get_initial_room_state_event(self.room.id)
         await self.send_json(initial_room_state_event)
 
-        if connection_state_changed:
-            # The reconnect/connect update must reach existing peers, but this
-            # socket already received the same snapshot directly above. Sending
-            # to the room group before joining it prevents a duplicate event on
-            # the connecting client while still keeping peers in sync.
-            await self.channel_layer.group_send(
-                self.room_group,
-                {
-                    "type": "room.server_event",
-                    "event": initial_room_state_event,
-                },
-            )
-
         await self.channel_layer.group_add(self.room_group, self.channel_name)
         await self.channel_layer.group_add(self.player_group, self.channel_name)
+
+        if connection_state_changed:
+            # Existing peers still need the connect/reconnect ``room.state``
+            # update, but the connecting client already received the same
+            # snapshot directly above. Fan-out via each peer's player group so
+            # the newly connected socket is fully subscribed before connect()
+            # returns without receiving a duplicate lobby snapshot.
+            for peer_id in await _get_connected_peer_ids(self.room.id, self.player.id):
+                await self.channel_layer.group_send(
+                    _player_group_name(self.join_code, peer_id),
+                    {
+                        "type": "room.server_event",
+                        "event": initial_room_state_event,
+                    },
+                )
 
         # A reconnecting/late-joining client needs an immediate phase snapshot
         # after the lobby snapshot so timer UI does not depend on waiting for
