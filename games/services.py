@@ -1,6 +1,6 @@
 import random
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import redis
 from django.conf import settings
@@ -11,14 +11,8 @@ from redis.exceptions import RedisError
 
 from games import redis as game_redis
 from games.models import Game, GameStatus, GameWord, Guess, Round, RoundStatus
-from rooms.models import Player, Room
 from rooms import redis as room_redis
-from games import redis as game_redis
-from django.conf import settings
-import redis
-
-def _get_redis_client():
-    return redis.Redis.from_url(settings.REDIS_URL)
+from rooms.models import Player, Room
 
 
 class StartGameError(Exception):
@@ -76,8 +70,10 @@ class IntermissionAdvanceResult:
     next_round_id: int | None
 
 
-CORRECT_GUESSER_SCORE_DELTA = 1
-DRAWER_SCORE_DELTA_ON_CORRECT_GUESS = 1
+MIN_GUESSER_SCORE = 20
+MAX_GUESSER_SCORE = 100
+MIN_DRAWER_BONUS = 10
+MAX_DRAWER_BONUS = 50
 
 
 _redis_client: redis.Redis | None = None
@@ -122,6 +118,87 @@ def _dedupe_snapshot_words_case_insensitive(word_texts: list[str]) -> list[str]:
 
 def _normalize_guess_text(value: str) -> str:
     return value.strip().casefold()
+
+
+def _round_duration_seconds() -> float:
+    try:
+        configured_duration = float(
+            getattr(settings, "SKETCHIT_ROUND_DURATION_SECONDS", 90)
+        )
+    except (TypeError, ValueError):
+        configured_duration = 90.0
+    return max(configured_duration, 0.001)
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+    if timezone.is_naive(parsed):
+        return None
+    return parsed
+
+
+def _runtime_round_deadline_for_scoring(locked_round: Round) -> datetime | None:
+    if not _runtime_coordinator_enabled():
+        return None
+
+    try:
+        from games import runtime as game_runtime
+
+        turn_state = game_redis.get_turn_state(
+            game_runtime.get_redis_client(),
+            locked_round.game.room.join_code,
+        )
+    except (RedisError, OSError):
+        return None
+
+    if turn_state.get("phase") != "round":
+        return None
+    if turn_state.get("round_id") != str(locked_round.id):
+        return None
+    return _parse_iso_datetime(turn_state.get("deadline_at"))
+
+
+def _bounded_linear_score(*, minimum: int, maximum: int, ratio: float) -> int:
+    bounded_ratio = min(1.0, max(0.0, ratio))
+    unbounded_score = minimum + bounded_ratio * (maximum - minimum)
+    return min(maximum, max(minimum, int(round(unbounded_score))))
+
+
+def _time_based_scores_for_correct_guess(
+    *,
+    locked_round: Round,
+    accepted_at: datetime,
+) -> tuple[int, int]:
+    round_duration_seconds = _round_duration_seconds()
+    round_duration_ms = max(1.0, round_duration_seconds * 1000.0)
+
+    runtime_deadline = _runtime_round_deadline_for_scoring(locked_round)
+    deadline_at = runtime_deadline or (
+        locked_round.started_at + timedelta(seconds=round_duration_seconds)
+    )
+    remaining_ms = max(
+        0.0,
+        (deadline_at - accepted_at).total_seconds() * 1000.0,
+    )
+    remaining_ratio = min(1.0, max(0.0, remaining_ms / round_duration_ms))
+
+    guesser_points = _bounded_linear_score(
+        minimum=MIN_GUESSER_SCORE,
+        maximum=MAX_GUESSER_SCORE,
+        ratio=remaining_ratio,
+    )
+    drawer_bonus = _bounded_linear_score(
+        minimum=MIN_DRAWER_BONUS,
+        maximum=MAX_DRAWER_BONUS,
+        ratio=remaining_ratio,
+    )
+    return guesser_points, drawer_bonus
 
 
 def _get_round_winning_player_id(round_id: int) -> int | None:
@@ -521,12 +598,16 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
     guess.is_correct = True
     guess.save(update_fields=["is_correct", "updated_at"])
 
+    guesser_points, drawer_bonus = _time_based_scores_for_correct_guess(
+        locked_round=locked_round,
+        accepted_at=timezone.now(),
+    )
     score_deltas_by_participant_id = {
-        guessing_player.id: CORRECT_GUESSER_SCORE_DELTA,
+        guessing_player.id: guesser_points,
     }
     drawer_participant_id = locked_round.drawer_participant_id
     if drawer_participant_id is not None and drawer_participant_id != guessing_player.id:
-        score_deltas_by_participant_id[drawer_participant_id] = DRAWER_SCORE_DELTA_ON_CORRECT_GUESS
+        score_deltas_by_participant_id[drawer_participant_id] = drawer_bonus
 
     for participant_id, score_delta in score_deltas_by_participant_id.items():
         Player.objects.filter(pk=participant_id).update(

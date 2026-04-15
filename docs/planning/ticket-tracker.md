@@ -81,7 +81,7 @@ Use this as the default claim order for the next wave of work:
 - [x] **K-02** P1 - Public Room Directory API | Public-room discovery endpoint including in-progress public rooms. (Depends on: A-02) | Blocks: G-01
 - [x] **K-03** P2 - Round Timer & Early-Finish Coordinator | Server-owned round timing, intermission countdown, and early-finish triggers. (Depends on: K-01; N-03) | Blocks: K-04; N-05; K-05; K-07; G-03
 - [x] **K-04** P2 - Full Game Cycle Drawer Rotation & Word Uniqueness | Remaining-drawer tracking, unique words, and role-specific round-start payloads. (Depends on: K-01; N-03; K-03) | Blocks: A-07; K-07; A-08
-- [ ] **K-05** P3 - Time-Based Scoring & Multi-Guesser Round Resolution | Replace placeholder scoring with the final bounded time-based model. (Depends on: K-03; K-04; N-05) | Blocks: A-08; G-05
+- [x] **K-05** P3 - Time-Based Scoring & Multi-Guesser Round Resolution | Replace placeholder scoring with the final bounded time-based model. (Depends on: K-03; K-04; N-05) | Blocks: A-08; G-05
 - [ ] **K-06** P3 - Near-Match, Duplicate, And Correct-Once Guess Rules | Rich guess outcomes and per-player round guess-state rules. (Depends on: N-03; N-05) | Blocks: G-05
 - [ ] **K-07** P3 - Drawer Disconnect Grace & Turn Outcome Handling | `15`-second drawer grace, reconnect resume, and `drawer_disconnected` outcome. (Depends on: N-03; K-03; K-04) | Blocks: A-08; G-05
 
@@ -91,7 +91,7 @@ Use this as the default claim order for the next wave of work:
 - [x] **N-02** P1 - Room WebSocket Consumer & Session Authorization | Room socket routing, session membership checks, and group join/leave behavior. (Depends on: A-02; N-01) | Blocks: N-03; N-04; N-05; G-02; G-03; G-04
 - [x] **N-03** P2 - Redis Round Runtime State | Active round runtime state for timers, drawer pools, guess state, cleanup keys, and role-specific round payload support. (Depends on: N-01; K-01; N-02) | Blocks: N-04; K-03; K-04; K-05; A-07; K-07; A-08
 - [x] **N-04** P2 - Drawing Event Broadcast & Canvas Snapshot Sync | Drawer-only drawing events, canvas snapshot storage, and reconnect replay. (Depends on: N-02; N-03) | Blocks: G-04; G-05
-- [ ] **N-05** P2 - Guess Submission Pipeline Over Room Socket | Live `guess.submit` handling and server-broadcast `guess.result` events. (Depends on: N-02; K-03; K-01) | Blocks: K-05; K-06; G-03
+- [x] **N-05** P2 - Guess Submission Pipeline Over Room Socket | Live `guess.submit` handling and server-broadcast `guess.result` events. (Depends on: N-02; K-03; K-01) | Blocks: K-05; K-06; G-03
 
 ### Track G
 

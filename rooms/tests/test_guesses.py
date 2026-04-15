@@ -90,10 +90,11 @@ class GuessPipelineTests(TransactionTestCase):
         self.assertTrue(response["payload"]["is_correct"])
         self.assertEqual(response["payload"]["player_id"], self.guesser_player.id)
         
-        # Check score updates (guesser gets 1 point)
+        # Check score updates (guesser gets time-based points)
         score_updates = response["payload"]["score_updates"]
         guesser_update = next(s for s in score_updates if s["player_id"] == self.guesser_player.id)
-        self.assertEqual(guesser_update["current_score"], 1)
+        self.assertGreaterEqual(guesser_update["current_score"], 20)
+        self.assertLessEqual(guesser_update["current_score"], 100)
 
         await guesser_socket.disconnect()
 
