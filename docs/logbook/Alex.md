@@ -71,3 +71,10 @@ Reviewed two pull requests from Kostas and Nikos regarding the respective ticket
 Both implemented my suggestions and I have now approved and merged.
 
 Implemented A05 empty-room grace: empty rooms now enter empty_grace, persist empty_since, store a Redis cleanup deadline, restore cleanly to lobby on timely rejoin, cancel abandoned game state instead of resuming it, and hard-delete after the grace period through the cleanup flow.
+
+## 12/04
+Graded N4 and N5 ticket for Nikos. There were critical bugs in both but after pointing them out, Nikos patched them up swiftly and I merged.
+
+# 13/04
+Implemented A6. Implemented server-authoritative live lobby WebSocket updates by sending initial and change-driven room.state snapshots, plus host.changed on real host handoffs, for joins, leaves, disconnects, and reconnects.
+

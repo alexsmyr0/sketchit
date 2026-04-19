@@ -21,15 +21,24 @@ Close codes
 4004  Room does not exist (not found).
 """
 
-from django.conf import settings
-from channels.db import database_sync_to_async
-from channels.generic.websocket import AsyncJsonWebsocketConsumer
-from core.realtime_groups import player_group_name, room_group_name
+import json
+import logging
 import redis
 
+from django.conf import settings
+from django.utils import timezone
+from channels.db import database_sync_to_async
+from channels.generic.websocket import AsyncJsonWebsocketConsumer
+
+from core.realtime_groups import player_group_name, room_group_name
 from rooms.models import Player, Room
 from rooms.services import connect_participant, disconnect_participant
+from rooms import redis as room_redis
+from games import redis as game_redis
+from games import services as game_services
+from games.models import Round
 
+logger = logging.getLogger(__name__)
 
 _redis_client = None
 
@@ -235,6 +244,9 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                     },
                 )
 
+        # Send canvas snapshot first, then round state
+        await self._send_initial_canvas_snapshot()
+
         # A reconnecting/late-joining client needs an immediate phase snapshot
         # after the lobby snapshot so timer UI does not depend on waiting for
         # the next periodic tick.
@@ -261,24 +273,55 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             )
 
     async def receive_json(self, content: dict, **kwargs) -> None:
-        """Handle inbound JSON events.
-
-        Extended by later issues — placeholder for now, but provides a basic
-        echo for initial real-time communication testing (Issue #12).
-        """
+        """Handle inbound JSON events."""
         message_type = content.get("type")
-        
+
         if message_type == "echo":
             await self.send_json({
                 "type": "echo_reply",
                 "message": f"Echo: {content.get('message', '')}"
             })
-            return
-
-        if message_type == "round.sync_request":
+        elif message_type == "round.sync_request":
             for event in await _get_runtime_sync_events(self.join_code, self.player.id):
                 await self.send_json(event)
+        elif message_type in ("drawing.stroke", "drawing.end_stroke", "drawing.clear"):
+            await self._handle_drawing_event(content)
+        elif message_type == "guess.submit":
+            await self._handle_guess_submission(content)
+
+    async def _handle_drawing_event(self, content: dict) -> None:
+        """Process and broadcast drawer-authorized drawing events."""
+        if not await self._is_active_drawer():
+            # Silently ignore unauthorized drawing attempts
             return
+
+        message_type = content.get("type")
+        payload = content.get("payload", {})
+
+        # Broadcast the event to all other room participants
+        await self.channel_layer.group_send(
+            self.room_group,
+            {
+                "type": "drawing_broadcast",
+                "sender_channel_name": self.channel_name,
+                "drawing_type": message_type,
+                "payload": payload,
+            }
+        )
+
+        # Update Redis canvas snapshot
+        await self._update_redis_snapshot(message_type, payload)
+
+    async def drawing_broadcast(self, event: dict) -> None:
+        """Relay a drawing event broadcast to the connected WebSocket client."""
+        # Don't echo drawing events back to the original sender
+        if self.channel_name == event.get("sender_channel_name"):
+            return
+
+        await self.send_json({
+            "type": event["drawing_type"],
+            "payload": event["payload"],
+        })
 
     async def room_server_event(self, event: dict) -> None:
         """Forward room-group server events to this socket client."""
@@ -286,3 +329,171 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         if not isinstance(server_event, dict):
             return
         await self.send_json(server_event)
+
+    @database_sync_to_async
+    def _is_active_drawer(self) -> bool:
+        """Return True if the connected player is the active drawer.
+
+        This check is performed against Redis turn state to avoid database
+        load during high-frequency drawing events.
+        """
+        # 1. Match player ID against Redis turn state
+        client = get_redis_client()
+        turn_state = game_redis.get_turn_state(client, self.join_code)
+
+        # turn_state is only populated when a round is active.
+        # Drawer authorization field name from K-03 architecture: drawer_participant_id
+        drawer_participant_id = turn_state.get("drawer_participant_id")
+
+        if not drawer_participant_id:
+            return False
+
+        return self.player.id == int(drawer_participant_id)
+
+    @database_sync_to_async
+    def _update_redis_snapshot(self, message_type: str, payload: dict) -> None:
+        """Update or clear the canvas snapshot in Redis."""
+        client = get_redis_client()
+        if message_type == "drawing.clear":
+            room_redis.clear_canvas_snapshot(client, self.join_code)
+        else:
+            # message_type is drawing.stroke or drawing.end_stroke.
+            # We wrap the payload with its type for semantic reconstruction by late joiners.
+            data = {
+                "type": message_type,
+                "payload": payload
+            }
+            snapshot_data = json.dumps(data).encode()
+            room_redis.append_canvas_stroke(client, self.join_code, snapshot_data)
+
+    async def _send_initial_canvas_snapshot(self) -> None:
+        """Send the current canvas state to a newly connected client.
+
+        Only sends if there is an active round in progress.
+        """
+        # Check if a round is active before sending snapshot
+        client = get_redis_client()
+        turn_state = await database_sync_to_async(game_redis.get_turn_state)(client, self.join_code)
+        if not turn_state:
+            return
+
+        snapshots = await self._get_redis_snapshot()
+        for snapshot_bytes in snapshots:
+            try:
+                event_data = json.loads(snapshot_bytes.decode())
+                await self.send_json(event_data)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                logger.warning(f"Corrupted drawing snapshot in room {self.join_code}")
+
+    @database_sync_to_async
+    def _get_redis_snapshot(self) -> list[bytes]:
+        return room_redis.get_canvas_snapshot(get_redis_client(), self.join_code)
+
+    async def _handle_guess_submission(self, content: dict) -> None:
+        """Process a guess submission from a participant."""
+        payload = content.get("payload", {})
+        guess_text = payload.get("text", "").strip()
+        if not guess_text:
+            await self.send_json({
+                "type": "guess.error",
+                "payload": {
+                    "message": "Guess text cannot be empty.",
+                    "server_timestamp": timezone.now().isoformat()
+                }
+            })
+            return
+
+        # 1. Fetch active round from Redis turn state
+        client = get_redis_client()
+        turn_state = await database_sync_to_async(game_redis.get_turn_state)(client, self.join_code)
+        round_id_str = turn_state.get("round_id")
+
+        if not round_id_str:
+            await self.send_json({
+                "type": "guess.error",
+                "payload": {
+                    "message": "No active round in progress.",
+                    "server_timestamp": timezone.now().isoformat()
+                }
+            })
+            return
+
+        # 2. Prevent drawer from guessing (avoid DB pollution)
+        if await self._is_active_drawer():
+            await self.send_json({
+                "type": "guess.error",
+                "payload": {
+                    "message": "Drawers cannot submit guesses for their own round.",
+                    "server_timestamp": timezone.now().isoformat()
+                }
+            })
+            return
+
+        # 3. Evaluate the guess via the game service
+        try:
+            active_round = await self._resolve_round(int(round_id_str))
+            if not active_round:
+                await self.send_json({
+                    "type": "guess.error",
+                    "payload": {
+                        "message": "The targeted round has already completed.",
+                        "server_timestamp": timezone.now().isoformat()
+                    }
+                })
+                return
+
+            evaluation_result = await database_sync_to_async(game_services.evaluate_guess_for_round)(
+                active_round, self.player, guess_text
+            )
+
+            # 4. Broadcast result to all participants
+            await self.channel_layer.group_send(
+                self.room_group,
+                {
+                    "type": "guess_broadcast",
+                    "player_id": self.player.id,
+                    "player_nickname": self.player.display_name,
+                    "text": guess_text,
+                    "is_correct": evaluation_result.is_correct,
+                    "round_completed": evaluation_result.round_completed,
+                    "score_updates": [
+                        {"player_id": s.player_id, "current_score": s.current_score}
+                        for s in evaluation_result.score_updates
+                    ]
+                }
+            )
+        except game_services.GuessEvaluationError as e:
+            await self.send_json({
+                "type": "guess.error",
+                "payload": {
+                    "message": str(e),
+                    "server_timestamp": timezone.now().isoformat()
+                }
+            })
+        except Exception:
+            logger.exception(f"Error evaluating guess from player {self.player.id} in room {self.join_code}")
+            await self.send_json({
+                "type": "guess.error",
+                "payload": {
+                    "message": "An unexpected error occurred while processing your guess.",
+                    "server_timestamp": timezone.now().isoformat()
+                }
+            })
+
+    async def guess_broadcast(self, event: dict) -> None:
+        """Relay a guess result broadcast to the connected WebSocket client."""
+        await self.send_json({
+            "type": "guess.result",
+            "payload": {
+                "player_id": event["player_id"],
+                "player_nickname": event["player_nickname"],
+                "text": event["text"],
+                "is_correct": event["is_correct"],
+                "round_completed": event["round_completed"],
+                "score_updates": event["score_updates"]
+            }
+        })
+
+    @database_sync_to_async
+    def _resolve_round(self, round_id: int) -> Round | None:
+        return Round.objects.filter(pk=round_id, status__isnull=True).select_related("game__room", "selected_game_word").first()

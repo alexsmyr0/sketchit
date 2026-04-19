@@ -12,6 +12,13 @@ from redis.exceptions import RedisError
 from games import redis as game_redis
 from games.models import Game, GameStatus, GameWord, Guess, Round, RoundStatus
 from rooms.models import Player, Room
+from rooms import redis as room_redis
+from games import redis as game_redis
+from django.conf import settings
+import redis
+
+def _get_redis_client():
+    return redis.Redis.from_url(settings.REDIS_URL)
 
 
 class StartGameError(Exception):
@@ -254,6 +261,10 @@ def _schedule_round_intermission_start(
 
 
 def _handle_round_completed(locked_round: Round, *, completion_reason: str) -> None:
+    # Clear round-specific Redis canvas state when it completes
+    client = _get_redis_client()
+    room_redis.clear_canvas_snapshot(client, locked_round.game.room.join_code)
+
     if _runtime_coordinator_enabled():
         transaction.on_commit(
             lambda: _schedule_round_intermission_start(
@@ -401,6 +412,10 @@ def start_game_for_room(room: Room) -> StartedGame:
     locked_room.status = Room.Status.IN_PROGRESS
     locked_room.save(update_fields=["status", "updated_at"])
 
+    # Ensure a clean canvas when the game starts
+    client = _get_redis_client()
+    room_redis.clear_canvas_snapshot(client, locked_room.join_code)
+
     if _runtime_coordinator_enabled():
         transaction.on_commit(lambda: _schedule_round_runtime_start(first_round.id))
 
@@ -524,7 +539,6 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
         .order_by("id")
         .values("id", "current_score")
     )
-
     all_eligible_guessers_correct = _all_eligible_non_drawer_guessers_are_correct(
         locked_round=locked_round,
         newest_correct_guesser_id=guessing_player.id,
