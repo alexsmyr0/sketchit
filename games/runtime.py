@@ -507,6 +507,22 @@ def _start_intermission_timer(
     thread.start()
 
 
+def _is_player_spectating(player_id: int) -> bool:
+    """Return True if the player is currently a spectator.
+
+    Spectators joined after the game started and are not eligible to guess
+    or draw during the current turn. This is checked at sync time so the
+    client receives only the events that match their actual role — they get
+    the phase state and timer but not the role-specific round.started payload
+    that guessers and the drawer receive.
+    """
+
+    return Player.objects.filter(
+        pk=player_id,
+        participation_status=Player.ParticipationStatus.SPECTATING,
+    ).exists()
+
+
 def _eligible_guesser_ids_for_round(round: Round) -> list[int]:
     return list(
         Player.objects.filter(
@@ -665,7 +681,19 @@ def get_sync_events_for_player(join_code: str, player_id: int) -> list[dict]:
     drawer_id = round_state_payload.get("drawer_participant_id")
     round_id = round_state_payload.get("round_id")
     if round_state_payload["phase"] == "round":
-        role = "drawer" if drawer_id is not None and drawer_id == player_id else "guesser"
+        if drawer_id is not None and drawer_id == player_id:
+            role = "drawer"
+        elif _is_player_spectating(player_id):
+            # A-07: spectators joined after the game started and cannot guess
+            # or draw during the current turn. They receive round.state and
+            # round.timer (already appended above) so the client can render
+            # the live game view, but we stop here — no role-specific payload
+            # exists for spectators and sending the guesser payload would
+            # wrongly imply they can submit guesses.
+            return events
+        else:
+            role = "guesser"
+
         role_payload = game_redis.get_round_payload(client, join_code, role)
         if role_payload is not None:
             events.append(

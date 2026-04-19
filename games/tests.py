@@ -916,6 +916,149 @@ class StartGameServiceTests(TestCase):
 
 
 @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)
+class SyncEventsForSpectatorTests(TestCase):
+    """Verify that get_sync_events_for_player returns the correct event set
+    for spectators (A-07).
+
+    Spectators must receive round.state and round.timer so they can watch the
+    live game, but must NOT receive round.started — that payload is role-
+    specific and would mislead the client into thinking they can guess.
+    """
+
+    def setUp(self):
+        super().setUp()
+        game_runtime.reset_runtime_state_for_tests()
+        self.fake_redis = fakeredis.FakeRedis()
+        game_runtime._redis_client = self.fake_redis
+
+        self.word_pack = WordPack.objects.create(name="Sync Pack")
+        word = Word.objects.create(text="apple")
+        WordPackEntry.objects.create(word_pack=self.word_pack, word=word)
+
+        self.room = Room.objects.create(
+            name="Sync Room",
+            join_code="SYNC1234",
+            visibility=Room.Visibility.PRIVATE,
+            status=Room.Status.IN_PROGRESS,
+            word_pack=self.word_pack,
+        )
+        session_expires_at = timezone.now() + timedelta(hours=1)
+
+        self.drawer = Player.objects.create(
+            room=self.room,
+            session_key="drawer-session",
+            display_name="Drawer",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=session_expires_at,
+        )
+        # Mid-game joiner — spectating the current turn.
+        self.spectator = Player.objects.create(
+            room=self.room,
+            session_key="spectator-session",
+            display_name="Spectator",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.SPECTATING,
+            session_expires_at=session_expires_at,
+        )
+        self.guesser = Player.objects.create(
+            room=self.room,
+            session_key="guesser-session",
+            display_name="Guesser",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=session_expires_at,
+        )
+
+        # Populate turn state so get_sync_events_for_player has something to work with.
+        deadline_at = (timezone.now() + timedelta(seconds=60)).isoformat()
+        game_redis.set_turn_state(
+            self.fake_redis,
+            self.room.join_code,
+            {
+                "phase": "round",
+                "status": "drawing",
+                "game_id": "1",
+                "round_id": "1",
+                "drawer_participant_id": str(self.drawer.id),
+                "deadline_at": deadline_at,
+                "eligible_guesser_ids": f"[{self.guesser.id}]",
+                "correct_guesser_ids": "[]",
+                "round_timer_sequence": "3",
+                "intermission_timer_sequence": "0",
+                "last_timer_server_timestamp": timezone.now().isoformat(),
+            },
+        )
+        # Store the guesser payload so the guesser path has something to return.
+        game_redis.set_round_payloads(
+            self.fake_redis,
+            self.room.join_code,
+            drawer_payload={"role": "drawer", "word": "apple"},
+            guesser_payload={"role": "guesser", "masked_word": "_____"},
+        )
+
+    def tearDown(self):
+        game_runtime.reset_runtime_state_for_tests()
+        super().tearDown()
+
+    def _event_types(self, events: list[dict]) -> list[str]:
+        """Return just the type strings from an event list for easy assertion."""
+        return [e["type"] for e in events]
+
+    def test_spectator_receives_round_state_and_timer_events(self):
+        # A spectator must always get the phase snapshot so the client can
+        # render the live game view (timer, drawer identity, etc.).
+        events = game_runtime.get_sync_events_for_player(
+            self.room.join_code, self.spectator.id
+        )
+
+        types = self._event_types(events)
+        self.assertIn("round.state", types)
+        self.assertIn("round.timer", types)
+
+    def test_spectator_does_not_receive_round_started_event(self):
+        # round.started carries the role-specific payload (masked word for
+        # guessers, full word for the drawer). Spectators must not receive it
+        # because it would wrongly suggest they can submit guesses.
+        events = game_runtime.get_sync_events_for_player(
+            self.room.join_code, self.spectator.id
+        )
+
+        types = self._event_types(events)
+        self.assertNotIn("round.started", types)
+
+    def test_spectator_does_not_receive_drawer_word_event(self):
+        # Spectators must never receive the secret word — that would be
+        # equivalent to giving them the answer during the active round.
+        events = game_runtime.get_sync_events_for_player(
+            self.room.join_code, self.spectator.id
+        )
+
+        types = self._event_types(events)
+        self.assertNotIn("round.drawer_word", types)
+
+    def test_guesser_still_receives_round_started_event(self):
+        # Sanity check: the spectator guard must not accidentally suppress
+        # round.started for regular guessers.
+        events = game_runtime.get_sync_events_for_player(
+            self.room.join_code, self.guesser.id
+        )
+
+        types = self._event_types(events)
+        self.assertIn("round.started", types)
+
+    def test_drawer_still_receives_round_started_and_drawer_word_events(self):
+        # Sanity check: the spectator guard must not affect the drawer path.
+        events = game_runtime.get_sync_events_for_player(
+            self.room.join_code, self.drawer.id
+        )
+
+        types = self._event_types(events)
+        self.assertIn("round.started", types)
+        self.assertIn("round.drawer_word", types)
+
+
+@override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)
 class RuntimeCoordinatorHelperTests(SimpleTestCase):
     def setUp(self):
         super().setUp()

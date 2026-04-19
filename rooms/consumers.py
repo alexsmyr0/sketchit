@@ -351,6 +351,22 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         return self.player.id == int(drawer_participant_id)
 
     @database_sync_to_async
+    def _is_spectator(self) -> bool:
+        """Return True if the connected player is currently a spectator.
+
+        Spectators joined after the current game started. They watch the round
+        but cannot submit guesses until the next round transition promotes them
+        to PLAYING status. We re-query the database here rather than relying on
+        the cached self.player instance because participation_status can change
+        between the socket connect and a guess attempt (e.g. a round transition
+        happened while the player was connected).
+        """
+        return Player.objects.filter(
+            pk=self.player.id,
+            participation_status=Player.ParticipationStatus.SPECTATING,
+        ).exists()
+
+    @database_sync_to_async
     def _update_redis_snapshot(self, message_type: str, payload: dict) -> None:
         """Update or clear the canvas snapshot in Redis."""
         client = get_redis_client()
@@ -424,6 +440,19 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                 "type": "guess.error",
                 "payload": {
                     "message": "Drawers cannot submit guesses for their own round.",
+                    "server_timestamp": timezone.now().isoformat()
+                }
+            })
+            return
+
+        # A-07: spectators joined after the game started and are not eligible
+        # to guess until the next round promotes them to PLAYING. Checking here
+        # gives a clear, user-facing message rather than a generic service error.
+        if await self._is_spectator():
+            await self.send_json({
+                "type": "guess.error",
+                "payload": {
+                    "message": "Spectators cannot submit guesses during the current round.",
                     "server_timestamp": timezone.now().isoformat()
                 }
             })

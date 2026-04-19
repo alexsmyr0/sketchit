@@ -888,6 +888,73 @@ class RoomConsumerConnectTests(TransactionTestCase):
 
         await bob_socket.disconnect()
 
+    async def test_spectator_cannot_submit_guess(self):
+        # A-07: a mid-game joiner (SPECTATING) must receive a guess.error with
+        # a clear message instead of having their guess evaluated or silently
+        # dropped. The service layer would also reject it, but the consumer
+        # guard fires first and gives a friendlier, explicit response.
+        #
+        # SessionStore.save() and Player.objects.create() are synchronous DB
+        # operations; both must be wrapped in database_sync_to_async when
+        # called from inside an async test method.
+        @database_sync_to_async
+        def _create_spectator_session_and_player():
+            spectator_session = SessionStore()
+            spectator_session.save()
+            player = Player.objects.create(
+                room=self.room,
+                session_key=spectator_session.session_key,
+                display_name="Spectator",
+                participation_status=Player.ParticipationStatus.SPECTATING,
+                session_expires_at=spectator_session.get_expiry_date(),
+            )
+            return spectator_session.session_key, spectator_session.get_expiry_date(), player
+
+        spectator_session_key, _, spectator = await _create_spectator_session_and_player()
+
+        # Simulate an active round in Redis turn state so the no-active-round
+        # guard doesn't fire before the spectator guard does.
+        deadline_at = (timezone.now() + timedelta(seconds=60)).isoformat()
+        from games import redis as game_redis
+        await database_sync_to_async(game_redis.set_turn_state)(
+            self.fake_redis,
+            self.room.join_code,
+            {
+                "phase": "round",
+                "status": "drawing",
+                "game_id": "1",
+                "round_id": "1",
+                "drawer_participant_id": str(self.player.id),
+                "deadline_at": deadline_at,
+                "eligible_guesser_ids": "[]",
+                "correct_guesser_ids": "[]",
+                "round_timer_sequence": "0",
+                "intermission_timer_sequence": "0",
+                "last_timer_server_timestamp": timezone.now().isoformat(),
+            },
+        )
+
+        communicator = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(spectator_session_key),
+        )
+        await self._connect_and_receive_initial_room_state(communicator)
+
+        await communicator.send_json_to({
+            "type": "guess.submit",
+            "payload": {"text": "rocket"},
+        })
+
+        response = await communicator.receive_json_from(timeout=1)
+
+        self.assertEqual(response["type"], "guess.error")
+        self.assertEqual(
+            response["payload"]["message"],
+            "Spectators cannot submit guesses during the current round.",
+        )
+        await communicator.disconnect()
+
 
 class RoomGroupNameTests(TransactionTestCase):
     """Tests for the room group naming helper."""
