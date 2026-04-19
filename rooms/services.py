@@ -694,3 +694,24 @@ def promote_mid_game_spectators_to_players(*, room_id: int) -> int:
         updated_at=timezone.now(),
     )
     return promoted_count
+
+
+def is_player_spectating(*, player_id: int) -> bool:
+    """Return True if the given player currently has SPECTATING status.
+
+    Single source of truth for "is this participant a spectator right now?".
+    Both the socket consumer (guess submission gate) and the game runtime
+    (sync-event role selection) need the same answer, and they must agree —
+    if the rule ever extends beyond ``participation_status`` (e.g. a
+    ``joined_at_round_id`` field) it should only change here.
+
+    We re-query instead of trusting a cached Player instance because the
+    participation_status can flip between the moment the socket connected and
+    the moment the check runs (e.g. a round transition promoted the player
+    while the socket was open).
+    """
+
+    return Player.objects.filter(
+        pk=player_id,
+        participation_status=Player.ParticipationStatus.SPECTATING,
+    ).exists()

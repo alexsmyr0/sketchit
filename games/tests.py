@@ -554,6 +554,15 @@ class StartGameServiceTests(TestCase):
         self.assertLessEqual(self.member.current_score, 150)
 
     def test_round_progression_never_repeats_drawers_or_words_within_game(self):
+        # A-07: the SPECTATING participant from setUp would be promoted at the
+        # round-1 transition and become a fourth eligible drawer, so the first
+        # three rounds would draw from a pool of four and one of the expected
+        # drawers (host / member / third_player) might not appear in rounds
+        # 1-3. This test asserts the round sequence for exactly three PLAYING
+        # participants, so drop the incidental spectator first. A-07 promotion
+        # semantics are covered by MidGameSpectatorRoundTransitionTests.
+        self.spectator.delete()
+
         third_player = Player.objects.create(
             room=self.room,
             session_key="third-session",
@@ -1041,21 +1050,32 @@ class SyncEventsForSpectatorTests(TestCase):
         # round.started carries the role-specific payload (masked word for
         # guessers, full word for the drawer). Spectators must not receive it
         # because it would wrongly suggest they can submit guesses.
+        #
+        # We also positively assert round.state and round.timer so this test
+        # is self-defending: a regression that strips all round.* events for
+        # spectators (e.g. an early empty return) would vacuously pass the
+        # assertNotIn check. Asserting presence + absence in the same test
+        # prevents that false-negative.
         events = game_runtime.get_sync_events_for_player(
             self.room.join_code, self.spectator.id
         )
 
         types = self._event_types(events)
+        self.assertIn("round.state", types)
+        self.assertIn("round.timer", types)
         self.assertNotIn("round.started", types)
 
     def test_spectator_does_not_receive_drawer_word_event(self):
         # Spectators must never receive the secret word — that would be
         # equivalent to giving them the answer during the active round.
+        # Same self-defending pattern: assert the phase events are still
+        # present so a "strip everything" regression can't sneak past.
         events = game_runtime.get_sync_events_for_player(
             self.room.join_code, self.spectator.id
         )
 
         types = self._event_types(events)
+        self.assertIn("round.state", types)
         self.assertNotIn("round.drawer_word", types)
 
     def test_guesser_still_receives_round_started_event(self):

@@ -510,17 +510,15 @@ def _start_intermission_timer(
 def _is_player_spectating(player_id: int) -> bool:
     """Return True if the player is currently a spectator.
 
-    Spectators joined after the game started and are not eligible to guess
-    or draw during the current turn. This is checked at sync time so the
-    client receives only the events that match their actual role — they get
-    the phase state and timer but not the role-specific round.started payload
-    that guessers and the drawer receive.
+    Thin wrapper around ``rooms.services.is_player_spectating`` so this module
+    keeps its existing local-symbol callsite while the actual rule lives in a
+    single place. Lazy import to avoid a circular dependency: rooms.services
+    imports from games at module level.
     """
 
-    return Player.objects.filter(
-        pk=player_id,
-        participation_status=Player.ParticipationStatus.SPECTATING,
-    ).exists()
+    from rooms.services import is_player_spectating
+
+    return is_player_spectating(player_id=player_id)
 
 
 def _eligible_guesser_ids_for_round(round: Round) -> list[int]:

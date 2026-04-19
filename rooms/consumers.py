@@ -354,17 +354,13 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
     def _is_spectator(self) -> bool:
         """Return True if the connected player is currently a spectator.
 
-        Spectators joined after the current game started. They watch the round
-        but cannot submit guesses until the next round transition promotes them
-        to PLAYING status. We re-query the database here rather than relying on
-        the cached self.player instance because participation_status can change
-        between the socket connect and a guess attempt (e.g. a round transition
-        happened while the player was connected).
+        Delegates to ``rooms.services.is_player_spectating`` so the rule
+        (what counts as "spectator") lives in exactly one place; see the
+        docstring there for why we re-query instead of trusting self.player.
         """
-        return Player.objects.filter(
-            pk=self.player.id,
-            participation_status=Player.ParticipationStatus.SPECTATING,
-        ).exists()
+        from rooms.services import is_player_spectating
+
+        return is_player_spectating(player_id=self.player.id)
 
     @database_sync_to_async
     def _update_redis_snapshot(self, message_type: str, payload: dict) -> None:

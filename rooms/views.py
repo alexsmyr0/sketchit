@@ -302,7 +302,18 @@ def join_room(request, join_code):
             return _build_room_response(room, status=200)
 
         # Capacity only matters for brand-new joins, not same-session rejoin reuse.
-        if room.participants.count() >= room.max_players:
+        #
+        # Concurrency note: this count is safe against a double-join race even
+        # though it reads the Player table (which is not directly locked). The
+        # select_for_update() on the Room row above serializes concurrent
+        # join_room requests targeting the same room — request B blocks on the
+        # row lock until request A commits its Player INSERT. When B then runs
+        # this count, it sees A's newly-inserted row and correctly rejects the
+        # over-capacity join. Under MySQL InnoDB REPEATABLE READ the snapshot
+        # for B's non-locking reads is established after the locking SELECT,
+        # i.e. after A's commit is visible.
+        current_participant_count = Player.objects.filter(room_id=room.id).count()
+        if current_participant_count >= room.max_players:
             return JsonResponse(
                 {"detail": "This room is full."},
                 status=409,
