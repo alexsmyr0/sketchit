@@ -888,6 +888,144 @@ class RoomConsumerConnectTests(TransactionTestCase):
 
         await bob_socket.disconnect()
 
+    async def test_socket_reconnect_during_active_round_preserves_score(self):
+        # A-07 reconnect reclaim: a non-drawer who drops their socket mid-game
+        # and reconnects must land on the same Player row with their score
+        # intact. Losing the score on reconnect would punish anyone whose
+        # network blipped or whose tab refreshed during a round.
+        @database_sync_to_async
+        def _mark_game_in_progress_with_score():
+            self.player.current_score = 42
+            self.player.participation_status = Player.ParticipationStatus.PLAYING
+            self.player.save(
+                update_fields=[
+                    "current_score",
+                    "participation_status",
+                    "updated_at",
+                ],
+            )
+            self.room.status = Room.Status.IN_PROGRESS
+            self.room.save(update_fields=["status", "updated_at"])
+
+        await _mark_game_in_progress_with_score()
+        original_player_id = self.player.id
+
+        first_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        await self._connect_and_receive_initial_room_state(
+            first_socket,
+            drain_duplicate_room_states=True,
+        )
+
+        await first_socket.disconnect()
+
+        # Confirm the disconnect did not wipe the stored score.
+        await database_sync_to_async(self.player.refresh_from_db)()
+        self.assertEqual(self.player.current_score, 42)
+        self.assertEqual(
+            self.player.participation_status,
+            Player.ParticipationStatus.PLAYING,
+        )
+
+        reconnect_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        await self._connect_and_receive_initial_room_state(
+            reconnect_socket,
+            drain_duplicate_room_states=True,
+        )
+
+        refreshed_player = await database_sync_to_async(Player.objects.get)(
+            room=self.room,
+            session_key=self.session_key,
+        )
+        # Same DB row, same score, same participation_status after reconnect.
+        self.assertEqual(refreshed_player.id, original_player_id)
+        self.assertEqual(refreshed_player.current_score, 42)
+        self.assertEqual(
+            refreshed_player.participation_status,
+            Player.ParticipationStatus.PLAYING,
+        )
+        # And the reconnecting socket should now be back to CONNECTED.
+        self.assertEqual(
+            refreshed_player.connection_status,
+            Player.ConnectionStatus.CONNECTED,
+        )
+
+        await reconnect_socket.disconnect()
+
+    async def test_spectator_cannot_submit_guess(self):
+        # A-07: a mid-game joiner (SPECTATING) must receive a guess.error with
+        # a clear message instead of having their guess evaluated or silently
+        # dropped. The service layer would also reject it, but the consumer
+        # guard fires first and gives a friendlier, explicit response.
+        #
+        # SessionStore.save() and Player.objects.create() are synchronous DB
+        # operations; both must be wrapped in database_sync_to_async when
+        # called from inside an async test method.
+        @database_sync_to_async
+        def _create_spectator_session_and_player():
+            spectator_session = SessionStore()
+            spectator_session.save()
+            player = Player.objects.create(
+                room=self.room,
+                session_key=spectator_session.session_key,
+                display_name="Spectator",
+                participation_status=Player.ParticipationStatus.SPECTATING,
+                session_expires_at=spectator_session.get_expiry_date(),
+            )
+            return spectator_session.session_key, spectator_session.get_expiry_date(), player
+
+        spectator_session_key, _, spectator = await _create_spectator_session_and_player()
+
+        # Simulate an active round in Redis turn state so the no-active-round
+        # guard doesn't fire before the spectator guard does.
+        deadline_at = (timezone.now() + timedelta(seconds=60)).isoformat()
+        from games import redis as game_redis
+        await database_sync_to_async(game_redis.set_turn_state)(
+            self.fake_redis,
+            self.room.join_code,
+            {
+                "phase": "round",
+                "status": "drawing",
+                "game_id": "1",
+                "round_id": "1",
+                "drawer_participant_id": str(self.player.id),
+                "deadline_at": deadline_at,
+                "eligible_guesser_ids": "[]",
+                "correct_guesser_ids": "[]",
+                "round_timer_sequence": "0",
+                "intermission_timer_sequence": "0",
+                "last_timer_server_timestamp": timezone.now().isoformat(),
+            },
+        )
+
+        communicator = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(spectator_session_key),
+        )
+        await self._connect_and_receive_initial_room_state(communicator)
+
+        await communicator.send_json_to({
+            "type": "guess.submit",
+            "payload": {"text": "rocket"},
+        })
+
+        response = await communicator.receive_json_from(timeout=1)
+
+        self.assertEqual(response["type"], "guess.error")
+        self.assertEqual(
+            response["payload"]["message"],
+            "Spectators cannot submit guesses during the current round.",
+        )
+        await communicator.disconnect()
+
 
 class RoomGroupNameTests(TransactionTestCase):
     """Tests for the room group naming helper."""

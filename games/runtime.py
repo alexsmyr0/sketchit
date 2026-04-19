@@ -507,6 +507,20 @@ def _start_intermission_timer(
     thread.start()
 
 
+def _is_player_spectating(player_id: int) -> bool:
+    """Return True if the player is currently a spectator.
+
+    Thin wrapper around ``rooms.services.is_player_spectating`` so this module
+    keeps its existing local-symbol callsite while the actual rule lives in a
+    single place. Lazy import to avoid a circular dependency: rooms.services
+    imports from games at module level.
+    """
+
+    from rooms.services import is_player_spectating
+
+    return is_player_spectating(player_id=player_id)
+
+
 def _eligible_guesser_ids_for_round(round: Round) -> list[int]:
     return list(
         Player.objects.filter(
@@ -665,7 +679,19 @@ def get_sync_events_for_player(join_code: str, player_id: int) -> list[dict]:
     drawer_id = round_state_payload.get("drawer_participant_id")
     round_id = round_state_payload.get("round_id")
     if round_state_payload["phase"] == "round":
-        role = "drawer" if drawer_id is not None and drawer_id == player_id else "guesser"
+        if drawer_id is not None and drawer_id == player_id:
+            role = "drawer"
+        elif _is_player_spectating(player_id):
+            # A-07: spectators joined after the game started and cannot guess
+            # or draw during the current turn. They receive round.state and
+            # round.timer (already appended above) so the client can render
+            # the live game view, but we stop here — no role-specific payload
+            # exists for spectators and sending the guesser payload would
+            # wrongly imply they can submit guesses.
+            return events
+        else:
+            role = "guesser"
+
         role_payload = game_redis.get_round_payload(client, join_code, role)
         if role_payload is not None:
             events.append(

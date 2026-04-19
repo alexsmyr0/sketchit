@@ -351,6 +351,18 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         return self.player.id == int(drawer_participant_id)
 
     @database_sync_to_async
+    def _is_spectator(self) -> bool:
+        """Return True if the connected player is currently a spectator.
+
+        Delegates to ``rooms.services.is_player_spectating`` so the rule
+        (what counts as "spectator") lives in exactly one place; see the
+        docstring there for why we re-query instead of trusting self.player.
+        """
+        from rooms.services import is_player_spectating
+
+        return is_player_spectating(player_id=self.player.id)
+
+    @database_sync_to_async
     def _update_redis_snapshot(self, message_type: str, payload: dict) -> None:
         """Update or clear the canvas snapshot in Redis."""
         client = get_redis_client()
@@ -424,6 +436,19 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                 "type": "guess.error",
                 "payload": {
                     "message": "Drawers cannot submit guesses for their own round.",
+                    "server_timestamp": timezone.now().isoformat()
+                }
+            })
+            return
+
+        # A-07: spectators joined after the game started and are not eligible
+        # to guess until the next round promotes them to PLAYING. Checking here
+        # gives a clear, user-facing message rather than a generic service error.
+        if await self._is_spectator():
+            await self.send_json({
+                "type": "guess.error",
+                "payload": {
+                    "message": "Spectators cannot submit guesses during the current round.",
                     "server_timestamp": timezone.now().isoformat()
                 }
             })

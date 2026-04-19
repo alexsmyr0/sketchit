@@ -658,3 +658,60 @@ def leave_participant(*, redis_client, player_id: int) -> None:
             redis_client=redis_client,
             room_id=room.id,
         )
+
+
+def promote_mid_game_spectators_to_players(*, room_id: int) -> int:
+    """Promote connected spectators in a room to playing status.
+
+    Mid-game joiners are stored as SPECTATING so they cannot guess or draw
+    during the turn they joined in (see A-07 in the join_room view). This
+    function is called at each round transition — after one round ends and
+    before the next drawer is chosen — so that waiting spectators graduate
+    into the full eligible pool for the upcoming turn.
+
+    The CONNECTED filter avoids a "ghost PLAYING" state: a player who did an
+    HTTP join but never opened a socket (or who disconnected while spectating)
+    should not silently graduate to PLAYING while they are offline, because
+    downstream consumers combine ``participation_status=PLAYING`` with
+    ``connection_status=CONNECTED`` to decide eligibility. Keeping offline
+    spectators in SPECTATING also means they will be promoted naturally on a
+    later round transition once they reconnect.
+
+    Using a bulk UPDATE rather than per-row saves is intentional: the caller
+    (game services) already holds a lock on the game row inside a transaction,
+    so individual row locks here would be redundant overhead.
+
+    Returns the number of participants that were promoted from SPECTATING to
+    PLAYING, which lets the caller log or assert the promotion if needed.
+    """
+
+    promoted_count = Player.objects.filter(
+        room_id=room_id,
+        participation_status=Player.ParticipationStatus.SPECTATING,
+        connection_status=Player.ConnectionStatus.CONNECTED,
+    ).update(
+        participation_status=Player.ParticipationStatus.PLAYING,
+        updated_at=timezone.now(),
+    )
+    return promoted_count
+
+
+def is_player_spectating(*, player_id: int) -> bool:
+    """Return True if the given player currently has SPECTATING status.
+
+    Single source of truth for "is this participant a spectator right now?".
+    Both the socket consumer (guess submission gate) and the game runtime
+    (sync-event role selection) need the same answer, and they must agree —
+    if the rule ever extends beyond ``participation_status`` (e.g. a
+    ``joined_at_round_id`` field) it should only change here.
+
+    We re-query instead of trusting a cached Player instance because the
+    participation_status can flip between the moment the socket connected and
+    the moment the check runs (e.g. a round transition promoted the player
+    while the socket was open).
+    """
+
+    return Player.objects.filter(
+        pk=player_id,
+        participation_status=Player.ParticipationStatus.SPECTATING,
+    ).exists()

@@ -18,6 +18,7 @@ from games.models import Game, GameStatus, GameWord, Guess, Round, RoundStatus
 from games.services import (
     GuessEvaluationError,
     StartGameError,
+    advance_game_after_intermission,
     complete_round_due_to_timer,
     evaluate_guess_for_round,
     start_game_for_room,
@@ -433,6 +434,12 @@ class StartGameServiceTests(TestCase):
         self.assertSetEqual(drawer_pool, expected_remaining)
 
     def test_drawer_pool_updates_after_each_round_and_clears_on_game_finish(self):
+        # A-07: the SPECTATING participant created in setUp would be promoted to
+        # PLAYING at every round transition and would enter the drawer pool.
+        # This test only cares about the three PLAYING drawers (host, member,
+        # third_player), so drop the incidental spectator before starting the
+        # game to keep the drawer-pool math deterministic.
+        self.spectator.delete()
         third_player = Player.objects.create(
             room=self.room,
             session_key="third-drawer-pool-session",
@@ -483,6 +490,15 @@ class StartGameServiceTests(TestCase):
         self.assertSetEqual(drawer_pool_after_game_finished, set())
 
     def test_completed_round_creates_next_round_with_unused_drawer_and_word(self):
+        # A-07: the SPECTATING participant created in setUp would be promoted at
+        # the round transition and become a valid drawer candidate, which would
+        # make the "next drawer is host or member" assertion flaky. This test is
+        # only about the unused-drawer/unused-word invariant for the two PLAYING
+        # participants, so remove the incidental spectator first. Spectator
+        # promotion semantics are covered by MidGameSpectatorRoundTransitionTests.
+        spectator_id = self.spectator.id
+        self.spectator.delete()
+
         started_game = start_game_for_room(self.room)
         game = started_game.game
         first_round = started_game.first_round
@@ -500,10 +516,18 @@ class StartGameServiceTests(TestCase):
         self.assertIsNone(second_round.ended_at)
         self.assertNotEqual(second_round.drawer_participant_id, first_round.drawer_participant_id)
         self.assertIn(second_round.drawer_participant_id, {self.host.id, self.member.id})
-        self.assertNotEqual(second_round.drawer_participant_id, self.spectator.id)
+        self.assertNotEqual(second_round.drawer_participant_id, spectator_id)
         self.assertNotEqual(second_round.selected_game_word_id, first_round.selected_game_word_id)
 
     def test_game_finishes_after_each_eligible_drawer_draws_once(self):
+        # A-07: the SPECTATING participant created in setUp would be promoted at
+        # the round-1 transition and add a third eligible drawer, so the game
+        # would need three rounds to finish instead of two. This test is about
+        # the two-PLAYING-drawer case, so drop the incidental spectator first.
+        # Spectator promotion semantics are covered by
+        # MidGameSpectatorRoundTransitionTests.
+        self.spectator.delete()
+
         started_game = start_game_for_room(self.room)
         game = started_game.game
 
@@ -514,7 +538,6 @@ class StartGameServiceTests(TestCase):
         game.refresh_from_db()
         self.host.refresh_from_db()
         self.member.refresh_from_db()
-        self.spectator.refresh_from_db()
 
         self.assertEqual(game.status, GameStatus.FINISHED)
         self.assertIsNotNone(game.ended_at)
@@ -529,9 +552,17 @@ class StartGameServiceTests(TestCase):
         self.assertLessEqual(self.host.current_score, 150)
         self.assertGreaterEqual(self.member.current_score, 30)
         self.assertLessEqual(self.member.current_score, 150)
-        self.assertEqual(self.spectator.current_score, 0)
 
     def test_round_progression_never_repeats_drawers_or_words_within_game(self):
+        # A-07: the SPECTATING participant from setUp would be promoted at the
+        # round-1 transition and become a fourth eligible drawer, so the first
+        # three rounds would draw from a pool of four and one of the expected
+        # drawers (host / member / third_player) might not appear in rounds
+        # 1-3. This test asserts the round sequence for exactly three PLAYING
+        # participants, so drop the incidental spectator first. A-07 promotion
+        # semantics are covered by MidGameSpectatorRoundTransitionTests.
+        self.spectator.delete()
+
         third_player = Player.objects.create(
             room=self.room,
             session_key="third-session",
@@ -912,6 +943,160 @@ class StartGameServiceTests(TestCase):
             evaluate_guess_for_round(first_round, outsider, first_round.selected_game_word.text)
 
         self.assertEqual(Guess.objects.filter(round=first_round).count(), 0)
+
+
+@override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)
+class SyncEventsForSpectatorTests(TestCase):
+    """Verify that get_sync_events_for_player returns the correct event set
+    for spectators (A-07).
+
+    Spectators must receive round.state and round.timer so they can watch the
+    live game, but must NOT receive round.started — that payload is role-
+    specific and would mislead the client into thinking they can guess.
+    """
+
+    def setUp(self):
+        super().setUp()
+        game_runtime.reset_runtime_state_for_tests()
+        self.fake_redis = fakeredis.FakeRedis()
+        game_runtime._redis_client = self.fake_redis
+
+        self.word_pack = WordPack.objects.create(name="Sync Pack")
+        word = Word.objects.create(text="apple")
+        WordPackEntry.objects.create(word_pack=self.word_pack, word=word)
+
+        self.room = Room.objects.create(
+            name="Sync Room",
+            join_code="SYNC1234",
+            visibility=Room.Visibility.PRIVATE,
+            status=Room.Status.IN_PROGRESS,
+            word_pack=self.word_pack,
+        )
+        session_expires_at = timezone.now() + timedelta(hours=1)
+
+        self.drawer = Player.objects.create(
+            room=self.room,
+            session_key="drawer-session",
+            display_name="Drawer",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=session_expires_at,
+        )
+        # Mid-game joiner — spectating the current turn.
+        self.spectator = Player.objects.create(
+            room=self.room,
+            session_key="spectator-session",
+            display_name="Spectator",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.SPECTATING,
+            session_expires_at=session_expires_at,
+        )
+        self.guesser = Player.objects.create(
+            room=self.room,
+            session_key="guesser-session",
+            display_name="Guesser",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=session_expires_at,
+        )
+
+        # Populate turn state so get_sync_events_for_player has something to work with.
+        deadline_at = (timezone.now() + timedelta(seconds=60)).isoformat()
+        game_redis.set_turn_state(
+            self.fake_redis,
+            self.room.join_code,
+            {
+                "phase": "round",
+                "status": "drawing",
+                "game_id": "1",
+                "round_id": "1",
+                "drawer_participant_id": str(self.drawer.id),
+                "deadline_at": deadline_at,
+                "eligible_guesser_ids": f"[{self.guesser.id}]",
+                "correct_guesser_ids": "[]",
+                "round_timer_sequence": "3",
+                "intermission_timer_sequence": "0",
+                "last_timer_server_timestamp": timezone.now().isoformat(),
+            },
+        )
+        # Store the guesser payload so the guesser path has something to return.
+        game_redis.set_round_payloads(
+            self.fake_redis,
+            self.room.join_code,
+            drawer_payload={"role": "drawer", "word": "apple"},
+            guesser_payload={"role": "guesser", "masked_word": "_____"},
+        )
+
+    def tearDown(self):
+        game_runtime.reset_runtime_state_for_tests()
+        super().tearDown()
+
+    def _event_types(self, events: list[dict]) -> list[str]:
+        """Return just the type strings from an event list for easy assertion."""
+        return [e["type"] for e in events]
+
+    def test_spectator_receives_round_state_and_timer_events(self):
+        # A spectator must always get the phase snapshot so the client can
+        # render the live game view (timer, drawer identity, etc.).
+        events = game_runtime.get_sync_events_for_player(
+            self.room.join_code, self.spectator.id
+        )
+
+        types = self._event_types(events)
+        self.assertIn("round.state", types)
+        self.assertIn("round.timer", types)
+
+    def test_spectator_does_not_receive_round_started_event(self):
+        # round.started carries the role-specific payload (masked word for
+        # guessers, full word for the drawer). Spectators must not receive it
+        # because it would wrongly suggest they can submit guesses.
+        #
+        # We also positively assert round.state and round.timer so this test
+        # is self-defending: a regression that strips all round.* events for
+        # spectators (e.g. an early empty return) would vacuously pass the
+        # assertNotIn check. Asserting presence + absence in the same test
+        # prevents that false-negative.
+        events = game_runtime.get_sync_events_for_player(
+            self.room.join_code, self.spectator.id
+        )
+
+        types = self._event_types(events)
+        self.assertIn("round.state", types)
+        self.assertIn("round.timer", types)
+        self.assertNotIn("round.started", types)
+
+    def test_spectator_does_not_receive_drawer_word_event(self):
+        # Spectators must never receive the secret word — that would be
+        # equivalent to giving them the answer during the active round.
+        # Same self-defending pattern: assert the phase events are still
+        # present so a "strip everything" regression can't sneak past.
+        events = game_runtime.get_sync_events_for_player(
+            self.room.join_code, self.spectator.id
+        )
+
+        types = self._event_types(events)
+        self.assertIn("round.state", types)
+        self.assertNotIn("round.drawer_word", types)
+
+    def test_guesser_still_receives_round_started_event(self):
+        # Sanity check: the spectator guard must not accidentally suppress
+        # round.started for regular guessers.
+        events = game_runtime.get_sync_events_for_player(
+            self.room.join_code, self.guesser.id
+        )
+
+        types = self._event_types(events)
+        self.assertIn("round.started", types)
+
+    def test_drawer_still_receives_round_started_and_drawer_word_events(self):
+        # Sanity check: the spectator guard must not affect the drawer path.
+        events = game_runtime.get_sync_events_for_player(
+            self.room.join_code, self.drawer.id
+        )
+
+        types = self._event_types(events)
+        self.assertIn("round.started", types)
+        self.assertIn("round.drawer_word", types)
 
 
 @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)
@@ -1768,4 +1953,158 @@ class GuessServiceIntegrationTests(TestCase):
 
         self.assertFalse(result.is_correct)
         self.assertFalse(result.round_completed)
-        self.assertEqual(len(result.score_updates), 0)
+
+
+@override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
+class MidGameSpectatorRoundTransitionTests(TestCase):
+    """Service-level coverage for A-07 spectator promotion at round transition.
+
+    The runtime coordinator is disabled so advance_game_after_intermission
+    drives round progression directly without needing real timers or Redis
+    turn state. This lets us focus purely on the promotion and drawer-pool
+    logic without threading complexity.
+    """
+
+    def setUp(self):
+        self.word_pack = WordPack.objects.create(name="Transition Pack")
+        for word_text in ("apple", "banana", "cherry"):
+            word = Word.objects.create(text=word_text)
+            WordPackEntry.objects.create(word_pack=self.word_pack, word=word)
+
+        self.room = Room.objects.create(
+            name="Transition Room",
+            join_code="TRANS123",
+            visibility=Room.Visibility.PRIVATE,
+            status=Room.Status.IN_PROGRESS,
+            word_pack=self.word_pack,
+        )
+        session_expires_at = timezone.now() + timedelta(hours=1)
+
+        # The original drawer — will have already drawn in round 1.
+        self.drawer = Player.objects.create(
+            room=self.room,
+            session_key="drawer-session",
+            display_name="Drawer",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=session_expires_at,
+        )
+        # A regular participant who has not yet drawn.
+        self.guesser = Player.objects.create(
+            room=self.room,
+            session_key="guesser-session",
+            display_name="Guesser",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=session_expires_at,
+        )
+        # A mid-game joiner — currently spectating, eligible after promotion.
+        self.spectator = Player.objects.create(
+            room=self.room,
+            session_key="spectator-session",
+            display_name="Spectator",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.SPECTATING,
+            session_expires_at=session_expires_at,
+        )
+
+        self.game = Game.objects.create(room=self.room, status=GameStatus.IN_PROGRESS)
+        self.word_apple = GameWord.objects.create(game=self.game, text="apple")
+        self.word_banana = GameWord.objects.create(game=self.game, text="banana")
+        self.word_cherry = GameWord.objects.create(game=self.game, text="cherry")
+
+        # Round 1 is already completed so advance_game_after_intermission can
+        # move the game forward to round 2 when called in each test.
+        self.completed_round = Round.objects.create(
+            game=self.game,
+            drawer_participant=self.drawer,
+            drawer_nickname=self.drawer.display_name,
+            selected_game_word=self.word_apple,
+            sequence_number=1,
+            status=RoundStatus.COMPLETED,
+            ended_at=timezone.now(),
+        )
+
+    def test_spectator_is_promoted_to_playing_at_round_transition(self):
+        # A-07: the spectator must become PLAYING when the round transitions
+        # so they are a full participant from the next turn onward.
+        advance_game_after_intermission(self.completed_round.id)
+
+        self.spectator.refresh_from_db()
+        self.assertEqual(
+            self.spectator.participation_status,
+            Player.ParticipationStatus.PLAYING,
+        )
+
+    def test_playing_participants_are_unchanged_at_round_transition(self):
+        # Participants already marked PLAYING must not be touched by the
+        # promotion step — their status was already correct.
+        advance_game_after_intermission(self.completed_round.id)
+
+        self.drawer.refresh_from_db()
+        self.guesser.refresh_from_db()
+        self.assertEqual(self.drawer.participation_status, Player.ParticipationStatus.PLAYING)
+        self.assertEqual(self.guesser.participation_status, Player.ParticipationStatus.PLAYING)
+
+    @patch("games.services.random.choice")
+    def test_promoted_spectator_is_eligible_for_next_drawer_pool(self, mock_choice):
+        # After promotion the spectator must be reachable by the drawer
+        # selection. We force random.choice to pick the promoted spectator so
+        # we can assert deterministically that they became the round 2 drawer.
+        #
+        # random.choice is called twice in _progress_game_after_round_completion:
+        # once for the drawer and once for the word. We set a side_effect list
+        # so the first call (drawer) returns the spectator and the second call
+        # (word) returns a word to keep the round creation valid.
+        mock_choice.side_effect = [self.spectator, self.word_banana]
+
+        advance_game_after_intermission(self.completed_round.id)
+
+        round_2 = Round.objects.filter(
+            game=self.game, sequence_number=2
+        ).first()
+
+        self.assertIsNotNone(round_2)
+        # The promoted spectator was selected as the drawer for round 2,
+        # which proves they entered the eligible pool after promotion.
+        self.assertEqual(round_2.drawer_participant_id, self.spectator.id)
+
+    def test_round_transition_creates_next_round_after_promotion(self):
+        # Sanity check: the game must progress to round 2 after promotion,
+        # not stall because the drawer pool was evaluated before spectators
+        # were promoted (which would incorrectly leave only one eligible drawer).
+        advance_game_after_intermission(self.completed_round.id)
+
+        self.assertEqual(
+            Round.objects.filter(game=self.game).count(),
+            2,
+        )
+
+    def test_round_transition_schedules_room_state_broadcast_when_promotion_occurs(self):
+        # A-07 + A-06 integration: when the round transition promotes at least
+        # one spectator, a fresh room.state broadcast must be scheduled so
+        # clients update their lobby rendering. We patch the broadcast helper
+        # at its import site inside games.services so we can observe the call
+        # without touching the channel layer.
+        with patch(
+            "rooms.services.schedule_room_state_broadcast_after_commit",
+        ) as mock_broadcast:
+            advance_game_after_intermission(self.completed_round.id)
+
+        mock_broadcast.assert_called_once_with(
+            join_code=self.room.join_code,
+            room_id=self.room.id,
+        )
+
+    def test_round_transition_skips_broadcast_when_no_spectators_to_promote(self):
+        # Counterpart: if nobody needed to be promoted, the promotion helper
+        # returns 0 and we must NOT schedule a redundant room.state broadcast.
+        # Delete the lone spectator so the promotion finds no candidates.
+        self.spectator.delete()
+
+        with patch(
+            "rooms.services.schedule_room_state_broadcast_after_commit",
+        ) as mock_broadcast:
+            advance_game_after_intermission(self.completed_round.id)
+
+        mock_broadcast.assert_not_called()

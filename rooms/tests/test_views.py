@@ -454,6 +454,117 @@ class JoinRoomViewTests(TestCase):
         self.assertFalse(Room.objects.filter(pk=self.room.id).exists())
         self.assertEqual(Player.objects.count(), 0)
 
+    def test_join_room_in_progress_creates_player_as_spectator(self):
+        # A-07: a brand-new participant joining an in-progress room must be
+        # marked SPECTATING so they cannot guess or draw during the current
+        # turn. The next round transition will promote them to PLAYING.
+        existing_player = Player.objects.create(
+            room=self.room,
+            session_key="existing-session",
+            display_name="Existing",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        self.room.status = Room.Status.IN_PROGRESS
+        self.room.host = existing_player
+        self.room.save(update_fields=["status", "host", "updated_at"])
+
+        response = self.post_join_room()
+
+        self.assertEqual(response.status_code, 201)
+        # The new player (not the existing one) should have SPECTATING status.
+        new_player = Player.objects.exclude(pk=existing_player.pk).get()
+        self.assertEqual(
+            new_player.participation_status,
+            Player.ParticipationStatus.SPECTATING,
+        )
+        # The existing participant's status must not be disturbed.
+        existing_player.refresh_from_db()
+        self.assertEqual(
+            existing_player.participation_status,
+            Player.ParticipationStatus.PLAYING,
+        )
+
+    def test_join_room_in_lobby_creates_player_as_playing(self):
+        # A-07 counterpart: joining while the room is still in the lobby should
+        # keep the default PLAYING status so the player is immediately eligible
+        # to draw and guess when the host starts the game.
+        response = self.post_join_room()
+
+        self.assertEqual(response.status_code, 201)
+        player = Player.objects.get()
+        self.assertEqual(
+            player.participation_status,
+            Player.ParticipationStatus.PLAYING,
+        )
+
+    def test_join_room_mid_game_rejoin_preserves_playing_score_and_status(self):
+        # A-07 reconnect reclaim: an existing PLAYING participant who rejoins
+        # via HTTP while the game is IN_PROGRESS must keep their original row,
+        # their score, and their participation_status. Losing any of these
+        # would punish a player who simply refreshed their tab mid-game.
+        first_response = self.post_join_room(display_name="Alex")
+        self.assertEqual(first_response.status_code, 201)
+
+        player = Player.objects.get()
+        # Simulate an in-progress game where this player has already scored
+        # from a previous round they participated in.
+        player.current_score = 42
+        player.participation_status = Player.ParticipationStatus.PLAYING
+        player.save(
+            update_fields=["current_score", "participation_status", "updated_at"],
+        )
+        self.room.status = Room.Status.IN_PROGRESS
+        self.room.host = player
+        self.room.save(update_fields=["status", "host", "updated_at"])
+
+        second_response = self.post_join_room(display_name="Changed Name")
+
+        self.assertEqual(second_response.status_code, 200)
+        # No duplicate participant row was created.
+        self.assertEqual(Player.objects.count(), 1)
+
+        player.refresh_from_db()
+        # Score survives the rejoin.
+        self.assertEqual(player.current_score, 42)
+        # Participation status survives — the join view must NOT overwrite a
+        # PLAYING participant with SPECTATING on same-session rejoin.
+        self.assertEqual(
+            player.participation_status,
+            Player.ParticipationStatus.PLAYING,
+        )
+        # Display name is preserved (no rename via rejoin), same guarantee as
+        # the lobby rejoin test.
+        self.assertEqual(player.display_name, "Alex")
+
+    def test_join_room_mid_game_rejoin_preserves_spectating_status(self):
+        # A-07 reconnect reclaim for a spectator: someone who originally joined
+        # mid-game as SPECTATING must not be silently promoted to PLAYING just
+        # because they rejoined via HTTP. Promotion only happens through the
+        # round-transition service, so the rejoin path should be a no-op on
+        # participation_status.
+        first_response = self.post_join_room(display_name="Alex")
+        self.assertEqual(first_response.status_code, 201)
+
+        player = Player.objects.get()
+        player.current_score = 0
+        player.participation_status = Player.ParticipationStatus.SPECTATING
+        player.save(
+            update_fields=["current_score", "participation_status", "updated_at"],
+        )
+        self.room.status = Room.Status.IN_PROGRESS
+        self.room.save(update_fields=["status", "updated_at"])
+
+        second_response = self.post_join_room()
+
+        self.assertEqual(second_response.status_code, 200)
+        player.refresh_from_db()
+        self.assertEqual(
+            player.participation_status,
+            Player.ParticipationStatus.SPECTATING,
+        )
+        self.assertEqual(player.current_score, 0)
+
 
 class RoomLobbyStateViewTests(TestCase):
     def _ensure_session_key(self, client):
