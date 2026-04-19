@@ -1,3 +1,4 @@
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -6,6 +7,7 @@ from asgiref.sync import async_to_sync
 from channels.db import database_sync_to_async
 from channels.testing import WebsocketCommunicator
 from django.test import TransactionTestCase
+from django.utils import timezone
 
 from games import services as game_services
 from rooms.models import Player, Room
@@ -19,6 +21,14 @@ from words.models import Word, WordPack, WordPackEntry
 @database_sync_to_async
 def _get_guess(round_id: int, player_id: int) -> Guess:
     return Guess.objects.get(round_id=round_id, player_id=player_id)
+
+
+@database_sync_to_async
+def _set_round_started_at(round_id: int, started_at) -> None:
+    round = Round.objects.get(pk=round_id)
+    round.started_at = started_at
+    round.save(update_fields=("started_at", "updated_at"))
+
 
 class GuessPipelineTests(TransactionTestCase):
     def setUp(self):
@@ -71,6 +81,8 @@ class GuessPipelineTests(TransactionTestCase):
         room_consumers._redis_client = None
 
     async def test_correct_guess_broadcast(self):
+        round_start = timezone.now()
+        await _set_round_started_at(self.round.id, round_start)
         guesser_socket = WebsocketCommunicator(
             _TEST_APP,
             _ws_url(self.room.join_code),
@@ -79,21 +91,25 @@ class GuessPipelineTests(TransactionTestCase):
         await guesser_socket.connect()
 
         # Submit correct guess
-        await guesser_socket.send_json_to({
-            "type": "guess.submit",
-            "payload": {"text": self.secret_word_text}
-        })
+        accepted_at = round_start + timedelta(seconds=45)
+        with patch("games.services.timezone.now", return_value=accepted_at):
+            await guesser_socket.send_json_to({
+                "type": "guess.submit",
+                "payload": {"text": self.secret_word_text}
+            })
 
-        # Guesser should receive the result broadcast
-        response = await guesser_socket.receive_json_from()
+            # Guesser should receive the result broadcast
+            response = await guesser_socket.receive_json_from()
         self.assertEqual(response["type"], "guess.result")
         self.assertTrue(response["payload"]["is_correct"])
         self.assertEqual(response["payload"]["player_id"], self.guesser_player.id)
         
-        # Check score updates (guesser gets 1 point)
+        # Check exact time-based score updates
         score_updates = response["payload"]["score_updates"]
         guesser_update = next(s for s in score_updates if s["player_id"] == self.guesser_player.id)
-        self.assertEqual(guesser_update["current_score"], 1)
+        drawer_update = next(s for s in score_updates if s["player_id"] == self.drawer_player.id)
+        self.assertEqual(guesser_update["current_score"], 60)
+        self.assertEqual(drawer_update["current_score"], 30)
 
         await guesser_socket.disconnect()
 

@@ -31,3 +31,7 @@
 ## Apr 13
 
 - Completed full game cycle drawer rotation.
+
+## Apr 15
+
+- Added Time-Based Scoring & Multi-Guesser Round Resolution.

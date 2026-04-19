@@ -2,11 +2,13 @@ import json
 import threading
 import time
 from datetime import timedelta
+from unittest.mock import patch
 
 import fakeredis
 from django.contrib import admin
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
+from redis.exceptions import RedisError
 
 from games import redis as game_redis
 from games import runtime as game_runtime
@@ -384,7 +386,12 @@ class StartGameServiceTests(TestCase):
         first_round, guesser, drawer = self._start_game_with_non_drawer_guesser()
         guess_text = f"  {first_round.selected_game_word.text.upper()}  "
 
-        result = evaluate_guess_for_round(first_round, guesser, guess_text)
+        round_start = timezone.now()
+        first_round.started_at = round_start
+        first_round.save(update_fields=("started_at", "updated_at"))
+        accepted_at = round_start + timedelta(seconds=45)
+        with patch("games.services.timezone.now", return_value=accepted_at):
+            result = evaluate_guess_for_round(first_round, guesser, guess_text)
 
         first_round.refresh_from_db()
         guesser.refresh_from_db()
@@ -396,15 +403,18 @@ class StartGameServiceTests(TestCase):
         self.assertTrue(result.round_completed_now)
         self.assertEqual(result.round_status, RoundStatus.COMPLETED)
         self.assertEqual(result.winning_player_id, guesser.id)
-        self.assertIsNotNone(result.round_ended_at)
+        self.assertEqual(result.round_ended_at, accepted_at)
         self.assertEqual(first_round.status, RoundStatus.COMPLETED)
-        self.assertIsNotNone(first_round.ended_at)
-        self.assertEqual(guesser.current_score, 1)
-        self.assertEqual(drawer.current_score, 1)
+        self.assertEqual(first_round.ended_at, accepted_at)
+        self.assertEqual(guesser.current_score, 60)
+        self.assertEqual(drawer.current_score, 30)
         self.assertEqual(self.spectator.current_score, 0)
         self.assertEqual(
             {(update.player_id, update.current_score) for update in result.score_updates},
-            {(guesser.id, 1), (drawer.id, 1)},
+            {
+                (guesser.id, 60),
+                (drawer.id, 30),
+            },
         )
         self.assertEqual(result.as_round_result()["winning_player_id"], guesser.id)
         self.assertEqual(Guess.objects.filter(round=first_round).count(), 1)
@@ -515,8 +525,10 @@ class StartGameServiceTests(TestCase):
         )
         self.assertEqual(len(selected_word_ids), 2)
         self.assertEqual(len(selected_word_ids), len(set(selected_word_ids)))
-        self.assertEqual(self.host.current_score, 2)
-        self.assertEqual(self.member.current_score, 2)
+        self.assertGreaterEqual(self.host.current_score, 30)
+        self.assertLessEqual(self.host.current_score, 150)
+        self.assertGreaterEqual(self.member.current_score, 30)
+        self.assertLessEqual(self.member.current_score, 150)
         self.assertEqual(self.spectator.current_score, 0)
 
     def test_round_progression_never_repeats_drawers_or_words_within_game(self):
@@ -673,22 +685,30 @@ class StartGameServiceTests(TestCase):
         )
         self.assertEqual(len(guessers), 2)
 
-        first_result = evaluate_guess_for_round(
-            first_round,
-            guessers[0],
-            first_round.selected_game_word.text,
-        )
+        round_start = timezone.now()
+        first_round.started_at = round_start
+        first_round.save(update_fields=("started_at", "updated_at"))
+
+        first_guess_time = round_start + timedelta(seconds=10)
+        with patch("games.services.timezone.now", return_value=first_guess_time):
+            first_result = evaluate_guess_for_round(
+                first_round,
+                guessers[0],
+                first_round.selected_game_word.text,
+            )
         first_round.refresh_from_db()
         self.assertTrue(first_result.is_correct)
         self.assertFalse(first_result.round_completed_now)
         self.assertIsNone(first_round.status)
         self.assertIsNone(first_round.ended_at)
 
-        second_result = evaluate_guess_for_round(
-            first_round,
-            guessers[1],
-            first_round.selected_game_word.text,
-        )
+        second_guess_time = round_start + timedelta(seconds=70)
+        with patch("games.services.timezone.now", return_value=second_guess_time):
+            second_result = evaluate_guess_for_round(
+                first_round,
+                guessers[1],
+                first_round.selected_game_word.text,
+            )
         first_round.refresh_from_db()
         drawer = first_round.drawer_participant
         drawer.refresh_from_db()
@@ -699,10 +719,10 @@ class StartGameServiceTests(TestCase):
         self.assertTrue(second_result.round_completed)
         self.assertTrue(second_result.round_completed_now)
         self.assertEqual(first_round.status, RoundStatus.COMPLETED)
-        self.assertIsNotNone(first_round.ended_at)
-        self.assertEqual(guessers[0].current_score, 1)
-        self.assertEqual(guessers[1].current_score, 1)
-        self.assertEqual(drawer.current_score, 2)
+        self.assertEqual(first_round.ended_at, second_guess_time)
+        self.assertEqual(guessers[0].current_score, 91)
+        self.assertEqual(guessers[1].current_score, 38)
+        self.assertEqual(drawer.current_score, 65)
 
     def test_disconnected_eligible_guesser_does_not_trigger_early_finish(self):
         Player.objects.create(
@@ -731,13 +751,20 @@ class StartGameServiceTests(TestCase):
         disconnected_guesser.connection_status = Player.ConnectionStatus.DISCONNECTED
         disconnected_guesser.save(update_fields=("connection_status", "updated_at"))
 
-        result = evaluate_guess_for_round(
-            first_round,
-            guessers[0],
-            first_round.selected_game_word.text,
-        )
+        round_start = timezone.now()
+        first_round.started_at = round_start
+        first_round.save(update_fields=("started_at", "updated_at"))
+        accepted_at = round_start + timedelta(seconds=45)
+        with patch("games.services.timezone.now", return_value=accepted_at):
+            result = evaluate_guess_for_round(
+                first_round,
+                guessers[0],
+                first_round.selected_game_word.text,
+            )
 
         first_round.refresh_from_db()
+        drawer = first_round.drawer_participant
+        drawer.refresh_from_db()
         guessers[0].refresh_from_db()
 
         self.assertTrue(result.is_correct)
@@ -745,7 +772,98 @@ class StartGameServiceTests(TestCase):
         self.assertFalse(result.round_completed_now)
         self.assertIsNone(first_round.status)
         self.assertIsNone(first_round.ended_at)
-        self.assertEqual(guessers[0].current_score, 1)
+        self.assertEqual(guessers[0].current_score, 60)
+        self.assertEqual(drawer.current_score, 30)
+
+    @override_settings(
+        SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False,
+        SKETCHIT_ROUND_DURATION_SECONDS=90,
+    )
+    def test_time_based_scoring_accumulates_for_multiple_guessers_at_different_times(self):
+        Player.objects.create(
+            room=self.room,
+            session_key="third-time-score-session",
+            display_name="Third Time Score",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        started_game = start_game_for_room(self.room)
+        first_round = started_game.first_round
+        drawer = first_round.drawer_participant
+
+        guessers = list(
+            Player.objects.filter(
+                room=self.room,
+                participation_status=Player.ParticipationStatus.PLAYING,
+                created_at__lte=first_round.started_at,
+            )
+            .exclude(pk=first_round.drawer_participant_id)
+            .order_by("created_at", "id")
+        )
+        self.assertEqual(len(guessers), 2)
+
+        round_start = timezone.now()
+        first_round.started_at = round_start
+        first_round.save(update_fields=("started_at", "updated_at"))
+
+        first_guess_time = round_start + timedelta(seconds=9)
+        second_guess_time = round_start + timedelta(seconds=63)
+        expected_first_guesser_points = 92
+        expected_first_drawer_bonus = 46
+        expected_second_guesser_points = 44
+        expected_second_drawer_bonus = 22
+
+        with patch("games.services.timezone.now", return_value=first_guess_time):
+            first_result = evaluate_guess_for_round(
+                first_round,
+                guessers[0],
+                first_round.selected_game_word.text,
+            )
+
+        first_round.refresh_from_db()
+        guessers[0].refresh_from_db()
+        drawer.refresh_from_db()
+
+        self.assertTrue(first_result.is_correct)
+        self.assertFalse(first_result.round_completed_now)
+        self.assertIsNone(first_round.status)
+        self.assertEqual(guessers[0].current_score, expected_first_guesser_points)
+        self.assertEqual(drawer.current_score, expected_first_drawer_bonus)
+        self.assertEqual(
+            {(update.player_id, update.current_score) for update in first_result.score_updates},
+            {
+                (guessers[0].id, expected_first_guesser_points),
+                (drawer.id, expected_first_drawer_bonus),
+            },
+        )
+
+        with patch("games.services.timezone.now", return_value=second_guess_time):
+            second_result = evaluate_guess_for_round(
+                first_round,
+                guessers[1],
+                first_round.selected_game_word.text,
+            )
+
+        first_round.refresh_from_db()
+        drawer.refresh_from_db()
+        guessers[1].refresh_from_db()
+
+        self.assertTrue(second_result.is_correct)
+        self.assertTrue(second_result.round_completed_now)
+        self.assertEqual(first_round.status, RoundStatus.COMPLETED)
+        self.assertEqual(guessers[1].current_score, expected_second_guesser_points)
+        self.assertEqual(
+            drawer.current_score,
+            expected_first_drawer_bonus + expected_second_drawer_bonus,
+        )
+        self.assertEqual(
+            {(update.player_id, update.current_score) for update in second_result.score_updates},
+            {
+                (guessers[1].id, expected_second_guesser_points),
+                (drawer.id, expected_first_drawer_bonus + expected_second_drawer_bonus),
+            },
+        )
 
     def test_evaluate_guess_rejects_spectating_participant(self):
         first_round, _guesser, _drawer = self._start_game_with_non_drawer_guesser()
@@ -1427,6 +1545,13 @@ class GuessServiceIntegrationTests(TestCase):
             sequence_number=1,
         )
 
+    def _set_round_start(self, started_at):
+        self.round.started_at = started_at
+        self.round.save(update_fields=("started_at", "updated_at"))
+
+    def _score_map(self, result):
+        return {update.player_id: update.current_score for update in result.score_updates}
+
     def test_evaluate_guess_persists_guess_on_active_round(self):
         result = evaluate_guess_for_round(self.round, self.guesser, " rocket ")
 
@@ -1439,7 +1564,11 @@ class GuessServiceIntegrationTests(TestCase):
         self.assertEqual(result.guess.player_id, self.guesser.id)
 
     def test_evaluate_guess_returns_correct_fields_for_n05_broadcasts(self):
-        result = evaluate_guess_for_round(self.round, self.guesser, "rocket")
+        round_start = timezone.now()
+        self._set_round_start(round_start)
+        accepted_at = round_start + timedelta(seconds=45)
+        with patch("games.services.timezone.now", return_value=accepted_at):
+            result = evaluate_guess_for_round(self.round, self.guesser, "rocket")
 
         # Verify N-05 broadcast payload requirements
         self.assertTrue(result.is_correct)
@@ -1447,9 +1576,192 @@ class GuessServiceIntegrationTests(TestCase):
         self.assertEqual(len(result.score_updates), 2)
 
         # Verify score_updates structure
-        scores_by_player = {s.player_id: s.current_score for s in result.score_updates}
-        self.assertEqual(scores_by_player[self.guesser.id], 1)
-        self.assertEqual(scores_by_player[self.drawer.id], 1)
+        scores_by_player = self._score_map(result)
+        self.assertEqual(scores_by_player[self.guesser.id], 60)
+        self.assertEqual(scores_by_player[self.drawer.id], 30)
+
+    @override_settings(SKETCHIT_ROUND_DURATION_SECONDS=90)
+    def test_time_based_scoring_hits_maximum_boundary_at_round_start(self):
+        round_start = timezone.now()
+        self._set_round_start(round_start)
+
+        with patch("games.services.timezone.now", return_value=round_start):
+            result = evaluate_guess_for_round(self.round, self.guesser, "rocket")
+
+        self.drawer.refresh_from_db()
+        self.guesser.refresh_from_db()
+
+        self.assertTrue(result.is_correct)
+        self.assertEqual(self.guesser.current_score, 100)
+        self.assertEqual(self.drawer.current_score, 50)
+        self.assertEqual(
+            self._score_map(result),
+            {self.guesser.id: 100, self.drawer.id: 50},
+        )
+
+    @override_settings(SKETCHIT_ROUND_DURATION_SECONDS=90)
+    def test_time_based_scoring_hits_minimum_boundary_at_deadline(self):
+        round_start = timezone.now()
+        self._set_round_start(round_start)
+        accepted_at = round_start + timedelta(seconds=90)
+
+        with patch("games.services.timezone.now", return_value=accepted_at):
+            result = evaluate_guess_for_round(self.round, self.guesser, "rocket")
+
+        self.drawer.refresh_from_db()
+        self.guesser.refresh_from_db()
+
+        self.assertTrue(result.is_correct)
+        self.assertEqual(self.guesser.current_score, 20)
+        self.assertEqual(self.drawer.current_score, 10)
+        self.assertEqual(
+            self._score_map(result),
+            {self.guesser.id: 20, self.drawer.id: 10},
+        )
+
+    @override_settings(SKETCHIT_ROUND_DURATION_SECONDS=90)
+    def test_time_based_scoring_clamps_to_minimum_after_deadline(self):
+        round_start = timezone.now()
+        self._set_round_start(round_start)
+        accepted_at = round_start + timedelta(seconds=95)
+
+        with patch("games.services.timezone.now", return_value=accepted_at):
+            result = evaluate_guess_for_round(self.round, self.guesser, "rocket")
+
+        self.drawer.refresh_from_db()
+        self.guesser.refresh_from_db()
+
+        self.assertTrue(result.is_correct)
+        self.assertEqual(self.guesser.current_score, 20)
+        self.assertEqual(self.drawer.current_score, 10)
+        self.assertEqual(
+            self._score_map(result),
+            {self.guesser.id: 20, self.drawer.id: 10},
+        )
+
+    @override_settings(SKETCHIT_ROUND_DURATION_SECONDS=120)
+    def test_time_based_scoring_uses_configured_round_duration(self):
+        round_start = timezone.now()
+        self._set_round_start(round_start)
+        accepted_at = round_start + timedelta(seconds=30)
+
+        with patch("games.services.timezone.now", return_value=accepted_at):
+            result = evaluate_guess_for_round(self.round, self.guesser, "rocket")
+
+        self.drawer.refresh_from_db()
+        self.guesser.refresh_from_db()
+
+        self.assertTrue(result.is_correct)
+        self.assertEqual(self.guesser.current_score, 80)
+        self.assertEqual(self.drawer.current_score, 40)
+        self.assertEqual(
+            self._score_map(result),
+            {self.guesser.id: 80, self.drawer.id: 40},
+        )
+
+    @override_settings(
+        SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True,
+        SKETCHIT_ROUND_DURATION_SECONDS=90,
+    )
+    def test_runtime_turn_state_deadline_is_used_for_scoring(self):
+        fake_redis = fakeredis.FakeRedis()
+        accepted_at = timezone.now()
+        self._set_round_start(accepted_at - timedelta(seconds=200))
+        runtime_deadline = accepted_at + timedelta(seconds=45)
+        game_redis.set_turn_state(
+            fake_redis,
+            self.room.join_code,
+            {
+                "phase": "round",
+                "round_id": str(self.round.id),
+                "eligible_guesser_ids": json.dumps([self.guesser.id]),
+                "correct_guesser_ids": json.dumps([]),
+            },
+        )
+        game_redis.update_turn_state_fields(
+            fake_redis,
+            self.room.join_code,
+            {"deadline_at": runtime_deadline.isoformat()},
+        )
+
+        with patch("games.runtime.get_redis_client", return_value=fake_redis):
+            with patch("games.services.timezone.now", return_value=accepted_at):
+                result = evaluate_guess_for_round(self.round, self.guesser, "rocket")
+
+        self.drawer.refresh_from_db()
+        self.guesser.refresh_from_db()
+
+        self.assertTrue(result.is_correct)
+        self.assertEqual(self.guesser.current_score, 60)
+        self.assertEqual(self.drawer.current_score, 30)
+        self.assertEqual(
+            self._score_map(result),
+            {self.guesser.id: 60, self.drawer.id: 30},
+        )
+
+    @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)
+    def test_runtime_deadline_lookup_returns_none_on_redis_errors(self):
+        for raised_error in (RedisError("redis unavailable"), OSError("socket failure")):
+            with self.subTest(error_type=type(raised_error).__name__):
+                with patch("games.runtime.get_redis_client", return_value=object()):
+                    with patch(
+                        "games.services.game_redis.get_turn_state",
+                        side_effect=raised_error,
+                    ):
+                        self.assertIsNone(
+                            game_services._runtime_round_deadline_for_scoring(self.round)
+                        )
+
+    @override_settings(
+        SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True,
+        SKETCHIT_ROUND_DURATION_SECONDS=90,
+    )
+    def test_runtime_deadline_lookup_failure_falls_back_to_started_at_formula(self):
+        round_start = timezone.now()
+        self._set_round_start(round_start)
+        accepted_at = round_start + timedelta(seconds=45)
+
+        with patch("games.runtime.get_redis_client", return_value=object()):
+            with patch(
+                "games.services.game_redis.get_turn_state",
+                side_effect=RedisError("redis unavailable"),
+            ):
+                with patch("games.runtime.mark_guesser_correct", return_value=False):
+                    with patch(
+                        "games.runtime.get_round_correctness_state",
+                        return_value=None,
+                    ):
+                        with patch("games.services.timezone.now", return_value=accepted_at):
+                            result = evaluate_guess_for_round(self.round, self.guesser, "rocket")
+
+        self.drawer.refresh_from_db()
+        self.guesser.refresh_from_db()
+
+        self.assertTrue(result.is_correct)
+        self.assertEqual(self.guesser.current_score, 60)
+        self.assertEqual(self.drawer.current_score, 30)
+        self.assertEqual(
+            self._score_map(result),
+            {self.guesser.id: 60, self.drawer.id: 30},
+        )
+
+    def test_correct_guess_with_no_drawer_participant_awards_only_guesser(self):
+        self.round.drawer_participant = None
+        self.round.save(update_fields=("drawer_participant", "updated_at"))
+
+        round_start = timezone.now()
+        self._set_round_start(round_start)
+        with patch("games.services.timezone.now", return_value=round_start):
+            result = evaluate_guess_for_round(self.round, self.guesser, "rocket")
+
+        self.drawer.refresh_from_db()
+        self.guesser.refresh_from_db()
+
+        self.assertTrue(result.is_correct)
+        self.assertFalse(result.round_completed_now)
+        self.assertEqual(self.guesser.current_score, 100)
+        self.assertEqual(self.drawer.current_score, 0)
+        self.assertEqual(self._score_map(result), {self.guesser.id: 100})
 
     def test_evaluate_guess_incorrect_payload(self):
         result = evaluate_guess_for_round(self.round, self.guesser, "wrong")
