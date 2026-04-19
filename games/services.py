@@ -121,6 +121,7 @@ def _normalize_guess_text(value: str) -> str:
 
 
 def _round_duration_seconds() -> float:
+    """Return validated round duration seconds from settings."""
     try:
         configured_duration = float(
             getattr(settings, "SKETCHIT_ROUND_DURATION_SECONDS", 90)
@@ -131,6 +132,7 @@ def _round_duration_seconds() -> float:
 
 
 def _parse_iso_datetime(value: str | None) -> datetime | None:
+    """Parse an aware ISO timestamp string and return None on invalid input."""
     if not value:
         return None
     try:
@@ -144,6 +146,7 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
 
 
 def _runtime_round_deadline_for_scoring(locked_round: Round) -> datetime | None:
+    """Read live round deadline from runtime turn-state when available."""
     if not _runtime_coordinator_enabled():
         return None
 
@@ -165,9 +168,10 @@ def _runtime_round_deadline_for_scoring(locked_round: Round) -> datetime | None:
 
 
 def _bounded_linear_score(*, minimum: int, maximum: int, ratio: float) -> int:
+    """Map a normalized ratio to a rounded linear score within configured bounds."""
     bounded_ratio = min(1.0, max(0.0, ratio))
     unbounded_score = minimum + bounded_ratio * (maximum - minimum)
-    return min(maximum, max(minimum, int(round(unbounded_score))))
+    return int(round(unbounded_score))
 
 
 def _time_based_scores_for_correct_guess(
@@ -175,6 +179,7 @@ def _time_based_scores_for_correct_guess(
     locked_round: Round,
     accepted_at: datetime,
 ) -> tuple[int, int]:
+    """Compute guesser and drawer scores based on accepted guess time."""
     round_duration_seconds = _round_duration_seconds()
     round_duration_ms = max(1.0, round_duration_seconds * 1000.0)
 
@@ -598,9 +603,10 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
     guess.is_correct = True
     guess.save(update_fields=["is_correct", "updated_at"])
 
+    accepted_at = timezone.now()
     guesser_points, drawer_bonus = _time_based_scores_for_correct_guess(
         locked_round=locked_round,
-        accepted_at=timezone.now(),
+        accepted_at=accepted_at,
     )
     score_deltas_by_participant_id = {
         guessing_player.id: guesser_points,
@@ -627,7 +633,7 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
     round_completed_now = False
     if all_eligible_guessers_correct:
         locked_round.status = RoundStatus.COMPLETED
-        locked_round.ended_at = timezone.now()
+        locked_round.ended_at = accepted_at
         locked_round.save(update_fields=["status", "ended_at", "updated_at"])
         round_completed_now = True
         _handle_round_completed(locked_round, completion_reason="all_guessers_correct")
