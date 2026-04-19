@@ -62,10 +62,10 @@ def _mark_participant_connected(
     join_code: str,
     session_key: str,
     connection_id: str,
-) -> None:
+) -> bool:
     """Delegate socket-connect lifecycle updates to the room service."""
 
-    connect_participant(
+    return connect_participant(
         redis_client=get_redis_client(),
         player_id=player_id,
         join_code=join_code,
@@ -136,6 +136,35 @@ def _get_runtime_sync_events(join_code: str, player_id: int) -> list[dict]:
     return game_runtime.get_sync_events_for_player(join_code, player_id)
 
 
+@database_sync_to_async
+def _get_connected_peer_ids(room_id: int, player_id: int) -> list[int]:
+    """Return other currently connected participant ids for one room."""
+
+    return list(
+        Player.objects.filter(
+            room_id=room_id,
+            connection_status=Player.ConnectionStatus.CONNECTED,
+        )
+        .exclude(pk=player_id)
+        .order_by("created_at", "id")
+        .values_list("id", flat=True)
+    )
+
+
+@database_sync_to_async
+def _get_initial_room_state_event(room_id: int) -> dict:
+    """Return the direct A-06 ``room.state`` snapshot for one socket connect.
+
+    Reusing the room-service event builder keeps the direct post-connect
+    snapshot identical to the room-group broadcasts used for later lobby
+    updates.
+    """
+
+    from rooms.services import _build_room_state_event
+
+    return _build_room_state_event(room_id=room_id)
+
+
 class RoomConsumer(AsyncJsonWebsocketConsumer):
     """Session-aware WebSocket consumer for a single room.
 
@@ -176,12 +205,11 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         self.player_group: str = _player_group_name(self.join_code, self.player.id)
         self.session_key: str = session_key
 
-        # Group membership controls future fan-out delivery. The lifecycle
-        # service call below is the separate step that marks the participant as
-        # connected in Redis/MySQL.
-        await self.channel_layer.group_add(self.room_group, self.channel_name)
-        await self.channel_layer.group_add(self.player_group, self.channel_name)
-        await _mark_participant_connected(
+        # The lifecycle service call below marks the participant connected in
+        # Redis/MySQL and may schedule a room-wide ``room.state`` broadcast.
+        # We therefore wait to join the room group until after ``accept()`` and
+        # use the returned flag to broadcast only to already-connected peers.
+        connection_state_changed = await _mark_participant_connected(
             self.player.id,
             self.join_code,
             self.session_key,
@@ -189,11 +217,39 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         )
         await self.accept()
 
+        # The socket must be accepted before we try to send frames back to the
+        # browser; the direct snapshot therefore belongs after ``accept()``.
+        #
+        # This direct send is separate from room-group fan-out because the
+        # connecting client must not depend on timing of any room-wide
+        # broadcast to receive its initial authoritative lobby state.
+        initial_room_state_event = await _get_initial_room_state_event(self.room.id)
+        await self.send_json(initial_room_state_event)
+
+        await self.channel_layer.group_add(self.room_group, self.channel_name)
+        await self.channel_layer.group_add(self.player_group, self.channel_name)
+
+        if connection_state_changed:
+            # Existing peers still need the connect/reconnect ``room.state``
+            # update, but the connecting client already received the same
+            # snapshot directly above. Fan-out via each peer's player group so
+            # the newly connected socket is fully subscribed before connect()
+            # returns without receiving a duplicate lobby snapshot.
+            for peer_id in await _get_connected_peer_ids(self.room.id, self.player.id):
+                await self.channel_layer.group_send(
+                    _player_group_name(self.join_code, peer_id),
+                    {
+                        "type": "room.server_event",
+                        "event": initial_room_state_event,
+                    },
+                )
+
         # Send canvas snapshot first, then round state
         await self._send_initial_canvas_snapshot()
 
         # A reconnecting/late-joining client needs an immediate phase snapshot
-        # so timer UI does not depend on waiting for the next periodic tick.
+        # after the lobby snapshot so timer UI does not depend on waiting for
+        # the next periodic tick.
         for event in await _get_runtime_sync_events(self.join_code, self.player.id):
             await self.send_json(event)
 
@@ -351,7 +407,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         client = get_redis_client()
         turn_state = await database_sync_to_async(game_redis.get_turn_state)(client, self.join_code)
         round_id_str = turn_state.get("round_id")
-        
+
         if not round_id_str:
             await self.send_json({
                 "type": "guess.error",
@@ -389,7 +445,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             evaluation_result = await database_sync_to_async(game_services.evaluate_guess_for_round)(
                 active_round, self.player, guess_text
             )
-            
+
             # 4. Broadcast result to all participants
             await self.channel_layer.group_send(
                 self.room_group,

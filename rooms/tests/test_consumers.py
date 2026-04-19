@@ -26,6 +26,7 @@ from channels.layers import get_channel_layer
 from channels.routing import URLRouter
 from channels.testing import WebsocketCommunicator
 from django.contrib.sessions.backends.db import SessionStore
+from django.test import Client
 from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 
@@ -35,6 +36,7 @@ from games.models import Round
 from games.services import evaluate_guess_for_round, start_game_for_room
 from rooms.consumers import _room_group_name
 from rooms.models import Player, Room
+from rooms.services import leave_participant
 from words.models import Word, WordPack, WordPackEntry
 
 # ---------------------------------------------------------------------------
@@ -118,6 +120,29 @@ def _end_round_by_correct_guess(round_id: int) -> None:
     evaluate_guess_for_round(round, guesser, round.selected_game_word.text)
 
 
+@database_sync_to_async
+def _leave_room_member(*, redis_client, player_id: int) -> None:
+    """Trigger the permanent leave lifecycle from the room service."""
+
+    leave_participant(
+        redis_client=redis_client,
+        player_id=player_id,
+    )
+
+
+@database_sync_to_async
+def _join_room_via_http(*, join_code: str, display_name: str) -> tuple[int, bytes]:
+    """Join a room through the sync Django test client from an async test."""
+
+    client = Client()
+    response = client.post(
+        f"/rooms/{join_code}/join/",
+        data=json.dumps({"display_name": display_name}),
+        content_type="application/json",
+    )
+    return response.status_code, response.content
+
+
 # ---------------------------------------------------------------------------
 # Test cases
 # ---------------------------------------------------------------------------
@@ -149,17 +174,17 @@ class RoomConsumerConnectTests(TransactionTestCase):
             visibility=Room.Visibility.PRIVATE,
             word_pack=self.word_pack,
         )
-
-        # Use the HTTP test client to create a real Django session so we can
-        # pass the session cookie to the WebSocket communicator.
-        response = self.client.post(
-            f"/rooms/{self.room.join_code}/join/",
-            data=json.dumps({"display_name": "Alice"}),
-            content_type="application/json",
+        session = SessionStore()
+        session.save()
+        self.session_key = session.session_key
+        self.player = Player.objects.create(
+            room=self.room,
+            session_key=self.session_key,
+            display_name="Alice",
+            session_expires_at=session.get_expiry_date(),
         )
-        self.assertEqual(response.status_code, 201, response.content)
-        self.session_key = self.client.session.session_key
-        self.player = Player.objects.get(room=self.room, session_key=self.session_key)
+        self.room.host = self.player
+        self.room.save(update_fields=["host", "updated_at"])
 
     def tearDown(self):
         async_to_sync(self.channel_layer.flush)()
@@ -178,14 +203,28 @@ class RoomConsumerConnectTests(TransactionTestCase):
                 return event
         self.fail(f"Did not receive expected event type '{event_type}'.")
 
+    async def _connect_and_receive_initial_room_state(
+        self,
+        communicator,
+        *,
+        drain_duplicate_room_states: bool = False,
+    ):
+        connected, _ = await communicator.connect()
+        self.assertTrue(connected)
+        room_state = await self._receive_until_type(communicator, "room.state")
+        self.assertEqual(room_state["payload"]["room"]["join_code"], self.room.join_code)
+        return room_state
+
     async def test_connect_accepts_valid_room_member(self):
         communicator = WebsocketCommunicator(
             _TEST_APP,
             _ws_url(self.room.join_code),
             headers=_session_headers(self.session_key),
         )
-        connected, _ = await communicator.connect()
-        self.assertTrue(connected)
+        await self._connect_and_receive_initial_room_state(
+            communicator,
+            drain_duplicate_room_states=True,
+        )
         await communicator.disconnect()
 
     async def test_connect_adds_socket_to_room_group(self):
@@ -194,9 +233,10 @@ class RoomConsumerConnectTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.session_key),
         )
-        connected, _ = await communicator.connect()
-
-        self.assertTrue(connected)
+        await self._connect_and_receive_initial_room_state(
+            communicator,
+            drain_duplicate_room_states=True,
+        )
         self.assertEqual(
             len(self._group_members(_room_group_name(self.room.join_code))),
             1,
@@ -243,8 +283,10 @@ class RoomConsumerConnectTests(TransactionTestCase):
             _ws_url(lower_code),
             headers=_session_headers(self.session_key),
         )
-        connected, _ = await communicator.connect()
-        self.assertTrue(connected)
+        await self._connect_and_receive_initial_room_state(
+            communicator,
+            drain_duplicate_room_states=True,
+        )
         await communicator.disconnect()
 
     async def test_multiple_room_members_share_the_same_group(self):
@@ -261,11 +303,14 @@ class RoomConsumerConnectTests(TransactionTestCase):
             headers=_session_headers(second_session_key),
         )
 
-        first_connected, _ = await first.connect()
-        second_connected, _ = await second.connect()
-
-        self.assertTrue(first_connected)
-        self.assertTrue(second_connected)
+        await self._connect_and_receive_initial_room_state(
+            first,
+            drain_duplicate_room_states=True,
+        )
+        await self._connect_and_receive_initial_room_state(
+            second,
+            drain_duplicate_room_states=True,
+        )
         self.assertEqual(
             len(self._group_members(_room_group_name(self.room.join_code))),
             2,
@@ -280,8 +325,10 @@ class RoomConsumerConnectTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.session_key),
         )
-        connected, _ = await communicator.connect()
-        self.assertTrue(connected)
+        await self._connect_and_receive_initial_room_state(
+            communicator,
+            drain_duplicate_room_states=True,
+        )
         self.assertEqual(
             len(self._group_members(_room_group_name(self.room.join_code))),
             1,
@@ -304,8 +351,14 @@ class RoomConsumerConnectTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.session_key),
         )
-        connected, _ = await communicator.connect()
-        self.assertTrue(connected)
+        room_state = await self._connect_and_receive_initial_room_state(
+            communicator,
+            drain_duplicate_room_states=True,
+        )
+        self.assertEqual(
+            room_state["payload"]["participants"][0]["connection_status"],
+            Player.ConnectionStatus.CONNECTED,
+        )
 
         # Check DB update
         await database_sync_to_async(self.player.refresh_from_db)()
@@ -346,10 +399,14 @@ class RoomConsumerConnectTests(TransactionTestCase):
             headers=_session_headers(second_session_key),
         )
 
-        host_connected, _ = await host_socket.connect()
-        member_connected, _ = await member_socket.connect()
-        self.assertTrue(host_connected)
-        self.assertTrue(member_connected)
+        await self._connect_and_receive_initial_room_state(
+            host_socket,
+            drain_duplicate_room_states=True,
+        )
+        await self._connect_and_receive_initial_room_state(
+            member_socket,
+            drain_duplicate_room_states=True,
+        )
 
         await host_socket.disconnect()
 
@@ -365,8 +422,10 @@ class RoomConsumerConnectTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.session_key),
         )
-        connected, _ = await first_socket.connect()
-        self.assertTrue(connected)
+        await self._connect_and_receive_initial_room_state(
+            first_socket,
+            drain_duplicate_room_states=True,
+        )
 
         original_player_id = self.player.id
 
@@ -382,8 +441,10 @@ class RoomConsumerConnectTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.session_key),
         )
-        reconnected, _ = await second_socket.connect()
-        self.assertTrue(reconnected)
+        await self._connect_and_receive_initial_room_state(
+            second_socket,
+            drain_duplicate_room_states=True,
+        )
 
         refreshed_player = await database_sync_to_async(Player.objects.get)(
             room=self.room,
@@ -411,10 +472,14 @@ class RoomConsumerConnectTests(TransactionTestCase):
             headers=_session_headers(self.session_key),
         )
 
-        first_connected, _ = await first.connect()
-        second_connected, _ = await second.connect()
-        self.assertTrue(first_connected)
-        self.assertTrue(second_connected)
+        await self._connect_and_receive_initial_room_state(
+            first,
+            drain_duplicate_room_states=True,
+        )
+        await self._connect_and_receive_initial_room_state(
+            second,
+            drain_duplicate_room_states=True,
+        )
 
         await first.disconnect()
 
@@ -453,11 +518,13 @@ class RoomConsumerConnectTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.session_key),
         )
-        connected, _ = await communicator.connect()
-        self.assertTrue(connected)
+        await self._connect_and_receive_initial_room_state(
+            communicator,
+            drain_duplicate_room_states=True,
+        )
 
         await communicator.send_json_to({"type": "echo", "message": "hello world"})
-        response = await communicator.receive_json_from()
+        response = await self._receive_until_type(communicator, "echo_reply")
         
         self.assertEqual(response["type"], "echo_reply")
         self.assertEqual(response["message"], "Echo: hello world")
@@ -470,8 +537,10 @@ class RoomConsumerConnectTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.session_key),
         )
-        connected, _ = await communicator.connect()
-        self.assertTrue(connected)
+        await self._connect_and_receive_initial_room_state(
+            communicator,
+            drain_duplicate_room_states=True,
+        )
 
         event_payload = {
             "type": "round.timer",
@@ -488,7 +557,7 @@ class RoomConsumerConnectTests(TransactionTestCase):
             },
         )
 
-        forwarded = await communicator.receive_json_from()
+        forwarded = await self._receive_until_type(communicator, "round.timer")
         self.assertEqual(forwarded, event_payload)
 
         await communicator.disconnect()
@@ -506,8 +575,7 @@ class RoomConsumerConnectTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.session_key),
         )
-        connected, _ = await communicator.connect()
-        self.assertTrue(connected)
+        await self._connect_and_receive_initial_room_state(communicator)
 
         await _start_game(self.room.id)
 
@@ -543,8 +611,7 @@ class RoomConsumerConnectTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.session_key),
         )
-        connected, _ = await initial_socket.connect()
-        self.assertTrue(connected)
+        await self._connect_and_receive_initial_room_state(initial_socket)
 
         first_round_id = await _start_game(self.room.id)
         await self._receive_until_type(initial_socket, "round.started")
@@ -557,8 +624,7 @@ class RoomConsumerConnectTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.session_key),
         )
-        reconnected, _ = await reconnect_socket.connect()
-        self.assertTrue(reconnected)
+        await self._connect_and_receive_initial_room_state(reconnect_socket)
 
         round_state = await self._receive_until_type(reconnect_socket, "round.state")
         self.assertEqual(round_state["payload"]["phase"], "intermission")
@@ -566,6 +632,261 @@ class RoomConsumerConnectTests(TransactionTestCase):
         self.assertIn("server_timestamp", round_state["payload"])
 
         await reconnect_socket.disconnect()
+
+    async def test_connect_sends_initial_room_state_snapshot(self):
+        communicator = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+
+        room_state = await self._connect_and_receive_initial_room_state(
+            communicator,
+            drain_duplicate_room_states=True,
+        )
+
+        self.assertEqual(room_state["type"], "room.state")
+        self.assertEqual(
+            room_state["payload"]["room"],
+            {
+                "name": self.room.name,
+                "join_code": self.room.join_code,
+                "visibility": self.room.visibility,
+                "status": self.room.status,
+            },
+        )
+        self.assertEqual(
+            room_state["payload"]["host"],
+            {
+                "id": self.player.id,
+                "display_name": self.player.display_name,
+            },
+        )
+        self.assertEqual(
+            room_state["payload"]["participants"],
+            [
+                {
+                    "id": self.player.id,
+                    "display_name": self.player.display_name,
+                    "connection_status": Player.ConnectionStatus.CONNECTED,
+                    "participation_status": self.player.participation_status,
+                }
+            ],
+        )
+
+        await communicator.disconnect()
+
+    async def test_http_join_broadcasts_room_state_to_connected_peers(self):
+        communicator = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        await self._connect_and_receive_initial_room_state(
+            communicator,
+            drain_duplicate_room_states=True,
+        )
+
+        status_code, response_content = await _join_room_via_http(
+            join_code=self.room.join_code,
+            display_name="Bob",
+        )
+        self.assertEqual(status_code, 201, response_content)
+
+        room_state = await self._receive_until_type(communicator, "room.state")
+        participant_names = [
+            participant["display_name"]
+            for participant in room_state["payload"]["participants"]
+        ]
+        self.assertEqual(participant_names, ["Alice", "Bob"])
+        self.assertEqual(
+            room_state["payload"]["participants"][1]["connection_status"],
+            Player.ConnectionStatus.DISCONNECTED,
+        )
+
+        await communicator.disconnect()
+
+    async def test_disconnect_broadcasts_room_state_with_disconnected_status(self):
+        second_session_key = await _create_room_member(self.room.id, "Bob")
+        first_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        second_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(second_session_key),
+        )
+
+        await self._connect_and_receive_initial_room_state(
+            first_socket,
+            drain_duplicate_room_states=True,
+        )
+        await self._connect_and_receive_initial_room_state(
+            second_socket,
+            drain_duplicate_room_states=True,
+        )
+        await self._receive_until_type(first_socket, "room.state")
+
+        await second_socket.disconnect()
+
+        room_state = await self._receive_until_type(first_socket, "room.state")
+        bob_participant = next(
+            participant
+            for participant in room_state["payload"]["participants"]
+            if participant["display_name"] == "Bob"
+        )
+        self.assertEqual(
+            bob_participant["connection_status"],
+            Player.ConnectionStatus.DISCONNECTED,
+        )
+
+        await first_socket.disconnect()
+
+    async def test_reconnect_broadcasts_room_state_with_connected_status(self):
+        second_session_key = await _create_room_member(self.room.id, "Bob")
+        first_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        second_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(second_session_key),
+        )
+
+        await self._connect_and_receive_initial_room_state(
+            first_socket,
+            drain_duplicate_room_states=True,
+        )
+        await self._connect_and_receive_initial_room_state(
+            second_socket,
+            drain_duplicate_room_states=True,
+        )
+        await self._receive_until_type(first_socket, "room.state")
+
+        await second_socket.disconnect()
+        await self._receive_until_type(first_socket, "room.state")
+
+        reconnect_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(second_session_key),
+        )
+        await self._connect_and_receive_initial_room_state(
+            reconnect_socket,
+            drain_duplicate_room_states=True,
+        )
+
+        room_state = await self._receive_until_type(first_socket, "room.state")
+        bob_participant = next(
+            participant
+            for participant in room_state["payload"]["participants"]
+            if participant["display_name"] == "Bob"
+        )
+        self.assertEqual(
+            bob_participant["connection_status"],
+            Player.ConnectionStatus.CONNECTED,
+        )
+
+        await reconnect_socket.disconnect()
+        await first_socket.disconnect()
+
+    async def test_second_socket_for_same_session_does_not_broadcast_room_state_to_peers(self):
+        second_session_key = await _create_room_member(self.room.id, "Bob")
+        alice_primary_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        bob_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(second_session_key),
+        )
+
+        await self._connect_and_receive_initial_room_state(
+            alice_primary_socket,
+            drain_duplicate_room_states=True,
+        )
+        await self._connect_and_receive_initial_room_state(
+            bob_socket,
+            drain_duplicate_room_states=True,
+        )
+        await self._receive_until_type(alice_primary_socket, "room.state")
+
+        alice_second_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        await self._connect_and_receive_initial_room_state(
+            alice_second_socket,
+            drain_duplicate_room_states=True,
+        )
+
+        self.assertTrue(await bob_socket.receive_nothing(timeout=0.2))
+
+        await alice_second_socket.disconnect()
+        await bob_socket.disconnect()
+        await alice_primary_socket.disconnect()
+
+    async def test_host_leave_broadcasts_host_changed_then_room_state(self):
+        second_session_key = await _create_room_member(self.room.id, "Bob")
+        bob_player = await database_sync_to_async(Player.objects.get)(
+            room=self.room,
+            session_key=second_session_key,
+        )
+        bob_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(second_session_key),
+        )
+
+        await self._connect_and_receive_initial_room_state(
+            bob_socket,
+            drain_duplicate_room_states=True,
+        )
+
+        await _leave_room_member(
+            redis_client=self.fake_redis,
+            player_id=self.player.id,
+        )
+
+        host_changed = await bob_socket.receive_json_from(timeout=1)
+        self.assertEqual(host_changed["type"], "host.changed")
+        self.assertEqual(
+            host_changed["payload"]["host"],
+            {
+                "id": bob_player.id,
+                "display_name": bob_player.display_name,
+            },
+        )
+
+        room_state = await bob_socket.receive_json_from(timeout=1)
+        self.assertEqual(room_state["type"], "room.state")
+        self.assertEqual(
+            room_state["payload"]["host"],
+            {
+                "id": bob_player.id,
+                "display_name": bob_player.display_name,
+            },
+        )
+        self.assertEqual(
+            room_state["payload"]["participants"],
+            [
+                {
+                    "id": bob_player.id,
+                    "display_name": bob_player.display_name,
+                    "connection_status": Player.ConnectionStatus.CONNECTED,
+                    "participation_status": bob_player.participation_status,
+                }
+            ],
+        )
+
+        await bob_socket.disconnect()
 
 
 class RoomGroupNameTests(TransactionTestCase):
