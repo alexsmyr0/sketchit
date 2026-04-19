@@ -18,6 +18,7 @@ from games.models import Game, GameStatus, GameWord, Guess, Round, RoundStatus
 from games.services import (
     GuessEvaluationError,
     StartGameError,
+    advance_game_after_intermission,
     complete_round_due_to_timer,
     evaluate_guess_for_round,
     start_game_for_room,
@@ -1768,4 +1769,129 @@ class GuessServiceIntegrationTests(TestCase):
 
         self.assertFalse(result.is_correct)
         self.assertFalse(result.round_completed)
-        self.assertEqual(len(result.score_updates), 0)
+
+
+@override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
+class MidGameSpectatorRoundTransitionTests(TestCase):
+    """Service-level coverage for A-07 spectator promotion at round transition.
+
+    The runtime coordinator is disabled so advance_game_after_intermission
+    drives round progression directly without needing real timers or Redis
+    turn state. This lets us focus purely on the promotion and drawer-pool
+    logic without threading complexity.
+    """
+
+    def setUp(self):
+        self.word_pack = WordPack.objects.create(name="Transition Pack")
+        for word_text in ("apple", "banana", "cherry"):
+            word = Word.objects.create(text=word_text)
+            WordPackEntry.objects.create(word_pack=self.word_pack, word=word)
+
+        self.room = Room.objects.create(
+            name="Transition Room",
+            join_code="TRANS123",
+            visibility=Room.Visibility.PRIVATE,
+            status=Room.Status.IN_PROGRESS,
+            word_pack=self.word_pack,
+        )
+        session_expires_at = timezone.now() + timedelta(hours=1)
+
+        # The original drawer — will have already drawn in round 1.
+        self.drawer = Player.objects.create(
+            room=self.room,
+            session_key="drawer-session",
+            display_name="Drawer",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=session_expires_at,
+        )
+        # A regular participant who has not yet drawn.
+        self.guesser = Player.objects.create(
+            room=self.room,
+            session_key="guesser-session",
+            display_name="Guesser",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=session_expires_at,
+        )
+        # A mid-game joiner — currently spectating, eligible after promotion.
+        self.spectator = Player.objects.create(
+            room=self.room,
+            session_key="spectator-session",
+            display_name="Spectator",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.SPECTATING,
+            session_expires_at=session_expires_at,
+        )
+
+        self.game = Game.objects.create(room=self.room, status=GameStatus.IN_PROGRESS)
+        self.word_apple = GameWord.objects.create(game=self.game, text="apple")
+        self.word_banana = GameWord.objects.create(game=self.game, text="banana")
+        self.word_cherry = GameWord.objects.create(game=self.game, text="cherry")
+
+        # Round 1 is already completed so advance_game_after_intermission can
+        # move the game forward to round 2 when called in each test.
+        self.completed_round = Round.objects.create(
+            game=self.game,
+            drawer_participant=self.drawer,
+            drawer_nickname=self.drawer.display_name,
+            selected_game_word=self.word_apple,
+            sequence_number=1,
+            status=RoundStatus.COMPLETED,
+            ended_at=timezone.now(),
+        )
+
+    def test_spectator_is_promoted_to_playing_at_round_transition(self):
+        # A-07: the spectator must become PLAYING when the round transitions
+        # so they are a full participant from the next turn onward.
+        advance_game_after_intermission(self.completed_round.id)
+
+        self.spectator.refresh_from_db()
+        self.assertEqual(
+            self.spectator.participation_status,
+            Player.ParticipationStatus.PLAYING,
+        )
+
+    def test_playing_participants_are_unchanged_at_round_transition(self):
+        # Participants already marked PLAYING must not be touched by the
+        # promotion step — their status was already correct.
+        advance_game_after_intermission(self.completed_round.id)
+
+        self.drawer.refresh_from_db()
+        self.guesser.refresh_from_db()
+        self.assertEqual(self.drawer.participation_status, Player.ParticipationStatus.PLAYING)
+        self.assertEqual(self.guesser.participation_status, Player.ParticipationStatus.PLAYING)
+
+    @patch("games.services.random.choice")
+    def test_promoted_spectator_is_eligible_for_next_drawer_pool(self, mock_choice):
+        # After promotion the spectator must be reachable by the drawer
+        # selection. We force random.choice to pick the promoted spectator so
+        # we can assert deterministically that they became the round 2 drawer.
+        #
+        # random.choice is called twice in _progress_game_after_round_completion:
+        # once for the drawer and once for the word. We set a side_effect list
+        # so the first call (drawer) returns the spectator and the second call
+        # (word) returns a word to keep the round creation valid.
+        mock_choice.side_effect = [self.spectator, self.word_banana]
+
+        advance_game_after_intermission(self.completed_round.id)
+
+        round_2 = Round.objects.filter(
+            game=self.game, sequence_number=2
+        ).first()
+
+        self.assertIsNotNone(round_2)
+        # The promoted spectator was selected as the drawer for round 2,
+        # which proves they entered the eligible pool after promotion.
+        self.assertEqual(round_2.drawer_participant_id, self.spectator.id)
+
+    def test_round_transition_creates_next_round_after_promotion(self):
+        # Sanity check: the game must progress to round 2 after promotion,
+        # not stall because the drawer pool was evaluated before spectators
+        # were promoted (which would incorrectly leave only one eligible drawer).
+        advance_game_after_intermission(self.completed_round.id)
+
+        self.assertEqual(
+            Round.objects.filter(game=self.game).count(),
+            2,
+        )

@@ -378,6 +378,15 @@ def _progress_game_after_round_completion(completed_round: Round) -> Round | Non
     if locked_game.status != GameStatus.IN_PROGRESS:
         return None
 
+    # A-07: spectators who joined mid-game must be promoted to PLAYING before
+    # we compute the next drawer pool. Promoting here — inside the same atomic
+    # transaction that picks the next drawer — guarantees the newly eligible
+    # players are always visible to _get_remaining_eligible_drawers without a
+    # separate read-after-write race. The lazy import avoids a circular
+    # dependency: rooms.services already imports from games at module level.
+    from rooms.services import promote_mid_game_spectators_to_players
+    promote_mid_game_spectators_to_players(room_id=locked_game.room_id)
+
     remaining_drawers = _get_remaining_eligible_drawers(locked_game)
     remaining_drawer_ids = [participant.id for participant in remaining_drawers]
     if not remaining_drawers:
