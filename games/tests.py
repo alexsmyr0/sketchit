@@ -434,6 +434,12 @@ class StartGameServiceTests(TestCase):
         self.assertSetEqual(drawer_pool, expected_remaining)
 
     def test_drawer_pool_updates_after_each_round_and_clears_on_game_finish(self):
+        # A-07: the SPECTATING participant created in setUp would be promoted to
+        # PLAYING at every round transition and would enter the drawer pool.
+        # This test only cares about the three PLAYING drawers (host, member,
+        # third_player), so drop the incidental spectator before starting the
+        # game to keep the drawer-pool math deterministic.
+        self.spectator.delete()
         third_player = Player.objects.create(
             room=self.room,
             session_key="third-drawer-pool-session",
@@ -484,6 +490,15 @@ class StartGameServiceTests(TestCase):
         self.assertSetEqual(drawer_pool_after_game_finished, set())
 
     def test_completed_round_creates_next_round_with_unused_drawer_and_word(self):
+        # A-07: the SPECTATING participant created in setUp would be promoted at
+        # the round transition and become a valid drawer candidate, which would
+        # make the "next drawer is host or member" assertion flaky. This test is
+        # only about the unused-drawer/unused-word invariant for the two PLAYING
+        # participants, so remove the incidental spectator first. Spectator
+        # promotion semantics are covered by MidGameSpectatorRoundTransitionTests.
+        spectator_id = self.spectator.id
+        self.spectator.delete()
+
         started_game = start_game_for_room(self.room)
         game = started_game.game
         first_round = started_game.first_round
@@ -501,10 +516,18 @@ class StartGameServiceTests(TestCase):
         self.assertIsNone(second_round.ended_at)
         self.assertNotEqual(second_round.drawer_participant_id, first_round.drawer_participant_id)
         self.assertIn(second_round.drawer_participant_id, {self.host.id, self.member.id})
-        self.assertNotEqual(second_round.drawer_participant_id, self.spectator.id)
+        self.assertNotEqual(second_round.drawer_participant_id, spectator_id)
         self.assertNotEqual(second_round.selected_game_word_id, first_round.selected_game_word_id)
 
     def test_game_finishes_after_each_eligible_drawer_draws_once(self):
+        # A-07: the SPECTATING participant created in setUp would be promoted at
+        # the round-1 transition and add a third eligible drawer, so the game
+        # would need three rounds to finish instead of two. This test is about
+        # the two-PLAYING-drawer case, so drop the incidental spectator first.
+        # Spectator promotion semantics are covered by
+        # MidGameSpectatorRoundTransitionTests.
+        self.spectator.delete()
+
         started_game = start_game_for_room(self.room)
         game = started_game.game
 
@@ -515,7 +538,6 @@ class StartGameServiceTests(TestCase):
         game.refresh_from_db()
         self.host.refresh_from_db()
         self.member.refresh_from_db()
-        self.spectator.refresh_from_db()
 
         self.assertEqual(game.status, GameStatus.FINISHED)
         self.assertIsNotNone(game.ended_at)
@@ -530,7 +552,6 @@ class StartGameServiceTests(TestCase):
         self.assertLessEqual(self.host.current_score, 150)
         self.assertGreaterEqual(self.member.current_score, 30)
         self.assertLessEqual(self.member.current_score, 150)
-        self.assertEqual(self.spectator.current_score, 0)
 
     def test_round_progression_never_repeats_drawers_or_words_within_game(self):
         third_player = Player.objects.create(
@@ -2038,3 +2059,32 @@ class MidGameSpectatorRoundTransitionTests(TestCase):
             Round.objects.filter(game=self.game).count(),
             2,
         )
+
+    def test_round_transition_schedules_room_state_broadcast_when_promotion_occurs(self):
+        # A-07 + A-06 integration: when the round transition promotes at least
+        # one spectator, a fresh room.state broadcast must be scheduled so
+        # clients update their lobby rendering. We patch the broadcast helper
+        # at its import site inside games.services so we can observe the call
+        # without touching the channel layer.
+        with patch(
+            "rooms.services.schedule_room_state_broadcast_after_commit",
+        ) as mock_broadcast:
+            advance_game_after_intermission(self.completed_round.id)
+
+        mock_broadcast.assert_called_once_with(
+            join_code=self.room.join_code,
+            room_id=self.room.id,
+        )
+
+    def test_round_transition_skips_broadcast_when_no_spectators_to_promote(self):
+        # Counterpart: if nobody needed to be promoted, the promotion helper
+        # returns 0 and we must NOT schedule a redundant room.state broadcast.
+        # Delete the lone spectator so the promotion finds no candidates.
+        self.spectator.delete()
+
+        with patch(
+            "rooms.services.schedule_room_state_broadcast_after_commit",
+        ) as mock_broadcast:
+            advance_game_after_intermission(self.completed_round.id)
+
+        mock_broadcast.assert_not_called()

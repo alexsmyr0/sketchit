@@ -384,8 +384,24 @@ def _progress_game_after_round_completion(completed_round: Round) -> Round | Non
     # players are always visible to _get_remaining_eligible_drawers without a
     # separate read-after-write race. The lazy import avoids a circular
     # dependency: rooms.services already imports from games at module level.
-    from rooms.services import promote_mid_game_spectators_to_players
-    promote_mid_game_spectators_to_players(room_id=locked_game.room_id)
+    from rooms.services import (
+        promote_mid_game_spectators_to_players,
+        schedule_room_state_broadcast_after_commit,
+    )
+    promoted_count = promote_mid_game_spectators_to_players(
+        room_id=locked_game.room_id,
+    )
+    if promoted_count > 0:
+        # A-06 is the authoritative source for lobby rendering. When
+        # participation_status flips for one or more players we must re-emit a
+        # room.state snapshot so connected clients stop showing the promoted
+        # participant as a spectator. Scheduling on commit ties the broadcast
+        # to the round-transition transaction so it only fires if the
+        # promotion actually persists.
+        schedule_room_state_broadcast_after_commit(
+            join_code=join_code,
+            room_id=locked_game.room_id,
+        )
 
     remaining_drawers = _get_remaining_eligible_drawers(locked_game)
     remaining_drawer_ids = [participant.id for participant in remaining_drawers]

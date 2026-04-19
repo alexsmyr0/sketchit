@@ -953,3 +953,43 @@ class PromoteMidGameSpectatorsServiceTests(TestCase):
         self.assertEqual(spectator_in_target.participation_status, Player.ParticipationStatus.PLAYING)
         # The other room's spectator is untouched.
         self.assertEqual(spectator_in_other.participation_status, Player.ParticipationStatus.SPECTATING)
+
+    def test_promote_mid_game_spectators_ignores_disconnected_spectators(self):
+        # A-07 safeguard: a DISCONNECTED spectator (e.g. a player who did an
+        # HTTP join but never opened a socket, or who dropped their
+        # connection while spectating) must NOT be silently promoted to
+        # PLAYING while they are offline. Promoting them would create a
+        # "ghost PLAYING" state where downstream code that combines
+        # participation_status with connection_status still filters them
+        # out but their stored status misrepresents their role. Keeping
+        # them in SPECTATING means they will be promoted naturally on the
+        # next round transition after they reconnect.
+        disconnected_spectator = Player.objects.create(
+            room=self.room,
+            session_key="session-disconnected-spec",
+            display_name="Disconnected Spectator",
+            participation_status=Player.ParticipationStatus.SPECTATING,
+            connection_status=Player.ConnectionStatus.DISCONNECTED,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        connected_spectator = self._make_player(
+            "session-connected-spec",
+            "Connected Spectator",
+            Player.ParticipationStatus.SPECTATING,
+        )
+
+        promoted_count = promote_mid_game_spectators_to_players(room_id=self.room.id)
+
+        disconnected_spectator.refresh_from_db()
+        connected_spectator.refresh_from_db()
+        # Only the connected spectator is promoted.
+        self.assertEqual(promoted_count, 1)
+        self.assertEqual(
+            connected_spectator.participation_status,
+            Player.ParticipationStatus.PLAYING,
+        )
+        # The disconnected spectator stays SPECTATING.
+        self.assertEqual(
+            disconnected_spectator.participation_status,
+            Player.ParticipationStatus.SPECTATING,
+        )

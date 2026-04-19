@@ -888,6 +888,77 @@ class RoomConsumerConnectTests(TransactionTestCase):
 
         await bob_socket.disconnect()
 
+    async def test_socket_reconnect_during_active_round_preserves_score(self):
+        # A-07 reconnect reclaim: a non-drawer who drops their socket mid-game
+        # and reconnects must land on the same Player row with their score
+        # intact. Losing the score on reconnect would punish anyone whose
+        # network blipped or whose tab refreshed during a round.
+        @database_sync_to_async
+        def _mark_game_in_progress_with_score():
+            self.player.current_score = 42
+            self.player.participation_status = Player.ParticipationStatus.PLAYING
+            self.player.save(
+                update_fields=[
+                    "current_score",
+                    "participation_status",
+                    "updated_at",
+                ],
+            )
+            self.room.status = Room.Status.IN_PROGRESS
+            self.room.save(update_fields=["status", "updated_at"])
+
+        await _mark_game_in_progress_with_score()
+        original_player_id = self.player.id
+
+        first_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        await self._connect_and_receive_initial_room_state(
+            first_socket,
+            drain_duplicate_room_states=True,
+        )
+
+        await first_socket.disconnect()
+
+        # Confirm the disconnect did not wipe the stored score.
+        await database_sync_to_async(self.player.refresh_from_db)()
+        self.assertEqual(self.player.current_score, 42)
+        self.assertEqual(
+            self.player.participation_status,
+            Player.ParticipationStatus.PLAYING,
+        )
+
+        reconnect_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        await self._connect_and_receive_initial_room_state(
+            reconnect_socket,
+            drain_duplicate_room_states=True,
+        )
+
+        refreshed_player = await database_sync_to_async(Player.objects.get)(
+            room=self.room,
+            session_key=self.session_key,
+        )
+        # Same DB row, same score, same participation_status after reconnect.
+        self.assertEqual(refreshed_player.id, original_player_id)
+        self.assertEqual(refreshed_player.current_score, 42)
+        self.assertEqual(
+            refreshed_player.participation_status,
+            Player.ParticipationStatus.PLAYING,
+        )
+        # And the reconnecting socket should now be back to CONNECTED.
+        self.assertEqual(
+            refreshed_player.connection_status,
+            Player.ConnectionStatus.CONNECTED,
+        )
+
+        await reconnect_socket.disconnect()
+
     async def test_spectator_cannot_submit_guess(self):
         # A-07: a mid-game joiner (SPECTATING) must receive a guess.error with
         # a clear message instead of having their guess evaluated or silently

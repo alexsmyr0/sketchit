@@ -661,13 +661,21 @@ def leave_participant(*, redis_client, player_id: int) -> None:
 
 
 def promote_mid_game_spectators_to_players(*, room_id: int) -> int:
-    """Promote all spectating participants in a room to playing status.
+    """Promote connected spectators in a room to playing status.
 
     Mid-game joiners are stored as SPECTATING so they cannot guess or draw
     during the turn they joined in (see A-07 in the join_room view). This
     function is called at each round transition — after one round ends and
     before the next drawer is chosen — so that waiting spectators graduate
     into the full eligible pool for the upcoming turn.
+
+    The CONNECTED filter avoids a "ghost PLAYING" state: a player who did an
+    HTTP join but never opened a socket (or who disconnected while spectating)
+    should not silently graduate to PLAYING while they are offline, because
+    downstream consumers combine ``participation_status=PLAYING`` with
+    ``connection_status=CONNECTED`` to decide eligibility. Keeping offline
+    spectators in SPECTATING also means they will be promoted naturally on a
+    later round transition once they reconnect.
 
     Using a bulk UPDATE rather than per-row saves is intentional: the caller
     (game services) already holds a lock on the game row inside a transaction,
@@ -680,6 +688,7 @@ def promote_mid_game_spectators_to_players(*, room_id: int) -> int:
     promoted_count = Player.objects.filter(
         room_id=room_id,
         participation_status=Player.ParticipationStatus.SPECTATING,
+        connection_status=Player.ConnectionStatus.CONNECTED,
     ).update(
         participation_status=Player.ParticipationStatus.PLAYING,
         updated_at=timezone.now(),
