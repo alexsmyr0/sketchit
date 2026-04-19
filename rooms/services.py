@@ -658,3 +658,30 @@ def leave_participant(*, redis_client, player_id: int) -> None:
             redis_client=redis_client,
             room_id=room.id,
         )
+
+
+def promote_mid_game_spectators_to_players(*, room_id: int) -> int:
+    """Promote all spectating participants in a room to playing status.
+
+    Mid-game joiners are stored as SPECTATING so they cannot guess or draw
+    during the turn they joined in (see A-07 in the join_room view). This
+    function is called at each round transition — after one round ends and
+    before the next drawer is chosen — so that waiting spectators graduate
+    into the full eligible pool for the upcoming turn.
+
+    Using a bulk UPDATE rather than per-row saves is intentional: the caller
+    (game services) already holds a lock on the game row inside a transaction,
+    so individual row locks here would be redundant overhead.
+
+    Returns the number of participants that were promoted from SPECTATING to
+    PLAYING, which lets the caller log or assert the promotion if needed.
+    """
+
+    promoted_count = Player.objects.filter(
+        room_id=room_id,
+        participation_status=Player.ParticipationStatus.SPECTATING,
+    ).update(
+        participation_status=Player.ParticipationStatus.PLAYING,
+        updated_at=timezone.now(),
+    )
+    return promoted_count

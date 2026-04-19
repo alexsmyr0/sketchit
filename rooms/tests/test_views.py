@@ -454,6 +454,50 @@ class JoinRoomViewTests(TestCase):
         self.assertFalse(Room.objects.filter(pk=self.room.id).exists())
         self.assertEqual(Player.objects.count(), 0)
 
+    def test_join_room_in_progress_creates_player_as_spectator(self):
+        # A-07: a brand-new participant joining an in-progress room must be
+        # marked SPECTATING so they cannot guess or draw during the current
+        # turn. The next round transition will promote them to PLAYING.
+        existing_player = Player.objects.create(
+            room=self.room,
+            session_key="existing-session",
+            display_name="Existing",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        self.room.status = Room.Status.IN_PROGRESS
+        self.room.host = existing_player
+        self.room.save(update_fields=["status", "host", "updated_at"])
+
+        response = self.post_join_room()
+
+        self.assertEqual(response.status_code, 201)
+        # The new player (not the existing one) should have SPECTATING status.
+        new_player = Player.objects.exclude(pk=existing_player.pk).get()
+        self.assertEqual(
+            new_player.participation_status,
+            Player.ParticipationStatus.SPECTATING,
+        )
+        # The existing participant's status must not be disturbed.
+        existing_player.refresh_from_db()
+        self.assertEqual(
+            existing_player.participation_status,
+            Player.ParticipationStatus.PLAYING,
+        )
+
+    def test_join_room_in_lobby_creates_player_as_playing(self):
+        # A-07 counterpart: joining while the room is still in the lobby should
+        # keep the default PLAYING status so the player is immediately eligible
+        # to draw and guess when the host starts the game.
+        response = self.post_join_room()
+
+        self.assertEqual(response.status_code, 201)
+        player = Player.objects.get()
+        self.assertEqual(
+            player.participation_status,
+            Player.ParticipationStatus.PLAYING,
+        )
+
 
 class RoomLobbyStateViewTests(TestCase):
     def _ensure_session_key(self, client):

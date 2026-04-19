@@ -72,7 +72,7 @@ Use this as the default claim order for the next wave of work:
 - [x] **A-04** P1 - Host Reassignment & Participant Connection Lifecycle | Host handoff and participant connect/disconnect/leave state transitions. (Depends on: A-02) | Blocks: A-05; A-06; A-07; A-08
 - [x] **A-05** P1 - Empty-Room Grace Lifecycle | `10`-minute empty-room grace, resurrection, and hard-delete cleanup. (Depends on: N-01; A-04) | Blocks: A-08; G-06
 - [x] **A-06** P1 - Live Lobby State Broadcast | Authoritative `room.state` events and initial live lobby snapshots. (Depends on: A-04; N-02) | Blocks: G-02; G-03
-- [ ] **A-07** P3 - Mid-Game Joiners, Spectators, And Reconnect Reclaim | Spectator rules, next-turn eligibility, and reconnect score preservation. (Depends on: A-04; N-03; K-04) | Blocks: A-08; G-05
+- [x] **A-07** P3 - Mid-Game Joiners, Spectators, And Reconnect Reclaim | Spectator rules, next-turn eligibility, and reconnect score preservation. (Depends on: A-04; N-03; K-04) | Blocks: A-08; G-05
 - [-] **A-08** P3 - Game Finish, Leaderboard Cooldown, And Auto-Restart | End-of-game loop, leaderboard cooldown, and next-game restart policy. (Depends on: K-04; K-05; A-07; K-07) | Blocks: G-05; G-06
 
 ### Track K

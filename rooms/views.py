@@ -309,6 +309,13 @@ def join_room(request, join_code):
             )
 
         # No player exists for this session yet, so create a new participant row.
+        #
+        # A-07: players who join while a game is already in progress are not
+        # eligible to guess or draw for the current turn. Marking them as
+        # SPECTATING prevents the guess pipeline and drawer-pool logic from
+        # treating them as full participants until the next round transition
+        # promotes them to PLAYING.
+        joining_mid_game = room.status == Room.Status.IN_PROGRESS
         player = Player.objects.create(
             room=room,
             session_key=session_key,
@@ -316,6 +323,11 @@ def join_room(request, join_code):
             # Joining the room via HTTP alone should not count as live presence.
             connection_status=Player.ConnectionStatus.DISCONNECTED,
             session_expires_at=request.session.get_expiry_date(),
+            participation_status=(
+                Player.ParticipationStatus.SPECTATING
+                if joining_mid_game
+                else Player.ParticipationStatus.PLAYING
+            ),
         )
         # Empty-grace rooms have no active membership, so the first returning
         # participant must become the new host to make the lobby usable again.
