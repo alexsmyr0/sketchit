@@ -75,6 +75,17 @@ Implemented A05 empty-room grace: empty rooms now enter empty_grace, persist emp
 ## 12/04
 Graded N4 and N5 ticket for Nikos. There were critical bugs in both but after pointing them out, Nikos patched them up swiftly and I merged.
 
-# 13/04
+# 14/04
 Implemented A6. Implemented server-authoritative live lobby WebSocket updates by sending initial and change-driven room.state snapshots, plus host.changed on real host handoffs, for joins, leaves, disconnects, and reconnects.
+
+# 15/04
+Updated implementation documentation and issue-PR templates
+
+# 18/04
+Implemented A7 ticket which focused on Mid-game joiners handling and functionality 
+
+# 19/04
+Graded G2 and G3 implementation ticket by Nikos. There were a few critical bugs I uncovered and testing coverage limitations. After my review he patched them shortly.
+
+# 20/04
 
