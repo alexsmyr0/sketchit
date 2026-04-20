@@ -1757,6 +1757,7 @@ class GuessServiceIntegrationTests(TestCase):
 
         # Verify N-05 broadcast payload requirements
         self.assertTrue(result.is_correct)
+        self.assertEqual(result.outcome, game_services.GuessOutcome.CORRECT)
         self.assertTrue(result.round_completed)
         self.assertEqual(len(result.score_updates), 2)
 
@@ -1952,7 +1953,100 @@ class GuessServiceIntegrationTests(TestCase):
         result = evaluate_guess_for_round(self.round, self.guesser, "wrong")
 
         self.assertFalse(result.is_correct)
+        self.assertEqual(result.outcome, game_services.GuessOutcome.INCORRECT)
         self.assertFalse(result.round_completed)
+
+    def test_duplicate_guess_is_same_player_only(self):
+        session_expires_at = timezone.now() + timedelta(hours=1)
+        other_guesser = Player.objects.create(
+            room=self.room,
+            session_key="other-guesser-session",
+            display_name="Other Guesser",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=session_expires_at,
+        )
+
+        first_result = evaluate_guess_for_round(self.round, self.guesser, "planet")
+        duplicate_result = evaluate_guess_for_round(self.round, self.guesser, "  PLANET  ")
+        other_player_result = evaluate_guess_for_round(self.round, other_guesser, "planet")
+
+        self.assertEqual(first_result.outcome, game_services.GuessOutcome.INCORRECT)
+        self.assertEqual(duplicate_result.outcome, game_services.GuessOutcome.DUPLICATE)
+        self.assertFalse(duplicate_result.is_correct)
+        self.assertEqual(other_player_result.outcome, game_services.GuessOutcome.INCORRECT)
+
+    def test_multi_word_target_single_token_guess_is_near_match(self):
+        self.game_word.text = "new york city"
+        self.game_word.save(update_fields=("text", "updated_at"))
+
+        result = evaluate_guess_for_round(self.round, self.guesser, "york")
+
+        self.assertFalse(result.is_correct)
+        self.assertEqual(result.outcome, game_services.GuessOutcome.NEAR_MATCH)
+        self.assertEqual(result.score_updates, ())
+
+    def test_single_word_near_match_requires_strict_prefix_rule(self):
+        near_match_result = evaluate_guess_for_round(self.round, self.guesser, "roc")
+        short_prefix_result = evaluate_guess_for_round(self.round, self.guesser, "ro")
+
+        self.assertEqual(near_match_result.outcome, game_services.GuessOutcome.NEAR_MATCH)
+        self.assertEqual(short_prefix_result.outcome, game_services.GuessOutcome.INCORRECT)
+
+    def test_single_word_near_match_does_not_use_loose_fuzzy_matching(self):
+        result = evaluate_guess_for_round(self.round, self.guesser, "rcket")
+
+        self.assertFalse(result.is_correct)
+        self.assertEqual(result.outcome, game_services.GuessOutcome.INCORRECT)
+
+    def test_already_correct_repeat_guess_is_ignored_for_scoring_and_round_completion(self):
+        session_expires_at = timezone.now() + timedelta(hours=1)
+        second_guesser = Player.objects.create(
+            room=self.room,
+            session_key="second-guesser-session",
+            display_name="Second Guesser",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=session_expires_at,
+        )
+        round_start = timezone.now()
+        self._set_round_start(round_start)
+
+        with patch("games.services.timezone.now", return_value=round_start + timedelta(seconds=10)):
+            first_result = evaluate_guess_for_round(self.round, self.guesser, "rocket")
+        self.round.refresh_from_db()
+        self.guesser.refresh_from_db()
+        self.drawer.refresh_from_db()
+        guesser_score_after_first_correct = self.guesser.current_score
+        drawer_score_after_first_correct = self.drawer.current_score
+
+        with patch("games.services.timezone.now", return_value=round_start + timedelta(seconds=20)):
+            repeat_result = evaluate_guess_for_round(self.round, self.guesser, "planet")
+        self.round.refresh_from_db()
+        self.guesser.refresh_from_db()
+        self.drawer.refresh_from_db()
+
+        self.assertEqual(first_result.outcome, game_services.GuessOutcome.CORRECT)
+        self.assertFalse(first_result.round_completed_now)
+        self.assertEqual(repeat_result.outcome, game_services.GuessOutcome.INCORRECT)
+        self.assertFalse(repeat_result.is_correct)
+        self.assertFalse(repeat_result.round_completed)
+        self.assertFalse(repeat_result.round_completed_now)
+        self.assertIsNone(self.round.status)
+        self.assertEqual(self.guesser.current_score, guesser_score_after_first_correct)
+        self.assertEqual(self.drawer.current_score, drawer_score_after_first_correct)
+        self.assertEqual(
+            Guess.objects.filter(round=self.round, player=self.guesser, is_correct=True).count(),
+            1,
+        )
+
+        with patch("games.services.timezone.now", return_value=round_start + timedelta(seconds=30)):
+            second_result = evaluate_guess_for_round(self.round, second_guesser, "rocket")
+        self.round.refresh_from_db()
+
+        self.assertEqual(second_result.outcome, game_services.GuessOutcome.CORRECT)
+        self.assertTrue(second_result.round_completed_now)
+        self.assertEqual(self.round.status, RoundStatus.COMPLETED)
 
 
 @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)

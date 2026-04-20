@@ -30,6 +30,19 @@ def _set_round_started_at(round_id: int, started_at) -> None:
     round.save(update_fields=("started_at", "updated_at"))
 
 
+async def _receive_until_type(
+    communicator: WebsocketCommunicator,
+    expected_type: str,
+    *,
+    max_messages: int = 8,
+) -> dict:
+    for _ in range(max_messages):
+        message = await communicator.receive_json_from()
+        if message.get("type") == expected_type:
+            return message
+    raise AssertionError(f"Did not receive {expected_type!r} within {max_messages} messages.")
+
+
 class GuessPipelineTests(TransactionTestCase):
     def setUp(self):
         self.fake_redis = fakeredis.FakeRedis()
@@ -99,9 +112,10 @@ class GuessPipelineTests(TransactionTestCase):
             })
 
             # Guesser should receive the result broadcast
-            response = await guesser_socket.receive_json_from()
+            response = await _receive_until_type(guesser_socket, "guess.result")
         self.assertEqual(response["type"], "guess.result")
         self.assertTrue(response["payload"]["is_correct"])
+        self.assertEqual(response["payload"]["outcome"], game_services.GuessOutcome.CORRECT)
         self.assertEqual(response["payload"]["player_id"], self.guesser_player.id)
         
         # Check exact time-based score updates
@@ -126,7 +140,7 @@ class GuessPipelineTests(TransactionTestCase):
             "payload": {"text": f"  {self.secret_word_text}  "}
         })
 
-        response = await guesser_socket.receive_json_from()
+        response = await _receive_until_type(guesser_socket, "guess.result")
         self.assertEqual(response["type"], "guess.result")
 
         persisted_guess = await _get_guess(self.round.id, self.guesser_player.id)
@@ -152,9 +166,10 @@ class GuessPipelineTests(TransactionTestCase):
         })
 
         # Guesser should receive a failure result broadcast
-        response = await guesser_socket.receive_json_from()
+        response = await _receive_until_type(guesser_socket, "guess.result")
         self.assertEqual(response["type"], "guess.result")
         self.assertFalse(response["payload"]["is_correct"])
+        self.assertEqual(response["payload"]["outcome"], game_services.GuessOutcome.INCORRECT)
         self.assertEqual(response["payload"]["text"], "wrongword")
 
         await guesser_socket.disconnect()
@@ -168,6 +183,7 @@ class GuessPipelineTests(TransactionTestCase):
         await guesser_socket.connect()
 
         stub_result = SimpleNamespace(
+            outcome=game_services.GuessOutcome.INCORRECT,
             is_correct=False,
             round_completed=False,
             score_updates=(),
@@ -181,7 +197,7 @@ class GuessPipelineTests(TransactionTestCase):
                 "payload": {"text": "  trimmed guess  "}
             })
 
-            response = await guesser_socket.receive_json_from()
+            response = await _receive_until_type(guesser_socket, "guess.result")
 
         self.assertEqual(response["type"], "guess.result")
         called_round, called_player, called_text = mocked_evaluate_guess.call_args.args
@@ -206,7 +222,7 @@ class GuessPipelineTests(TransactionTestCase):
         })
 
         # Drawer should receive a guess.error (rejected by consumer before hitting service/DB)
-        response = await drawer_socket.receive_json_from()
+        response = await _receive_until_type(drawer_socket, "guess.error")
         self.assertEqual(response["type"], "guess.error")
         self.assertIn("Drawers cannot submit guesses", response["payload"]["message"])
 
@@ -229,7 +245,7 @@ class GuessPipelineTests(TransactionTestCase):
                 "payload": {"text": "guess"}
             })
 
-            response = await guesser_socket.receive_json_from()
+            response = await _receive_until_type(guesser_socket, "guess.error")
 
         self.assertEqual(response["type"], "guess.error")
         self.assertEqual(response["payload"]["message"], "Service rejected guess.")
@@ -261,8 +277,8 @@ class GuessPipelineTests(TransactionTestCase):
         })
 
         # Both should receive the broadcast
-        resp_g = await guesser_socket.receive_json_from()
-        resp_v = await viewer_socket.receive_json_from()
+        resp_g = await _receive_until_type(guesser_socket, "guess.result")
+        resp_v = await _receive_until_type(viewer_socket, "guess.result")
         
         self.assertEqual(resp_g["type"], "guess.result")
         self.assertEqual(resp_v["type"], "guess.result")
@@ -289,7 +305,7 @@ class GuessPipelineTests(TransactionTestCase):
         })
 
         # Should receive a guess.error instead of silent return
-        response = await guesser_socket.receive_json_from()
+        response = await _receive_until_type(guesser_socket, "guess.error")
         self.assertEqual(response["type"], "guess.error")
         self.assertEqual(response["payload"]["message"], "No active round in progress.")
 
@@ -310,7 +326,7 @@ class GuessPipelineTests(TransactionTestCase):
         })
 
         # Should receive a guess.error instead of silent return
-        response = await guesser_socket.receive_json_from()
+        response = await _receive_until_type(guesser_socket, "guess.error")
         self.assertEqual(response["type"], "guess.error")
         self.assertEqual(response["payload"]["message"], "Guess text cannot be empty.")
 
