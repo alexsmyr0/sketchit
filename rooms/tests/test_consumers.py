@@ -156,6 +156,7 @@ async def _receive_until_type(communicator, event_type: str, attempts: int = 20)
 async def _connect_and_receive_initial_room_state(
     communicator,
     join_code: str,
+    drain_duplicate_room_states: bool = False,
 ):
     """Perform WebSocket connect and consume the initial room.state message."""
     connected, _ = await communicator.connect()
@@ -167,6 +168,16 @@ async def _connect_and_receive_initial_room_state(
         raise AssertionError(
             f"Expected room state for {join_code}, got {room_state['payload']['room']['join_code']}"
         )
+
+    if drain_duplicate_room_states:
+        # After deduping, there shouldn't be duplicates, but we drain just in case
+        # a service broadcast happens to fire exactly now.
+        while True:
+            try:
+                await communicator.receive_json_from(timeout=0.1)
+            except (asyncio.TimeoutError, TimeoutError):
+                break
+
     return room_state
 
 

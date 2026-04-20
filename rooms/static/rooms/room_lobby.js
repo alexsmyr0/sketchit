@@ -50,6 +50,11 @@ class RoomClient {
         this.socket = null;
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 5;
+        this.baseReconnectDelay = 1000; // 1s
+        this.maxReconnectDelay = 10000; // 10s
+        this.statusTimeout = null;
+        this.errorTimeout = null;
+        
         this.currentParticipants = [];
         this.currentHostId = null;
         this.isDrawer = false;
@@ -97,11 +102,9 @@ class RoomClient {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const url = `${protocol}//${window.location.host}/ws/rooms/${this.joinCode}/`;
         
-        console.log(`Connecting to WebSocket: ${url}`);
         this.socket = new WebSocket(url);
 
         this.socket.onopen = () => {
-            console.log('WebSocket connected');
             this.reconnectAttempts = 0;
             this.showStatus('Connected to room');
             setTimeout(() => this.hideStatus(), 3000);
@@ -113,24 +116,33 @@ class RoomClient {
         };
 
         this.socket.onclose = (e) => {
-            console.warn('WebSocket closed', e.code, e.reason);
+            // codes 4001, 4003, 4004 are permanent authentication/eligibility failures.
+            const permanentFailures = [4001, 4003, 4004];
+            if (permanentFailures.includes(e.code)) {
+                this.showError(`Connection rejected: ${e.reason || 'Unauthorized'}`);
+                return;
+            }
+
             if (this.reconnectAttempts < this.maxReconnectAttempts) {
                 this.reconnectAttempts++;
-                this.showStatus(`Connection lost. Retrying (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
-                setTimeout(() => this.connectWebSocket(), 2000);
+                const delay = Math.min(
+                    this.maxReconnectDelay,
+                    this.baseReconnectDelay * Math.pow(2, this.reconnectAttempts - 1)
+                );
+                
+                this.showStatus(`Connection lost. Retrying in ${Math.round(delay/1000)}s...`);
+                setTimeout(() => this.connectWebSocket(), delay);
             } else {
                 this.showError('Connection lost. Please refresh the page.');
             }
         };
 
         this.socket.onerror = (err) => {
-            console.error('WebSocket error', err);
+            // Silently ignore, onclose handles the cleanup
         };
     }
 
     handleServerEvent(event) {
-        console.log('Received server event:', event.type, event);
-        
         switch (event.type) {
             case 'room.state':
                 this.updateRoomState(event.payload);
@@ -150,11 +162,6 @@ class RoomClient {
             case 'game.finished':
                 this.handleGameFinished(event.payload);
                 break;
-            case 'round.state':
-                // Sync catch-up handled in payload
-                break;
-            default:
-                console.log('Unhandled event type:', event.type);
         }
     }
 
@@ -163,14 +170,9 @@ class RoomClient {
     updateRoomState(state) {
         const { room, host, participants } = state;
         this.currentParticipants = participants;
+        
+        const hostChanged = this.currentHostId !== (host ? host.id : null);
         this.currentHostId = host ? host.id : null;
-
-        // Sync view based on room status
-        if (room.status === 'in_progress') {
-            this.switchToGameView();
-        } else {
-            this.switchToLobbyView();
-        }
 
         // Update Lobby UI
         if (this.elements.roomNameDisplay) this.elements.roomNameDisplay.textContent = room.name;
@@ -180,12 +182,43 @@ class RoomClient {
         }
 
         this.renderParticipantList();
+        this.syncHostControls();
 
-        // Update Start Game Button state (Host only)
+        // Sync view based on room status
+        if (room.status === 'in_progress') {
+            this.switchToGameView();
+        } else {
+            this.switchToLobbyView();
+        }
+    }
+
+    syncHostControls() {
+        const isHost = this.currentHostId === this.currentPlayerId;
+        const hostControls = document.getElementById('host-controls');
+        const guestView = document.querySelector('.guest-view');
+
+        if (hostControls) hostControls.hidden = !isHost;
+        if (guestView) guestView.hidden = isHost;
+
+        // Update Start Game Button state
         if (this.elements.startGameButton) {
-            const canStart = participants.length >= 2;
+            // Requirement from backend logic gated here: at least 2 participants.
+            // We check eligibility (PLAYING/CONNECTED) implicitly by checking
+            // participation_status in real usage, but here we just follow backend start gating.
+            const eligibleCount = this.currentParticipants.filter(p => 
+                p.connection_status === 'CONNECTED' && p.participation_status !== 'SPECTATING'
+            ).length;
+            
+            const canStart = eligibleCount >= 2;
             this.elements.startGameButton.disabled = !canStart;
-            if (this.elements.minPlayersHint) this.elements.minPlayersHint.hidden = canStart;
+            if (this.elements.minPlayersHint) {
+                this.elements.minPlayersHint.hidden = canStart;
+                if (!canStart) {
+                    this.elements.minPlayersHint.textContent = eligibleCount < 2 
+                        ? 'Need at least 2 eligible players to start.' 
+                        : 'Waiting for players to connect...';
+                }
+            }
         }
     }
 
@@ -326,8 +359,8 @@ class RoomClient {
         const name = this.elements.editRoomName.value.trim();
         const visibility = this.elements.editVisibility.value;
 
-        if (!name) {
-            this.showError('Room name cannot be empty');
+        if (!name || name.length > 255) {
+            this.showError('Room name must be between 1 and 255 characters');
             return;
         }
 
@@ -348,7 +381,7 @@ class RoomClient {
             }
 
             this.showStatus('Settings saved!');
-            setTimeout(() => this.hideStatus(), 2000);
+            setTimeout(() => this.hideStatus(), 3000);
         } catch (err) {
             this.showError(err.message);
         }
@@ -357,7 +390,7 @@ class RoomClient {
     async startGame() {
         this.showStatus('Starting game...');
         try {
-            const response = await fetch(`/rooms/${this.joinCode}/start/`, {
+            const response = await fetch(`/rooms/${this.joinCode}/start-game/`, {
                 method: 'POST',
                 headers: {
                     'X-CSRFToken': this.getCsrfToken()
@@ -368,6 +401,7 @@ class RoomClient {
                 const data = await response.json();
                 throw new Error(data.detail || 'Failed to start game');
             }
+            this.hideStatus();
         } catch (err) {
             this.showError(err.message);
         }
@@ -434,15 +468,18 @@ class RoomClient {
         }
     }
 
-    copyJoinUrl() {
-        this.elements.joinUrlInput.select();
-        document.execCommand('copy');
-        
-        const originalText = this.elements.copyUrlButton.textContent;
-        this.elements.copyUrlButton.textContent = '✅';
-        setTimeout(() => {
-            this.elements.copyUrlButton.textContent = originalText;
-        }, 2000);
+    async copyJoinUrl() {
+        try {
+            await navigator.clipboard.writeText(this.elements.joinUrlInput.value);
+            
+            const originalText = this.elements.copyUrlButton.textContent;
+            this.elements.copyUrlButton.textContent = '✅';
+            setTimeout(() => {
+                this.elements.copyUrlButton.textContent = originalText;
+            }, 2000);
+        } catch (err) {
+            this.showError('Failed to copy. Please copy manually.');
+        }
     }
 
     getCsrfToken() {
@@ -451,15 +488,22 @@ class RoomClient {
 
     showError(msg) {
         if (this.elements.lobbyError) {
+            if (this.statusTimeout) clearTimeout(this.statusTimeout);
+            if (this.errorTimeout) clearTimeout(this.errorTimeout);
+            
             this.elements.lobbyStatus.hidden = true;
             this.elements.lobbyError.textContent = msg;
             this.elements.lobbyError.hidden = false;
-            setTimeout(() => { this.elements.lobbyError.hidden = true; }, 5000);
+            
+            this.errorTimeout = setTimeout(() => { this.elements.lobbyError.hidden = true; }, 5000);
         }
     }
 
     showStatus(msg) {
         if (this.elements.lobbyStatus) {
+            if (this.statusTimeout) clearTimeout(this.statusTimeout);
+            if (this.errorTimeout) clearTimeout(this.errorTimeout);
+            
             this.elements.lobbyError.hidden = true;
             this.elements.lobbyStatus.textContent = msg;
             this.elements.lobbyStatus.hidden = false;
@@ -468,6 +512,7 @@ class RoomClient {
 
     hideStatus() {
         if (this.elements.lobbyStatus) this.elements.lobbyStatus.hidden = true;
+        if (this.statusTimeout) clearTimeout(this.statusTimeout);
     }
 }
 

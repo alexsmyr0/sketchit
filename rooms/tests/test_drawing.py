@@ -340,8 +340,7 @@ class SnapshotSyncTests(TransactionTestCase):
             headers=_session_headers(self.viewer_session_key),
         )
         
-        connected, _ = await communicator.connect()
-        self.assertTrue(connected)
+        await _connect_and_receive_initial_room_state(communicator, self.room.join_code)
 
         # Client should receive the replayed event
         response = await communicator.receive_json_from()
@@ -430,7 +429,7 @@ class SnapshotSyncTests(TransactionTestCase):
             drawer_participant=self.drawer_player,
             drawer_nickname=self.drawer_player.display_name,
             selected_game_word=game_word,
-)
+        )
         # Wait, let's just use the service logic properly
         await database_sync_to_async(game_services.complete_round_due_to_timer)(round_obj.id)
         
@@ -442,6 +441,12 @@ class SnapshotSyncTests(TransactionTestCase):
             "round_id": str(round_obj.id)
         })
 
+        new_viewer_key = await _create_room_member(self.room.id, "Late Bob")
+        viewer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(new_viewer_key),
+        )
         await _connect_and_drain_initial_sync(viewer_socket, self.room.join_code)
         
         # Viewer should receive NOTHING (no snapshot from old round) because the service cleared it
@@ -458,10 +463,9 @@ class SnapshotSyncTests(TransactionTestCase):
             headers=_session_headers(self.viewer_session_key),
         )
         
-        connected, _ = await communicator.connect()
-        self.assertTrue(connected)
+        await _connect_and_receive_initial_room_state(communicator, self.room.join_code)
 
-        # Should receive nothing because there's no snapshot
+        # Now it should receive nothing because there's no snapshot
         self.assertTrue(await communicator.receive_nothing())
 
         await communicator.disconnect()
