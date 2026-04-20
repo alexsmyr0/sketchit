@@ -14,7 +14,14 @@ from django.test import TransactionTestCase
 from asgiref.sync import async_to_sync
 from rooms.models import Player, Room
 from games.models import Game, GameWord, Round
-from rooms.tests.test_consumers import _ws_url, _session_headers, _create_room_member, _TEST_APP
+from rooms.tests.test_consumers import (
+    _TEST_APP,
+    _connect_and_drain_initial_sync,
+    _connect_and_receive_initial_room_state,
+    _create_room_member,
+    _session_headers,
+    _ws_url,
+)
 from rooms import consumers as room_consumers
 from rooms import redis as room_redis
 from games import redis as game_redis
@@ -83,8 +90,8 @@ class DrawingEventTests(TransactionTestCase):
             headers=_session_headers(self.viewer_session_key),
         )
         
-        await drawer_socket.connect()
-        await viewer_socket.connect()
+        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code)
+        await _connect_and_drain_initial_sync(viewer_socket, self.room.join_code)
 
         # Drawer sends a stroke
         stroke_data = {"lines": [[0,0], [10,10]], "color": "red"}
@@ -116,8 +123,8 @@ class DrawingEventTests(TransactionTestCase):
             headers=_session_headers(self.viewer_session_key),
         )
         
-        await drawer_socket.connect()
-        await viewer_socket.connect()
+        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code)
+        await _connect_and_drain_initial_sync(viewer_socket, self.room.join_code)
 
         # Drawer sends an end stroke
         await drawer_socket.send_json_to({
@@ -152,9 +159,9 @@ class DrawingEventTests(TransactionTestCase):
             headers=_session_headers(second_viewer_key),
         )
         
-        await drawer_socket.connect()
-        await viewer1_socket.connect()
-        await viewer2_socket.connect()
+        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code)
+        await _connect_and_drain_initial_sync(viewer1_socket, self.room.join_code)
+        await _connect_and_drain_initial_sync(viewer2_socket, self.room.join_code)
 
         stroke_data = {"lines": [[0,0], [10,10]]}
         await drawer_socket.send_json_to({
@@ -185,8 +192,8 @@ class DrawingEventTests(TransactionTestCase):
             headers=_session_headers(self.viewer_session_key),
         )
         
-        await drawer_socket.connect()
-        await viewer_socket.connect()
+        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code)
+        await _connect_and_drain_initial_sync(viewer_socket, self.room.join_code)
 
         # Viewer (non-drawer) tries to send a stroke
         await viewer_socket.send_json_to({
@@ -211,8 +218,8 @@ class DrawingEventTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.viewer_session_key),
         )
-        await drawer_socket.connect()
-        await viewer_socket.connect()
+        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code)
+        await _connect_and_drain_initial_sync(viewer_socket, self.room.join_code)
 
         # First, ensure there is a snapshot (it's now a list of JSON strings)
         stroke_data = b'{"type":"drawing.stroke", "payload":{}}'
@@ -256,8 +263,8 @@ class DrawingEventTests(TransactionTestCase):
             headers=_session_headers(self.viewer_session_key),
         )
         
-        await drawer_socket.connect()
-        await viewer_socket.connect()
+        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code)
+        await _connect_and_drain_initial_sync(viewer_socket, self.room.join_code)
 
         # "Drawer" tries to draw in lobby
         await drawer_socket.send_json_to({
@@ -336,8 +343,7 @@ class SnapshotSyncTests(TransactionTestCase):
             headers=_session_headers(self.viewer_session_key),
         )
         
-        connected, _ = await communicator.connect()
-        self.assertTrue(connected)
+        await _connect_and_receive_initial_room_state(communicator, self.room.join_code)
 
         # Client should receive the replayed event
         response = await communicator.receive_json_from()
@@ -357,8 +363,8 @@ class SnapshotSyncTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.viewer_session_key),
         )
-        await drawer_socket.connect()
-        await sync_viewer.connect()
+        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code)
+        await _connect_and_drain_initial_sync(sync_viewer, self.room.join_code)
 
         # Send 2 strokes and an end_stroke
         strokes = [
@@ -380,8 +386,7 @@ class SnapshotSyncTests(TransactionTestCase):
             headers=_session_headers(new_viewer_key),
         )
         
-        connected, _ = await viewer_socket.connect()
-        self.assertTrue(connected)
+        await _connect_and_drain_initial_sync(viewer_socket, self.room.join_code)
 
         # Should receive all 3 messages in order
         for expected in strokes:
@@ -398,14 +403,14 @@ class SnapshotSyncTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.drawer_session_key),
         )
-        await drawer_socket.connect()
+        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code)
         # Viewer to synchronize processing
         sync_viewer = WebsocketCommunicator(
             _TEST_APP,
             _ws_url(self.room.join_code),
             headers=_session_headers(self.viewer_session_key),
         )
-        await sync_viewer.connect()
+        await _connect_and_drain_initial_sync(sync_viewer, self.room.join_code)
 
         await drawer_socket.send_json_to({"type": "drawing.stroke", "payload": {"test": 1}})
         # Wait for broadcast
@@ -427,7 +432,7 @@ class SnapshotSyncTests(TransactionTestCase):
             drawer_participant=self.drawer_player,
             drawer_nickname=self.drawer_player.display_name,
             selected_game_word=game_word,
-)
+        )
         # Wait, let's just use the service logic properly
         await database_sync_to_async(game_services.complete_round_due_to_timer)(round_obj.id)
         
@@ -439,12 +444,13 @@ class SnapshotSyncTests(TransactionTestCase):
             "round_id": str(round_obj.id)
         })
 
+        new_viewer_key = await _create_room_member(self.room.id, "Late Bob")
         viewer_socket = WebsocketCommunicator(
             _TEST_APP,
             _ws_url(self.room.join_code),
-            headers=_session_headers(self.viewer_session_key),
+            headers=_session_headers(new_viewer_key),
         )
-        await viewer_socket.connect()
+        await _connect_and_drain_initial_sync(viewer_socket, self.room.join_code)
         
         # Viewer should receive NOTHING (no snapshot from old round) because the service cleared it
         self.assertTrue(await viewer_socket.receive_nothing())
@@ -460,10 +466,9 @@ class SnapshotSyncTests(TransactionTestCase):
             headers=_session_headers(self.viewer_session_key),
         )
         
-        connected, _ = await communicator.connect()
-        self.assertTrue(connected)
+        await _connect_and_receive_initial_room_state(communicator, self.room.join_code)
 
-        # Should receive nothing because there's no snapshot
+        # Now it should receive nothing because there's no snapshot
         self.assertTrue(await communicator.receive_nothing())
 
         await communicator.disconnect()

@@ -41,6 +41,15 @@ body {
     letter-spacing: -2px;
 }
 
+.logo span.s { color: #ff595e; }
+.logo span.k { color: #ffca3a; }
+.logo span.e { color: #8ac926; }
+.logo span.t { color: #1982c4; }
+.logo span.c { color: #6a4c93; }
+.logo span.h { color: #ff924c; }
+.logo span.i { color: #52b788; }
+.logo span.t2 { color: #4cc9f0; }
+
 .room-info {
     display: flex;
     flex-direction: column;
@@ -93,6 +102,217 @@ body {
 /* Participant List */
 .participant-list {
     list-style: none;
-    color: #e8efff;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.participant-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    background: #f8f9fa;
+    border-radius: 12px;
+    border: 1px solid transparent;
+    transition: all 0.2s;
+}
+
+.participant-item.is-self {
+    background: #f0edff;
+    border-color: var(--accent-hover);
+}
+
+.status-indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #cbd5e0;
+}
+
+.status-indicator.connected { background: var(--success); }
+.status-indicator.disconnected { background: var(--danger); }
+
+.display-name {
+    flex-grow: 1;
+    font-weight: 600;
+}
+
+.host-badge {
+    font-size: 1.1rem;
+}
+
+.self-label {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+/* Join Link Section */
+.join-link-section {
+    margin-bottom: 2rem;
+}
+
+.join-link-section label {
+    display: block;
+    font-size: 0.9rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.copy-input-group {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.copy-input-group input {
+    flex-grow: 1;
+    padding: 0.75rem 1rem;
+    border: 1px solid #dfe6e9;
+    border-radius: 8px;
+    background: #f8f9fa;
+    font-family: inherit;
+    color: var(--text-primary);
+}
+
+.icon-button {
+    background: var(--accent-primary);
+    color: white;
+    border: none;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.icon-button:hover {
+    background: var(--accent-hover);
+}
+
+.divider {
+    border: none;
+    border-top: 1px solid #f1f2f6;
+    margin: 2rem 0;
+}
+
+/* Host Controls & Settings */
+.host-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+.settings-form {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.field label {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.field input, .field select {
+    padding: 0.75rem 1rem;
+    border: 1px solid #dfe6e9;
+    border-radius: 8px;
+    font-family: inherit;
     font-size: 0.95rem;
+}
+
+.action-button {
+    padding: 1rem 1.5rem;
+    border-radius: 12px;
+    font-weight: 600;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    border: none;
+}
+
+.action-button.primary {
+    background: var(--accent-primary);
+    color: #fff;
+    width: 100%;
+}
+
+.action-button.primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(108, 92, 231, 0.3);
+}
+
+.action-button.primary:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.action-button.secondary {
+    background: #f1f2f6;
+    color: var(--text-primary);
+}
+
+.action-button.secondary:hover {
+    background: #dfe6e9;
+}
+
+.start-game-section {
+    margin-top: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.hint {
+    font-size: 0.85rem;
+    color: var(--danger);
+    text-align: center;
+    font-weight: 500;
+}
+
+/* Toasts / Messages */
+.message {
+    padding: 1rem;
+    border-radius: 12px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    text-align: center;
+    margin-top: 1rem;
+}
+
+.message.error {
+    background: #fff5f5;
+    color: var(--danger);
+    border: 1px solid #feb2b2;
+}
+
+.message.status {
+    background: #f0f7ff;
+    color: var(--accent-primary);
+    border: 1px solid #bee3f8;
+}
+
+.loader {
+    width: 30px;
+    height: 30px;
+    border: 3px solid #f1f2f6;
+    border-top-color: var(--accent-primary);
+    border-radius: 50%;
+    animation: spin 1s infinite linear;
+    margin: 1.5rem auto;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
 }

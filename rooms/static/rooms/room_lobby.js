@@ -5,7 +5,7 @@ class LobbyClient {
     constructor() {
         this.joinCode = JSON.parse(document.getElementById('room-join-code').textContent);
         this.currentPlayerId = JSON.parse(document.getElementById('current-player-id').textContent);
-        
+
         this.elements = {
             roomNameDisplay: document.getElementById('room-name-display'),
             roomStatusBadge: document.getElementById('room-status-badge'),
@@ -17,13 +17,22 @@ class LobbyClient {
             editVisibility: document.getElementById('edit-visibility'),
             startGameButton: document.getElementById('start-game-button'),
             minPlayersHint: document.getElementById('min-players-hint'),
+            hostControls: document.getElementById('host-controls'),
+            guestView: document.querySelector('.guest-view'),
             lobbyError: document.getElementById('lobby-error'),
-            lobbyStatus: document.getElementById('lobby-status')
+            lobbyStatus: document.getElementById('lobby-status'),
         };
 
         this.socket = null;
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 5;
+        this.baseReconnectDelay = 1000;
+        this.maxReconnectDelay = 10000;
+        this.statusTimeout = null;
+        this.errorTimeout = null;
+        this.currentParticipants = [];
+        this.currentHostId = null;
+        this.currentRoomStatus = null;
 
         this.init();
     }
@@ -34,20 +43,17 @@ class LobbyClient {
     }
 
     setupEventListeners() {
-        // Copy Join URL
         if (this.elements.copyUrlButton) {
             this.elements.copyUrlButton.addEventListener('click', () => this.copyJoinUrl());
         }
 
-        // Host Settings Form
         if (this.elements.settingsForm) {
-            this.elements.settingsForm.addEventListener('submit', (e) => {
-                e.preventDefault();
+            this.elements.settingsForm.addEventListener('submit', (event) => {
+                event.preventDefault();
                 this.updateSettings();
             });
         }
 
-        // Start Game Button
         if (this.elements.startGameButton) {
             this.elements.startGameButton.addEventListener('click', () => this.startGame());
         }
@@ -56,123 +62,186 @@ class LobbyClient {
     connectWebSocket() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const url = `${protocol}//${window.location.host}/ws/rooms/${this.joinCode}/`;
-        
-        console.log(`Connecting to WebSocket: ${url}`);
+
         this.socket = new WebSocket(url);
 
         this.socket.onopen = () => {
-            console.log('WebSocket connected');
             this.reconnectAttempts = 0;
             this.showStatus('Connected to live lobby');
-            setTimeout(() => this.hideStatus(), 3000);
+            this.scheduleHideStatus(3000);
         };
 
         this.socket.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            this.handleServerEvent(data);
+            this.handleServerEvent(JSON.parse(event.data));
         };
 
-        this.socket.onclose = (e) => {
-            console.warn('WebSocket closed', e.code, e.reason);
-            if (this.reconnectAttempts < this.maxReconnectAttempts) {
-                this.reconnectAttempts++;
-                this.showStatus(`Connection lost. Retrying (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
-                setTimeout(() => this.connectWebSocket(), 2000);
-            } else {
-                this.showError('Connection lost. Please refresh the page.');
+        this.socket.onclose = (event) => {
+            const permanentFailures = [4001, 4003, 4004];
+            if (permanentFailures.includes(event.code)) {
+                this.showError(`Connection rejected: ${event.reason || 'Unauthorized'}`);
+                return;
             }
+
+            if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+                this.showError('Connection lost. Please refresh the page.');
+                return;
+            }
+
+            this.reconnectAttempts += 1;
+            const delay = Math.min(
+                this.maxReconnectDelay,
+                this.baseReconnectDelay * Math.pow(2, this.reconnectAttempts - 1),
+            );
+
+            this.showStatus(`Connection lost. Retrying in ${Math.round(delay / 1000)}s...`);
+            window.setTimeout(() => this.connectWebSocket(), delay);
         };
 
-        this.socket.onerror = (err) => {
-            console.error('WebSocket error', err);
+        this.socket.onerror = () => {
+            // onclose handles the retry and user-facing error flow
         };
     }
 
     handleServerEvent(event) {
-        console.log('Received server event:', event);
-        
         switch (event.type) {
             case 'room.state':
                 this.updateLobbyUI(event.payload);
                 break;
             case 'host.changed':
-                // The room.state update usually follows or encompasses this, 
-                // but we might want specific feedback here.
                 this.showStatus('Room host changed');
+                this.scheduleHideStatus(3000);
                 break;
             default:
-                console.log('Unhandled event type:', event.type);
+                break;
         }
     }
 
     updateLobbyUI(state) {
         const { room, host, participants } = state;
+        const previousHostId = this.currentHostId;
+        const previousStatus = this.currentRoomStatus;
 
-        // Redirect if game has started
-        if (room.status === 'in_progress') {
-            console.log('Game started! Redirecting...');
-            window.location.reload(); // For now, reload will pick up the new state/view
-            return;
-        }
+        this.currentParticipants = participants;
+        this.currentHostId = host ? host.id : null;
+        this.currentRoomStatus = room.status;
 
-        // Update Room Info
         if (this.elements.roomNameDisplay) {
             this.elements.roomNameDisplay.textContent = room.name;
         }
+
         if (this.elements.roomStatusBadge) {
             this.elements.roomStatusBadge.textContent = room.status;
             this.elements.roomStatusBadge.className = `badge ${room.status.toLowerCase()}`;
         }
 
-        // Update Participant List
-        if (this.elements.participantList) {
-            this.renderParticipantList(participants, host);
-        }
+        this.renderParticipantList();
+        this.syncHostControls();
+        this.syncLobbyLockState(room.status);
 
-        // Update Start Game Button state
-        if (this.elements.startGameButton) {
-            const canStart = participants.length >= 2;
-            this.elements.startGameButton.disabled = !canStart;
-            if (this.elements.minPlayersHint) {
-                this.elements.minPlayersHint.hidden = canStart;
-            }
+        if (previousHostId !== null && previousHostId !== this.currentHostId) {
+            this.showStatus('Room host changed');
+            this.scheduleHideStatus(3000);
+        } else if (previousStatus === 'lobby' && room.status === 'in_progress') {
+            this.showStatus('Game started. Lobby controls are now read-only.');
+            this.scheduleHideStatus(3000);
         }
     }
 
-    renderParticipantList(participants, host) {
+    syncHostControls() {
+        const isHost = this.currentHostId === this.currentPlayerId;
+
+        if (this.elements.hostControls) {
+            this.elements.hostControls.hidden = !isHost;
+        }
+
+        if (this.elements.guestView && this.elements.hostControls) {
+            this.elements.guestView.hidden = isHost;
+        }
+
+        if (!this.elements.startGameButton) {
+            return;
+        }
+
+        const eligibleCount = this.currentParticipants.filter((participant) => (
+            participant.connection_status === 'CONNECTED'
+            && participant.participation_status !== 'SPECTATING'
+        )).length;
+        const isLobby = this.currentRoomStatus === 'lobby';
+        const canStart = isHost && isLobby && eligibleCount >= 2;
+
+        this.elements.startGameButton.disabled = !canStart;
+
+        if (!this.elements.minPlayersHint) {
+            return;
+        }
+
+        if (!isLobby) {
+            this.elements.minPlayersHint.hidden = false;
+            this.elements.minPlayersHint.textContent = 'Game already started.';
+            return;
+        }
+
+        this.elements.minPlayersHint.hidden = eligibleCount >= 2;
+        this.elements.minPlayersHint.textContent = eligibleCount >= 2
+            ? ''
+            : 'Need at least 2 eligible players to start.';
+    }
+
+    syncLobbyLockState(roomStatus) {
+        if (!this.elements.settingsForm) {
+            return;
+        }
+
+        const isLobby = roomStatus === 'lobby';
+        Array.from(this.elements.settingsForm.elements).forEach((element) => {
+            if (element instanceof HTMLButtonElement
+                || element instanceof HTMLInputElement
+                || element instanceof HTMLSelectElement
+                || element instanceof HTMLTextAreaElement) {
+                element.disabled = !isLobby;
+            }
+        });
+    }
+
+    renderParticipantList() {
+        if (!this.elements.participantList) {
+            return;
+        }
+
         this.elements.participantList.innerHTML = '';
-        participants.forEach(p => {
-            const li = document.createElement('li');
-            li.className = `participant-item ${p.id === this.currentPlayerId ? 'is-self' : ''}`;
-            li.dataset.playerId = p.id;
-            
+
+        this.currentParticipants.forEach((participant) => {
+            const item = document.createElement('li');
+            item.className = `participant-item ${participant.id === this.currentPlayerId ? 'is-self' : ''}`;
+            item.dataset.playerId = participant.id;
+
             const status = document.createElement('span');
-            status.className = `status-indicator ${p.connection_status.toLowerCase()}`;
-            status.title = p.connection_status;
-            
+            status.className = `status-indicator ${participant.connection_status.toLowerCase()}`;
+            status.title = participant.connection_status;
+
             const name = document.createElement('span');
             name.className = 'display-name';
-            name.textContent = p.display_name;
-            
-            li.appendChild(status);
-            li.appendChild(name);
+            name.textContent = participant.display_name;
 
-            if (host && p.id === host.id) {
+            item.appendChild(status);
+            item.appendChild(name);
+
+            if (this.currentHostId && participant.id === this.currentHostId) {
                 const hostBadge = document.createElement('span');
                 hostBadge.className = 'host-badge';
                 hostBadge.textContent = '👑';
                 hostBadge.title = 'Room Host';
-                li.appendChild(hostBadge);
+                item.appendChild(hostBadge);
             }
 
-            if (p.id === this.currentPlayerId) {
+            if (participant.id === this.currentPlayerId) {
                 const selfLabel = document.createElement('span');
                 selfLabel.className = 'self-label';
                 selfLabel.textContent = '(You)';
-                li.appendChild(selfLabel);
+                item.appendChild(selfLabel);
             }
 
-            this.elements.participantList.appendChild(li);
+            this.elements.participantList.appendChild(item);
         });
     }
 
@@ -180,20 +249,21 @@ class LobbyClient {
         const name = this.elements.editRoomName.value.trim();
         const visibility = this.elements.editVisibility.value;
 
-        if (!name) {
-            this.showError('Room name cannot be empty');
+        if (!name || name.length > 255) {
+            this.showError('Room name must be between 1 and 255 characters.');
             return;
         }
 
         this.showStatus('Saving settings...');
+
         try {
             const response = await fetch(`/rooms/${this.joinCode}/settings/`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-CSRFToken': this.getCsrfToken()
+                    'X-CSRFToken': this.getCsrfToken(),
                 },
-                body: JSON.stringify({ name, visibility })
+                body: JSON.stringify({ name, visibility }),
             });
 
             if (!response.ok) {
@@ -202,67 +272,117 @@ class LobbyClient {
             }
 
             this.showStatus('Settings saved!');
-            setTimeout(() => this.hideStatus(), 2000);
-        } catch (err) {
-            this.showError(err.message);
+            this.scheduleHideStatus(3000);
+        } catch (error) {
+            this.showError(error.message);
         }
     }
 
     async startGame() {
         this.showStatus('Starting game...');
+
         try {
-            const response = await fetch(`/rooms/${this.joinCode}/start/`, {
+            const response = await fetch(`/rooms/${this.joinCode}/start-game/`, {
                 method: 'POST',
                 headers: {
-                    'X-CSRFToken': this.getCsrfToken()
-                }
+                    'X-CSRFToken': this.getCsrfToken(),
+                },
             });
 
             if (!response.ok) {
                 const data = await response.json();
                 throw new Error(data.detail || 'Failed to start game');
             }
-            
-            // Success broadcast will trigger redirect via handleServerEvent
-        } catch (err) {
-            this.showError(err.message);
+
+            this.hideStatus();
+        } catch (error) {
+            this.showError(error.message);
         }
     }
 
-    copyJoinUrl() {
-        this.elements.joinUrlInput.select();
-        document.execCommand('copy');
-        
-        const originalText = this.elements.copyUrlButton.textContent;
-        this.elements.copyUrlButton.textContent = '✅';
-        setTimeout(() => {
-            this.elements.copyUrlButton.textContent = originalText;
-        }, 2000);
+    async copyJoinUrl() {
+        const text = this.elements.joinUrlInput.value;
+
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(text);
+            } else {
+                this.elements.joinUrlInput.select();
+                document.execCommand('copy');
+            }
+
+            const originalText = this.elements.copyUrlButton.textContent;
+            this.elements.copyUrlButton.textContent = '✅';
+            window.setTimeout(() => {
+                this.elements.copyUrlButton.textContent = originalText;
+            }, 2000);
+        } catch (error) {
+            this.showError('Failed to copy. Please copy manually.');
+        }
     }
 
     getCsrfToken() {
-        return document.querySelector('[name="csrfmiddlewaretoken"]').value;
+        const csrfField = document.querySelector('[name="csrfmiddlewaretoken"]');
+        return csrfField ? csrfField.value : '';
     }
 
-    showError(msg) {
+    showError(message) {
+        if (!this.elements.lobbyError || !this.elements.lobbyStatus) {
+            return;
+        }
+
+        if (this.statusTimeout) {
+            clearTimeout(this.statusTimeout);
+            this.statusTimeout = null;
+        }
+        if (this.errorTimeout) {
+            clearTimeout(this.errorTimeout);
+        }
+
         this.elements.lobbyStatus.hidden = true;
-        this.elements.lobbyError.textContent = msg;
+        this.elements.lobbyError.textContent = message;
         this.elements.lobbyError.hidden = false;
-        setTimeout(() => { this.elements.lobbyError.hidden = true; }, 5000);
+        this.errorTimeout = window.setTimeout(() => {
+            this.elements.lobbyError.hidden = true;
+        }, 5000);
     }
 
-    showStatus(msg) {
+    showStatus(message) {
+        if (!this.elements.lobbyError || !this.elements.lobbyStatus) {
+            return;
+        }
+
+        if (this.statusTimeout) {
+            clearTimeout(this.statusTimeout);
+        }
+        if (this.errorTimeout) {
+            clearTimeout(this.errorTimeout);
+            this.errorTimeout = null;
+        }
+
         this.elements.lobbyError.hidden = true;
-        this.elements.lobbyStatus.textContent = msg;
+        this.elements.lobbyStatus.textContent = message;
         this.elements.lobbyStatus.hidden = false;
     }
 
+    scheduleHideStatus(delayMs) {
+        if (this.statusTimeout) {
+            clearTimeout(this.statusTimeout);
+        }
+        this.statusTimeout = window.setTimeout(() => this.hideStatus(), delayMs);
+    }
+
     hideStatus() {
-        this.elements.lobbyStatus.hidden = true;
+        if (this.elements.lobbyStatus) {
+            this.elements.lobbyStatus.hidden = true;
+        }
+        if (this.statusTimeout) {
+            clearTimeout(this.statusTimeout);
+            this.statusTimeout = null;
+        }
     }
 }
 
-// Initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
     window.lobbyClient = new LobbyClient();
 });
