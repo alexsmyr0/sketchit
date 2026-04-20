@@ -19,7 +19,7 @@
             </div>
         </header>
 
-        <main class="lobby-main">
+        <main class="lobby-main" id="lobby-view">
             <section class="lobby-card participants-card">
                 <h3>Participants</h3>
                 <ul id="participant-list" class="participant-list">
@@ -88,6 +88,65 @@
                 <p id="lobby-status" class="message status" hidden></p>
             </section>
         </main>
+
+        <main class="game-main" id="game-view" hidden>
+            <div class="game-grid">
+                <aside class="game-sidebar">
+                    <div class="timer-card">
+                        <div class="timer-header">
+                            <span id="round-number">Round 1</span>
+                            <span id="timer-display">90</span>
+                        </div>
+                        <div class="timer-progress">
+                            <div id="timer-bar" class="timer-bar" style="width: 100%;"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="participants-mini-card">
+                        <ul id="game-participant-list" class="participant-list mini">
+                            <!-- Populated by JS -->
+                        </ul>
+                    </div>
+                </aside>
+
+                <div class="game-center">
+                    <header class="game-hud">
+                        <div id="word-display" class="word-display">_ _ _ _</div>
+                        <p id="drawer-hint" class="drawer-hint" hidden>You are drawing!</p>
+                    </header>
+                    
+                    <div class="canvas-container">
+                        <div id="canvas-placeholder" class="canvas-placeholder">
+                            <p>Drawing surface coming soon...</p>
+                        </div>
+                    </div>
+                </div>
+
+                <aside class="game-feed">
+                    <div class="feed-container">
+                        <h3>Guesses</h3>
+                        <ul id="guess-history" class="guess-history">
+                            <!-- Populated by JS -->
+                        </ul>
+                    </div>
+                    
+                    <div id="guess-input-container" class="guess-input-group">
+                        <input id="guess-input" type="text" placeholder="Type your guess here..." autocomplete="off">
+                        <button id="submit-guess-button" class="icon-button">Send</button>
+                    </div>
+                </aside>
+            </div>
+        </main>
+
+        <div id="intermission-overlay" class="overlay" hidden>
+            <div class="overlay-content">
+                <h2 id="intermission-title">Round Over!</h2>
+                <div id="intermission-results">
+                    <!-- Results/Leaderboard populated by JS -->
+                </div>
+                <p class="intermission-timer">Next round starts in <span id="intermission-seconds">10</span>s...</p>
+            </div>
+        </div>
     </div>
 
     {% comment %} Initial state for the JS client {% endcomment %}
