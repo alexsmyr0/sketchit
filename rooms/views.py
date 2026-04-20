@@ -438,6 +438,11 @@ def update_lobby_settings(request, join_code):
     room.visibility = form.cleaned_data["visibility"]
     room.save(update_fields=["name", "visibility", "updated_at"])
 
+    schedule_room_state_broadcast_after_commit(
+        join_code=room.join_code,
+        room_id=room.id,
+    )
+
     return _build_room_lobby_state_response(room)
 
 
@@ -491,6 +496,11 @@ def start_game(request, join_code):
     room.refresh_from_db(fields=["status"])
     game = started_game.game
     first_round = started_game.first_round
+
+    schedule_room_state_broadcast_after_commit(
+        join_code=room.join_code,
+        room_id=room.id,
+    )
 
     return JsonResponse(
         {

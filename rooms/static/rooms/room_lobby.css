@@ -1,42 +1,98 @@
+:root {
+    --bg-color: #f8f9fa;
+    --card-bg: #ffffff;
+    --text-primary: #2d3436;
+    --text-secondary: #636e72;
+    --accent-primary: #6c5ce7;
+    --accent-hover: #a29bfe;
+    --success: #00b894;
+    --warning: #fdcb6e;
+    --danger: #d63031;
+    --shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+    --radius: 16px;
+}
+
 body {
     margin: 0;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text-primary);
+    display: flex;
+    justify-content: center;
+    align-items: center;
     min-height: 100vh;
-    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
-    background: #0b1838;
-    color: #ffffff;
+}
+
+.lobby-container {
+    width: 100%;
+    max-width: 900px;
+    padding: 2rem;
+}
+
+.lobby-header {
+    text-align: center;
+    margin-bottom: 2rem;
+}
+
+.logo {
+    font-size: 3rem;
+    margin: 0 0 0.5rem 0;
+    font-family: 'Outfit', sans-serif;
+    letter-spacing: -2px;
+}
+
+.room-info {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.room-info h2 {
+    margin: 0;
+    font-size: 1.5rem;
+    color: var(--text-secondary);
+}
+
+.badge {
+    padding: 0.25rem 0.75rem;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.badge.lobby { background-color: var(--warning); color: #856404; }
+.badge.in_progress { background-color: var(--success); color: #fff; }
+
+.lobby-main {
     display: grid;
-    place-items: center;
-    padding: 24px;
+    grid-template-columns: 1fr 1.5fr;
+    gap: 2rem;
 }
 
-.card {
-    width: min(640px, 100%);
-    background: rgba(255, 255, 255, 0.09);
-    border: 1px solid rgba(255, 255, 255, 0.18);
-    border-radius: 14px;
-    padding: 22px;
+@media (max-width: 768px) {
+    .lobby-main {
+        grid-template-columns: 1fr;
+    }
 }
 
-h1 {
-    margin: 0 0 12px;
+.lobby-card {
+    background: var(--card-bg);
+    border-radius: var(--radius);
+    padding: 2rem;
+    box-shadow: var(--shadow);
 }
 
-.meta {
-    color: #c6d4f4;
-    margin: 6px 0;
-    font-size: 0.95rem;
+.lobby-card h3 {
+    margin-top: 0;
+    font-size: 1.25rem;
+    margin-bottom: 1.5rem;
 }
 
-.participants {
-    margin: 18px 0 0;
-    padding: 0;
+/* Participant List */
+.participant-list {
     list-style: none;
-    border-top: 1px solid rgba(255, 255, 255, 0.2);
-}
-
-.participants li {
-    padding: 10px 0;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.16);
     color: #e8efff;
     font-size: 0.95rem;
 }
