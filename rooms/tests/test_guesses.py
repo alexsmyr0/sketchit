@@ -11,7 +11,11 @@ from django.utils import timezone
 
 from games import services as game_services
 from rooms.models import Player, Room
-from rooms.tests.test_consumers import _ws_url, _session_headers, _create_room_member, _TEST_APP
+from rooms.tests.test_consumers import (
+    _ws_url, _session_headers, _create_room_member, _TEST_APP,
+    _receive_until_type, _connect_and_receive_initial_room_state,
+    _connect_and_drain_initial_sync
+)
 from rooms import consumers as room_consumers
 from games import redis as game_redis
 from games.models import Game, GameStatus, GameWord, Guess, Round
@@ -88,7 +92,7 @@ class GuessPipelineTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.guesser_key),
         )
-        await guesser_socket.connect()
+        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code)
 
         # Submit correct guess
         accepted_at = round_start + timedelta(seconds=45)
@@ -119,7 +123,7 @@ class GuessPipelineTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.guesser_key),
         )
-        await guesser_socket.connect()
+        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code)
 
         await guesser_socket.send_json_to({
             "type": "guess.submit",
@@ -143,7 +147,7 @@ class GuessPipelineTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.guesser_key),
         )
-        await guesser_socket.connect()
+        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code)
 
         # Submit incorrect guess
         await guesser_socket.send_json_to({
@@ -165,7 +169,7 @@ class GuessPipelineTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.guesser_key),
         )
-        await guesser_socket.connect()
+        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code)
 
         stub_result = SimpleNamespace(
             is_correct=False,
@@ -197,7 +201,7 @@ class GuessPipelineTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.drawer_key),
         )
-        await drawer_socket.connect()
+        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code)
 
         # Drawer tries to guess their own word
         await drawer_socket.send_json_to({
@@ -218,7 +222,7 @@ class GuessPipelineTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.guesser_key),
         )
-        await guesser_socket.connect()
+        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code)
 
         with patch(
             "rooms.consumers.game_services.evaluate_guess_for_round",
@@ -251,8 +255,8 @@ class GuessPipelineTests(TransactionTestCase):
             headers=_session_headers(viewer_key),
         )
         
-        await guesser_socket.connect()
-        await viewer_socket.connect()
+        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code)
+        await _connect_and_drain_initial_sync(viewer_socket, self.room.join_code)
 
         # Guesser submits a guess
         await guesser_socket.send_json_to({
@@ -281,7 +285,7 @@ class GuessPipelineTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.guesser_key),
         )
-        await guesser_socket.connect()
+        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code)
 
         await guesser_socket.send_json_to({
             "type": "guess.submit",
@@ -301,7 +305,7 @@ class GuessPipelineTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.guesser_key),
         )
-        await guesser_socket.connect()
+        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code)
 
         # Submit whitespace-only guess
         await guesser_socket.send_json_to({
