@@ -1,11 +1,13 @@
 import json
+from threading import Event, Thread
 from datetime import timedelta
 from unittest.mock import patch
 
 import fakeredis
 from django.contrib import admin
 from django.conf import settings
-from django.test import SimpleTestCase, TestCase
+from django.contrib.sessions.backends.db import SessionStore
+from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase
 from django.utils import timezone
 
 from games import redis as game_redis
@@ -269,6 +271,103 @@ class RoomWordPackModelTests(TestCase):
         )
 
         self.assertEqual(room.word_pack_id, expected_default_word_pack.id)
+
+
+class ConcurrentRoomOwnershipTests(TransactionTestCase):
+    def _create_session_key(self):
+        session = SessionStore()
+        session.save()
+        return session.session_key
+
+    def _build_client_for_session(self, session_key):
+        client = Client()
+        client.cookies[settings.SESSION_COOKIE_NAME] = session_key
+        return client
+
+    def _post_create_room(self, *, client, room_name):
+        return client.post(
+            "/rooms/create/",
+            data=json.dumps(
+                {
+                    "name": room_name,
+                    "visibility": Room.Visibility.PRIVATE,
+                    "display_name": "Alex",
+                }
+            ),
+            content_type="application/json",
+        )
+
+    def test_concurrent_create_requests_for_same_session_create_only_one_membership(self):
+        session_key = self._create_session_key()
+        first_client = self._build_client_for_session(session_key)
+        second_client = self._build_client_for_session(session_key)
+        first_request_reached_create = Event()
+        second_request_attempted_session_lock = Event()
+        allow_first_request_to_continue = Event()
+        original_create_room = Room.objects.create
+
+        from rooms import views as room_views
+
+        original_lock_guest_session = room_views._lock_guest_session
+        lock_call_count = {"count": 0}
+        results = []
+        errors = []
+
+        def instrumented_lock_guest_session(request, session_key):
+            lock_call_count["count"] += 1
+            if lock_call_count["count"] == 2:
+                second_request_attempted_session_lock.set()
+            return original_lock_guest_session(request, session_key)
+
+        def blocking_room_create(*args, **kwargs):
+            if not first_request_reached_create.is_set():
+                first_request_reached_create.set()
+                if not allow_first_request_to_continue.wait(timeout=5):
+                    raise AssertionError("Timed out waiting to release the first request.")
+            return original_create_room(*args, **kwargs)
+
+        def issue_create_request(client, room_name):
+            try:
+                response = self._post_create_room(client=client, room_name=room_name)
+                results.append((response.status_code, response.json()))
+            except Exception as exc:  # pragma: no cover - test helper failure path
+                errors.append(exc)
+
+        with patch("rooms.views._lock_guest_session", side_effect=instrumented_lock_guest_session):
+            with patch("rooms.views.Room.objects.create", side_effect=blocking_room_create):
+                first_thread = Thread(
+                    target=issue_create_request,
+                    args=(first_client, "First Room"),
+                )
+                second_thread = Thread(
+                    target=issue_create_request,
+                    args=(second_client, "Second Room"),
+                )
+
+                first_thread.start()
+                self.assertTrue(first_request_reached_create.wait(timeout=5))
+                second_thread.start()
+                self.assertTrue(second_request_attempted_session_lock.wait(timeout=5))
+                allow_first_request_to_continue.set()
+                first_thread.join(timeout=5)
+                second_thread.join(timeout=5)
+
+        if errors:
+            raise errors[0]
+
+        self.assertEqual(Room.objects.count(), 1)
+        self.assertEqual(Player.objects.count(), 1)
+        self.assertCountEqual(
+            [status for status, _payload in results],
+            [201, 409],
+        )
+        created_room = Room.objects.get()
+        conflict_payload = next(
+            payload for status, payload in results if status == 409
+        )
+        self.assertEqual(conflict_payload["join_code"], created_room.join_code)
+        self.assertEqual(conflict_payload["room_url"], f"/rooms/{created_room.join_code}/")
+        self.assertEqual(Player.objects.get().room_id, created_room.id)
 
 
 class JoinRoomViewTests(TestCase):

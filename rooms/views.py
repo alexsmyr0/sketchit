@@ -4,6 +4,7 @@ import string
 
 from django import forms
 from django.conf import settings
+from django.contrib.sessions.models import Session
 from django.db import transaction
 from django.db.models import Count
 from django.db.utils import IntegrityError
@@ -93,6 +94,26 @@ def _get_or_create_session_key(request):
         request.session.save()
 
     return request.session.session_key
+
+
+def _lock_guest_session(request, session_key):
+    """Lock the durable Django session row for the current guest identity.
+
+    The MVP uses the Django session as the guest identity anchor. Locking the
+    session row serializes concurrent create/join requests from the same
+    browser so two requests cannot both conclude that no active room ownership
+    exists and then create conflicting participant rows.
+    """
+
+    if not Session.objects.filter(session_key=session_key).exists():
+        # A stale cookie can point at a missing DB session row after expiry
+        # cleanup. Saving recreates durable session state so there is a real row
+        # to lock for the remainder of this request.
+        request.session.save()
+        session_key = request.session.session_key
+
+    Session.objects.select_for_update().get(session_key=session_key)
+    return session_key
 
 
 def _build_room_response(room, *, status):
@@ -222,25 +243,27 @@ def create_room(request):
         return JsonResponse({"errors": form.errors}, status=400)
 
     session_key = _get_or_create_session_key(request)
-    # Clean up stale ownership for this browser session before enforcing the
-    # one-room-at-a-time rule. Persistent MySQL rows can survive app restarts
-    # after the underlying Django session has already expired.
-    purge_expired_participants_for_session(
-        redis_client=_get_room_runtime_redis_client(),
-        session_key=session_key,
-    )
-    existing_player = (
-        Player.objects.select_related("room")
-        .filter(session_key=session_key)
-        .order_by("created_at", "id")
-        .first()
-    )
-    if existing_player is not None:
-        return _build_room_assignment_conflict_response(existing_player.room)
-
     cleaned_data = form.cleaned_data
+    room_runtime_redis_client = _get_room_runtime_redis_client()
 
     with transaction.atomic():
+        session_key = _lock_guest_session(request, session_key)
+        # Clean up stale ownership for this browser session before enforcing the
+        # one-room-at-a-time rule. Persistent MySQL rows can survive app
+        # restarts after the underlying Django session has already expired.
+        purge_expired_participants_for_session(
+            redis_client=room_runtime_redis_client,
+            session_key=session_key,
+        )
+        existing_player = (
+            Player.objects.select_related("room")
+            .filter(session_key=session_key)
+            .order_by("created_at", "id")
+            .first()
+        )
+        if existing_player is not None:
+            return _build_room_assignment_conflict_response(existing_player.room)
+
         room = _create_room_with_unique_join_code(
             name=cleaned_data["name"],
             visibility=cleaned_data["visibility"],
@@ -280,6 +303,7 @@ def join_room(request, join_code):
     room_runtime_redis_client = _get_room_runtime_redis_client()
 
     with transaction.atomic():
+        session_key = _lock_guest_session(request, session_key)
         # Entry flow cleanup is session-scoped on purpose: remove stale rows
         # that no longer belong to a live Django session before deciding
         # whether this request is a valid rejoin or a real cross-room conflict.
