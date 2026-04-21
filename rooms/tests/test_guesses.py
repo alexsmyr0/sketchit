@@ -14,7 +14,7 @@ from rooms.models import Player, Room
 from rooms.tests.test_consumers import (
     _ws_url, _session_headers, _create_room_member, _TEST_APP,
     _receive_until_type, _connect_and_receive_initial_room_state,
-    _connect_and_drain_initial_sync
+    _connect_and_drain_initial_sync, _drain_output_queue_nowait
 )
 from rooms import consumers as room_consumers
 from games import redis as game_redis
@@ -103,7 +103,7 @@ class GuessPipelineTests(TransactionTestCase):
             drawer_participant=self.drawer_player,
             drawer_nickname=self.drawer_player.display_name,
             selected_game_word=self.game_word,
-            sequence_number=1,
+            sequence_number=100,
         )
 
         # Tests that need an active round should call _seed_active_round_state.
@@ -212,13 +212,14 @@ class GuessPipelineTests(TransactionTestCase):
         await guesser_socket.disconnect()
 
     async def test_near_match_outcome_broadcast(self):
+        self._seed_active_round_state()
         await _set_round_target_word(self.round.id, "new york city")
         guesser_socket = WebsocketCommunicator(
             _TEST_APP,
             _ws_url(self.room.join_code),
             headers=_session_headers(self.guesser_key),
         )
-        await guesser_socket.connect()
+        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code, expects_game_active=True)
 
         await guesser_socket.send_json_to({
             "type": "guess.submit",
@@ -233,12 +234,13 @@ class GuessPipelineTests(TransactionTestCase):
         await guesser_socket.disconnect()
 
     async def test_duplicate_outcome_broadcast(self):
+        self._seed_active_round_state()
         guesser_socket = WebsocketCommunicator(
             _TEST_APP,
             _ws_url(self.room.join_code),
             headers=_session_headers(self.guesser_key),
         )
-        await guesser_socket.connect()
+        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code, expects_game_active=True)
 
         await guesser_socket.send_json_to({
             "type": "guess.submit",

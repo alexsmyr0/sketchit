@@ -144,13 +144,49 @@ def _join_room_via_http(*, join_code: str, display_name: str) -> tuple[int, byte
     return response.status_code, response.content
 
 
-async def _receive_until_type(communicator, event_type: str, attempts: int = 20):
-    """Wait for and return a specific JSON event type, ignoring others."""
+async def _receive_until_type(communicator, event_type: str, attempts: int = 50):
+    """Wait for and return a specific JSON event type, ignoring others (safe version)."""
+    import asyncio, json
     for _ in range(attempts):
-        event = await communicator.receive_json_from(timeout=1)
-        if event.get("type") == event_type:
-            return event
+        try:
+            raw = await asyncio.wait_for(communicator.output_queue.get(), timeout=2.0)
+            if raw.get("type") == "websocket.send":
+                event = json.loads(raw["text"])
+                if event.get("type") == event_type:
+                    return event
+        except asyncio.TimeoutError:
+            continue
     raise AssertionError(f"Did not receive expected event type '{event_type}'.")
+
+
+def _drain_output_queue_nowait(communicator) -> list[dict]:
+    """Non-blocking drain of the communicator output queue."""
+    import asyncio, json
+    messages: list[dict] = []
+    while not communicator.output_queue.empty():
+        try:
+            raw = communicator.output_queue.get_nowait()
+            if raw.get("type") == "websocket.send":
+                messages.append(json.loads(raw["text"]))
+        except asyncio.QueueEmpty:
+            break
+    return messages
+
+
+async def _drain_output_queue_safe(communicator, timeout: float = 0.2) -> list[dict]:
+    """Timed drain of the communicator output queue without calling receive_output."""
+    import asyncio, json
+    messages = []
+    while True:
+        try:
+            raw = await asyncio.wait_for(communicator.output_queue.get(), timeout=timeout)
+            if raw.get("type") == "websocket.send":
+                messages.append(json.loads(raw["text"]))
+            timeout = 0.1
+        except asyncio.TimeoutError:
+            break
+    return messages
+
 
 
 async def _connect_and_receive_initial_room_state(
@@ -182,51 +218,34 @@ async def _connect_and_drain_initial_sync(
     communicator: WebsocketCommunicator,
     join_code: str,
     expects_game_active: bool = False,
-    timeout: float = 3.0,
+    timeout: float = 5.0,
 ) -> list[dict]:
-    """Connect to a room and collect all initial handshake events.
-
-    This helper handles the A-06 contract:
-    1. Mandatory room.state (Current lobby members)
-    2. Optional round.state (If game is active)
-    3. Mandatory round.timer (If game is active)
-
-    Returns all collected events (including drawing strokes if any).
-    """
+    """Connect to a room and safely collect all initial A-06 handshake events."""
+    import asyncio
     connected, _ = await communicator.connect(timeout=timeout)
     if not connected:
         raise ConnectionError(f"Failed to connect to room {join_code}")
 
-    messages = []
-    found_room_state = False
-    found_round_state = not expects_game_active
-
-    # We use a strict collector loop to avoid non-deterministic behavior.
-    loop = asyncio.get_event_loop()
-    start_time = loop.time()
-    
-    while (not found_room_state or not found_round_state) and (loop.time() - start_time < timeout):
-        try:
-            msg = await communicator.receive_json_from(timeout=0.5)
-            messages.append(msg)
-            if msg.get("type") == "room.state":
-                found_room_state = True
-            elif msg.get("type") == "round.state":
-                found_round_state = True
-        except asyncio.TimeoutError:
-            continue
-        except Exception:
-            break
-    
-    # Final rapid drain for any lingering bursts (e.g. strokes)
-    while True:
-        try:
-            msg = await communicator.receive_json_from(timeout=0.1)
-            messages.append(msg)
-        except (asyncio.TimeoutError, Exception):
-            break
-
+    try:
+        first_msg = await communicator.receive_json_from(timeout=4)
+    except asyncio.TimeoutError:
+        burst = await _drain_output_queue_safe(communicator, timeout=1.0)
+        if not burst: raise ConnectionError(f"Handshake timeout in {join_code}")
+        first_msg = burst[0]
+        
+    messages = [first_msg]
+    if expects_game_active:
+        for _ in range(25):
+            burst = await _drain_output_queue_safe(communicator, timeout=0.2)
+            messages.extend(burst)
+            if any(m.get("type") in ("round.timer", "round.intermission_timer", "round.state") for m in burst):
+                break
+            await asyncio.sleep(0.1)
+    else:
+        burst = await _drain_output_queue_safe(communicator, timeout=0.3)
+        messages.extend(burst)
     return messages
+
 
 
 # ---------------------------------------------------------------------------

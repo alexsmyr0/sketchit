@@ -271,7 +271,6 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
 
     async def receive_json(self, content: dict, **kwargs) -> None:
         """Handle inbound JSON events."""
-        print(f"DEBUG: Consumer received: {content.get('type')}")
         message_type = content.get("type")
 
         if message_type == "echo":

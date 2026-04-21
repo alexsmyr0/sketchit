@@ -1,0 +1,63 @@
+﻿py : Creating test database for alias 'default' ('file:memorydb_default?mode=memory&cache=shared')...
+At line:1 char:1
++ py manage.py test rooms.tests.test_consumers rooms.tests.test_drawing ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Creating test d...che=shared')...:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+Found 47 test(s).
+Operations to perform:
+  Synchronize unmigrated apps: channels, daphne, messages, staticfiles
+  Apply all migrations: admin, auth, contenttypes, games, rooms, sessions, words
+Synchronizing apps without migrations:
+  Creating tables...
+    Running deferred SQL...
+Running migrations:
+  Applying contenttypes.0001_initial... OK
+  Applying auth.0001_initial... OK
+  Applying admin.0001_initial... OK
+  Applying admin.0002_logentry_remove_auto_add... OK
+  Applying admin.0003_logentry_add_action_flag_choices... OK
+  Applying contenttypes.0002_remove_content_type_name... OK
+  Applying auth.0002_alter_permission_name_max_length... OK
+  Applying auth.0003_alter_user_email_max_length... OK
+  Applying auth.0004_alter_user_username_opts... OK
+  Applying auth.0005_alter_user_last_login_null... OK
+  Applying auth.0006_require_contenttypes_0002... OK
+  Applying auth.0007_alter_validators_add_error_messages... OK
+  Applying auth.0008_alter_user_username_max_length... OK
+  Applying auth.0009_alter_user_last_name_max_length... OK
+  Applying auth.0010_alter_gro
+ERROR: test_connect_accepts_valid_room_member 
+(rooms.tests.test_consumers.RoomConsumerConnectTests.test_connect_accepts_valid_room_member)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\chris\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\asgiref\sync.py", line 325, in 
+__call__
+    return call_result.result()
+           ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\chris\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 443, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\chris\AppData\Local\Python\pythoncore-3.14-64\Lib\concurrent\futures\_base.py", line 395, in 
+__get_result
+    raise self._exception
+  File "C:\Users\chris\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\asgiref\sync.py", line 365, in 
+main_wrap
+    result = await awaitable
+             ^^^^^^^^^^^^^^^
+  File "C:\Users\chris\Documents\sketchit\sketchit\rooms\tests\test_consumers.py", line 252, in 
+test_connect_accepts_valid_room_member
+    await _connect_and_receive_initial_room_state(
+          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        communicator,
+        ^^^^^^^^^^^^^
+        self.room.join_code,
+        ^^^^^^^^^^^^^^^^^^^^
+        drain_duplicate_room_states=True,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+TypeError: _connect_and_receive_initial_room_state() got an unexpected keyword argument 'drain_duplicate_room_states'
+
