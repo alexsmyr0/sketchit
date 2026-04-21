@@ -35,3 +35,7 @@
 ## Apr 15
 
 - Added Time-Based Scoring & Multi-Guesser Round Resolution.
+
+## Apr 21
+
+- Added Drawer Disconnect Grace & Turn Outcome Handling.

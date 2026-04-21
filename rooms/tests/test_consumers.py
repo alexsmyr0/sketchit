@@ -15,6 +15,7 @@ the production ASGI app includes (that validator checks the HTTP Origin header
 which WebsocketCommunicator omits by default).
 """
 
+import asyncio
 from datetime import timedelta
 import json
 
@@ -121,6 +122,11 @@ def _end_round_by_correct_guess(round_id: int) -> None:
 
 
 @database_sync_to_async
+def _get_round_status(round_id: int) -> str | None:
+    return Round.objects.get(pk=round_id).status
+
+
+@database_sync_to_async
 def _leave_room_member(*, redis_client, player_id: int) -> None:
     """Trigger the permanent leave lifecycle from the room service."""
 
@@ -198,7 +204,10 @@ class RoomConsumerConnectTests(TransactionTestCase):
 
     async def _receive_until_type(self, communicator, event_type: str, attempts: int = 20):
         for _ in range(attempts):
-            event = await communicator.receive_json_from(timeout=1)
+            try:
+                event = await communicator.receive_json_from(timeout=1)
+            except TimeoutError:
+                continue
             if event.get("type") == event_type:
                 return event
         self.fail(f"Did not receive expected event type '{event_type}'.")
@@ -793,6 +802,117 @@ class RoomConsumerConnectTests(TransactionTestCase):
 
         await reconnect_socket.disconnect()
         await first_socket.disconnect()
+
+    @override_settings(
+        SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True,
+        SKETCHIT_ROUND_DURATION_SECONDS=5,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=2,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.05,
+        SKETCHIT_DRAWER_DISCONNECT_GRACE_SECONDS=0.6,
+    )
+    async def test_drawer_reconnect_before_grace_deadline_resumes_round(self):
+        second_session_key = await _create_room_member(self.room.id, "Bob")
+        alice_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        bob_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(second_session_key),
+        )
+
+        await self._connect_and_receive_initial_room_state(alice_socket)
+        await self._connect_and_receive_initial_room_state(bob_socket)
+        await self._receive_until_type(alice_socket, "room.state")
+
+        round_id = await _start_game(self.room.id)
+        round_started = await self._receive_until_type(alice_socket, "round.started")
+        drawer_id = round_started["payload"]["drawer_participant_id"]
+
+        if drawer_id == self.player.id:
+            drawer_socket = alice_socket
+            drawer_session_key = self.session_key
+            observer_socket = bob_socket
+        else:
+            drawer_socket = bob_socket
+            drawer_session_key = second_session_key
+            observer_socket = alice_socket
+
+        await drawer_socket.disconnect()
+
+        grace_state = await self._receive_until_type(observer_socket, "round.state")
+        self.assertEqual(grace_state["payload"]["status"], "drawer_disconnected_grace")
+        self.assertTrue(grace_state["payload"].get("drawer_disconnect_deadline_at"))
+
+        reconnect_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(drawer_session_key),
+        )
+        await self._connect_and_receive_initial_room_state(reconnect_socket)
+
+        resumed_state = await self._receive_until_type(observer_socket, "round.state")
+        self.assertEqual(resumed_state["payload"]["status"], "drawing")
+        self.assertFalse(resumed_state["payload"].get("drawer_disconnect_deadline_at"))
+
+        await asyncio.sleep(0.7)
+        self.assertIsNone(await _get_round_status(round_id))
+
+        await reconnect_socket.disconnect()
+        await observer_socket.disconnect()
+
+    @override_settings(
+        SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True,
+        SKETCHIT_ROUND_DURATION_SECONDS=5,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=2,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.05,
+        SKETCHIT_DRAWER_DISCONNECT_GRACE_SECONDS=0.3,
+    )
+    async def test_drawer_disconnect_grace_expiry_ends_round_as_drawer_disconnected(self):
+        second_session_key = await _create_room_member(self.room.id, "Bob")
+        alice_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        bob_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(second_session_key),
+        )
+
+        await self._connect_and_receive_initial_room_state(alice_socket)
+        await self._connect_and_receive_initial_room_state(bob_socket)
+        await self._receive_until_type(alice_socket, "room.state")
+
+        round_id = await _start_game(self.room.id)
+        round_started = await self._receive_until_type(alice_socket, "round.started")
+        drawer_id = round_started["payload"]["drawer_participant_id"]
+
+        if drawer_id == self.player.id:
+            drawer_socket = alice_socket
+            observer_socket = bob_socket
+        else:
+            drawer_socket = bob_socket
+            observer_socket = alice_socket
+
+        await drawer_socket.disconnect()
+
+        grace_state = await self._receive_until_type(observer_socket, "round.state")
+        self.assertEqual(grace_state["payload"]["status"], "drawer_disconnected_grace")
+        self.assertTrue(grace_state["payload"].get("drawer_disconnect_deadline_at"))
+
+        round_status = None
+        for _ in range(40):
+            round_status = await _get_round_status(round_id)
+            if round_status == "drawer_disconnected":
+                break
+            await asyncio.sleep(0.05)
+        self.assertEqual(round_status, "drawer_disconnected")
+
+        await observer_socket.disconnect()
 
     async def test_second_socket_for_same_session_does_not_broadcast_room_state_to_peers(self):
         second_session_key = await _create_room_member(self.room.id, "Bob")
