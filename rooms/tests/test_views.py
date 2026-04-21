@@ -167,17 +167,65 @@ class CreateRoomViewTests(TestCase):
         self.assertEqual(Player.objects.count(), 0)
         self.assertIn("display_name", response.json()["errors"])
 
-    def test_create_room_rejects_session_that_is_already_in_a_room(self):
+    def test_create_room_returns_recoverable_conflict_when_session_already_owns_room(self):
         first_response = self.post_create_room()
 
         self.assertEqual(first_response.status_code, 201)
 
         response = self.post_create_room(name="Second Room")
+        response_data = response.json()
+        existing_room = Room.objects.get()
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(Room.objects.count(), 1)
         self.assertEqual(Player.objects.count(), 1)
-        self.assertIn("detail", response.json())
+        self.assertEqual(
+            response_data["detail"],
+            "This guest session is already assigned to a room.",
+        )
+        self.assertEqual(response_data["join_code"], existing_room.join_code)
+        self.assertEqual(response_data["room_url"], f"/rooms/{existing_room.join_code}/")
+
+    @patch("rooms.views._get_room_runtime_redis_client")
+    def test_create_room_ignores_expired_same_session_membership(
+        self,
+        get_redis_client,
+    ):
+        fake_redis = fakeredis.FakeRedis()
+        get_redis_client.return_value = fake_redis
+        session = self.client.session
+        session.save()
+        expired_at = timezone.now() - timedelta(minutes=1)
+        stale_room = Room.objects.create(
+            name="Stale Room",
+            join_code="STALE123",
+            visibility=Room.Visibility.PRIVATE,
+        )
+        stale_player = Player.objects.create(
+            room=stale_room,
+            session_key=session.session_key,
+            display_name="Alex",
+            connection_status=Player.ConnectionStatus.DISCONNECTED,
+            session_expires_at=expired_at,
+        )
+        stale_room.host = stale_player
+        stale_room.save(update_fields=["host", "updated_at"])
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.post_create_room(name="Fresh Room")
+
+        response_data = response.json()
+        stale_room.refresh_from_db()
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(Room.objects.count(), 2)
+        self.assertEqual(Player.objects.count(), 1)
+        self.assertFalse(Player.objects.filter(pk=stale_player.id).exists())
+        self.assertEqual(stale_room.status, Room.Status.EMPTY_GRACE)
+        self.assertEqual(stale_room.host_id, None)
+        self.assertEqual(Room.objects.filter(status=Room.Status.LOBBY).count(), 1)
+        self.assertEqual(Player.objects.get().room.join_code, response_data["join_code"])
+        self.assertEqual(response_data["room_url"], f"/rooms/{response_data['join_code']}/")
 
     @patch(
         "rooms.views.generate_join_code",
@@ -332,7 +380,7 @@ class JoinRoomViewTests(TestCase):
         self.assertEqual(Player.objects.count(), 1)
         self.assertEqual(response.json()["detail"], "This room is full.")
 
-    def test_join_room_rejects_session_already_assigned_to_another_room(self):
+    def test_join_room_returns_recoverable_conflict_for_valid_other_room_assignment(self):
         other_room = Room.objects.create(
             name="Other Room",
             join_code="ZXCV5678",
@@ -353,13 +401,53 @@ class JoinRoomViewTests(TestCase):
         Player.objects.filter(room=other_room).update(session_key=session.session_key)
 
         response = self.post_join_room()
+        response_data = response.json()
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(Player.objects.count(), 1)
         self.assertEqual(
-            response.json()["detail"],
+            response_data["detail"],
             "This guest session is already assigned to a room.",
         )
+        self.assertEqual(response_data["join_code"], other_room.join_code)
+        self.assertEqual(response_data["room_url"], f"/rooms/{other_room.join_code}/")
+
+    @patch("rooms.views._get_room_runtime_redis_client")
+    def test_join_room_ignores_expired_same_session_membership_in_another_room(
+        self,
+        get_redis_client,
+    ):
+        fake_redis = fakeredis.FakeRedis()
+        get_redis_client.return_value = fake_redis
+        session = self.client.session
+        session.save()
+        expired_at = timezone.now() - timedelta(minutes=1)
+        stale_room = Room.objects.create(
+            name="Old Room",
+            join_code="OLDROOM1",
+            visibility=Room.Visibility.PUBLIC,
+        )
+        stale_player = Player.objects.create(
+            room=stale_room,
+            session_key=session.session_key,
+            display_name="Alex",
+            connection_status=Player.ConnectionStatus.DISCONNECTED,
+            session_expires_at=expired_at,
+        )
+        stale_room.host = stale_player
+        stale_room.save(update_fields=["host", "updated_at"])
+
+        response = self._post_join_room_and_execute_on_commit()
+
+        stale_room.refresh_from_db()
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(Player.objects.count(), 1)
+        self.assertFalse(Player.objects.filter(pk=stale_player.id).exists())
+        self.assertEqual(stale_room.status, Room.Status.EMPTY_GRACE)
+        joined_player = Player.objects.get()
+        self.assertEqual(joined_player.room_id, self.room.id)
+        self.assertEqual(response.json()["room_url"], f"/rooms/{self.room.join_code}/")
 
     def test_join_room_returns_404_for_unknown_join_code(self):
         response = self.post_join_room(join_code="missing1")
