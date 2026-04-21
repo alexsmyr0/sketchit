@@ -18,6 +18,7 @@ from rooms.models import Player, Room
 from rooms.services import (
     delete_room_if_empty_grace_expired,
     get_empty_room_cleanup_deadline,
+    purge_expired_participants_for_session,
     restore_room_from_empty_grace,
     schedule_host_changed_broadcast_after_commit,
     schedule_room_state_broadcast_after_commit,
@@ -221,12 +222,21 @@ def create_room(request):
         return JsonResponse({"errors": form.errors}, status=400)
 
     session_key = _get_or_create_session_key(request)
-    # A guest session can only belong to one room at a time.
-    if Player.objects.filter(session_key=session_key).exists():
-        return JsonResponse(
-            {"detail": "This guest session is already assigned to a room."},
-            status=409,
-        )
+    # Clean up stale ownership for this browser session before enforcing the
+    # one-room-at-a-time rule. Persistent MySQL rows can survive app restarts
+    # after the underlying Django session has already expired.
+    purge_expired_participants_for_session(
+        redis_client=_get_room_runtime_redis_client(),
+        session_key=session_key,
+    )
+    existing_player = (
+        Player.objects.select_related("room")
+        .filter(session_key=session_key)
+        .order_by("created_at", "id")
+        .first()
+    )
+    if existing_player is not None:
+        return _build_room_assignment_conflict_response(existing_player.room)
 
     cleaned_data = form.cleaned_data
 
@@ -267,8 +277,17 @@ def join_room(request, join_code):
 
     # The Django session is our guest identity for the MVP.
     session_key = _get_or_create_session_key(request)
+    room_runtime_redis_client = _get_room_runtime_redis_client()
 
     with transaction.atomic():
+        # Entry flow cleanup is session-scoped on purpose: remove stale rows
+        # that no longer belong to a live Django session before deciding
+        # whether this request is a valid rejoin or a real cross-room conflict.
+        purge_expired_participants_for_session(
+            redis_client=room_runtime_redis_client,
+            session_key=session_key,
+        )
+
         try:
             # Generated join codes are uppercase, so we normalize user input
             # before querying to allow lowercase requests like "abc12345".
@@ -291,27 +310,32 @@ def join_room(request, join_code):
                 # A join that arrives after the grace window should not revive a
                 # zombie room just because the async cleanup path has not run yet.
                 delete_room_if_empty_grace_expired(
-                    redis_client=_get_room_runtime_redis_client(),
+                    redis_client=room_runtime_redis_client,
                     room_id=room.id,
                     now=current_time,
                 )
                 return JsonResponse({"detail": "Room not found."}, status=404)
 
             restore_room_from_empty_grace(
-                redis_client=_get_room_runtime_redis_client(),
+                redis_client=room_runtime_redis_client,
                 room_id=room.id,
             )
             room.refresh_from_db()
 
         # If the session already has a Player, we either reuse it for the same room
         # or reject the request if it belongs to a different room.
-        player = Player.objects.filter(session_key=session_key).first()
+        player = (
+            Player.objects.select_related("room")
+            .filter(session_key=session_key)
+            .order_by("created_at", "id")
+            .first()
+        )
         if player is not None:
             if player.room_id != room.id:
-                return JsonResponse(
-                    {"detail": "This guest session is already assigned to a room."},
-                    status=409,
-                )
+                # Keep the conflict semantics, but include a recovery target so
+                # the entry page can send the guest back to the room they still
+                # validly own instead of leaving them stuck at a dead end.
+                return _build_room_assignment_conflict_response(player.room)
 
             # Rejoining the same room should not create a duplicate participant or
             # change the original display name, but it should refresh the session
