@@ -289,12 +289,18 @@ def schedule_room_state_broadcast_after_commit(*, join_code: str, room_id: int) 
     model instances that might later roll back.
     """
 
-    transaction.on_commit(
-        lambda: _publish_room_group_event(
+    def _do_broadcast():
+        _publish_room_group_event(
             join_code=join_code,
             event=_build_room_state_event(room_id=room_id),
         )
-    )
+
+    from django.conf import settings
+    if getattr(settings, "SKETCHIT_ENABLE_RUNTIME_COORDINATOR", False):
+        _do_broadcast()
+        return
+
+    transaction.on_commit(_do_broadcast)
 
 
 def schedule_host_changed_broadcast_after_commit(
@@ -304,12 +310,18 @@ def schedule_host_changed_broadcast_after_commit(
 ) -> None:
     """Broadcast the committed A-06 ``host.changed`` event after commit."""
 
-    transaction.on_commit(
-        lambda: _publish_room_group_event(
+    def _do_broadcast():
+        _publish_room_group_event(
             join_code=join_code,
             event=_build_host_changed_event(host=host),
         )
-    )
+
+    from django.conf import settings
+    if getattr(settings, "SKETCHIT_ENABLE_RUNTIME_COORDINATOR", False):
+        _do_broadcast()
+        return
+
+    transaction.on_commit(_do_broadcast)
 
 
 def _validate_room_presence_identity(
