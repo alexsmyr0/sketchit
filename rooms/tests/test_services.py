@@ -23,6 +23,7 @@ from rooms.services import (
     leave_participant,
     promote_mid_game_spectators_to_players,
     purge_expired_participants,
+    purge_expired_participants_for_session,
     restore_room_from_empty_grace,
 )
 
@@ -834,6 +835,53 @@ class EmptyRoomGraceServiceTests(TestCase):
         self.assertEqual(purged_count, 0)
         self.assertTrue(Player.objects.filter(pk=active_player.id).exists())
         self.assertEqual(self.room.status, Room.Status.LOBBY)
+
+    def test_purge_expired_participants_for_session_only_removes_matching_session(self):
+        expired_at = timezone.now() - timedelta(minutes=1)
+        target_player = Player.objects.create(
+            room=self.room,
+            session_key="target-session",
+            display_name="Expired Alex",
+            connection_status=Player.ConnectionStatus.DISCONNECTED,
+            session_expires_at=expired_at,
+        )
+        self.room.host = target_player
+        self.room.save(update_fields=["host", "updated_at"])
+        other_room = Room.objects.create(
+            name="Other Room",
+            join_code="OTHER123",
+            visibility=Room.Visibility.PRIVATE,
+        )
+        other_player = Player.objects.create(
+            room=other_room,
+            session_key="other-session",
+            display_name="Expired Jamie",
+            connection_status=Player.ConnectionStatus.DISCONNECTED,
+            session_expires_at=expired_at,
+        )
+        other_room.host = other_player
+        other_room.save(update_fields=["host", "updated_at"])
+
+        purged_counts: list[int] = []
+        self._execute_on_commit(
+            lambda: purged_counts.append(
+                purge_expired_participants_for_session(
+                    redis_client=self.redis_client,
+                    session_key="target-session",
+                    now=timezone.now(),
+                )
+            )
+        )
+        purged_count = purged_counts[0]
+
+        self.room.refresh_from_db()
+        other_room.refresh_from_db()
+        self.assertEqual(purged_count, 1)
+        self.assertFalse(Player.objects.filter(pk=target_player.id).exists())
+        self.assertTrue(Player.objects.filter(pk=other_player.id).exists())
+        self.assertEqual(self.room.status, Room.Status.EMPTY_GRACE)
+        self.assertEqual(other_room.status, Room.Status.LOBBY)
+        self.assertEqual(other_room.host_id, other_player.id)
 
 
 class PromoteMidGameSpectatorsServiceTests(TestCase):

@@ -172,11 +172,22 @@ class Guess(TimestampedModel):
         related_name="guesses",
     )
     text = models.CharField(max_length=255)
+    normalized_text = models.TextField(default="")
     is_correct = models.BooleanField(default=False)
     typed_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
         ordering = ("round_id", "typed_at", "id")
+        indexes = [
+            models.Index(
+                fields=("round", "player"),
+                name="games_guess_round_player",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.normalized_text = " ".join(self.text.strip().split()).casefold()
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.text
