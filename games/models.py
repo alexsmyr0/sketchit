@@ -172,7 +172,7 @@ class Guess(TimestampedModel):
         related_name="guesses",
     )
     text = models.CharField(max_length=255)
-    normalized_text = models.CharField(max_length=255, default="", db_index=True)
+    normalized_text = models.TextField(default="")
     is_correct = models.BooleanField(default=False)
     typed_at = models.DateTimeField(default=timezone.now)
 
@@ -180,8 +180,8 @@ class Guess(TimestampedModel):
         ordering = ("round_id", "typed_at", "id")
         indexes = [
             models.Index(
-                fields=("round", "player", "normalized_text"),
-                name="games_guess_round_player_norm",
+                fields=("round", "player"),
+                name="games_guess_round_player",
             ),
         ]
 

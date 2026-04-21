@@ -135,11 +135,15 @@ def _is_same_player_duplicate_guess(
     normalized_guess_text: str,
     excluded_guess_id: int,
 ) -> bool:
-    return Guess.objects.filter(
-        round_id=round_id,
-        player_id=player_id,
-        normalized_text=normalized_guess_text,
-    ).exclude(pk=excluded_guess_id).exists()
+    return (
+        Guess.objects.filter(
+            round_id=round_id,
+            player_id=player_id,
+        )
+        .exclude(pk=excluded_guess_id)
+        .filter(normalized_text=normalized_guess_text)
+        .exists()
+    )
 
 
 def _is_player_already_correct_for_round(*, round_id: int, player_id: int) -> bool:

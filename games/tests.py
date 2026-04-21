@@ -2018,6 +2018,18 @@ class GuessServiceIntegrationTests(TestCase):
         self.assertTrue(result.is_correct)
         self.assertEqual(result.outcome, game_services.GuessOutcome.CORRECT)
 
+    def test_casefold_expansion_keeps_full_normalized_text_and_duplicate_detection(self):
+        expanding_guess_text = "ß" * 255
+
+        first_result = evaluate_guess_for_round(self.round, self.guesser, expanding_guess_text)
+        second_result = evaluate_guess_for_round(self.round, self.guesser, expanding_guess_text)
+        first_guess = Guess.objects.filter(round=self.round, player=self.guesser).earliest("id")
+
+        self.assertEqual(first_result.outcome, game_services.GuessOutcome.INCORRECT)
+        self.assertEqual(second_result.outcome, game_services.GuessOutcome.DUPLICATE)
+        self.assertEqual(len(first_guess.normalized_text), 510)
+        self.assertEqual(first_guess.normalized_text, "ss" * 255)
+
     def test_second_near_match_with_same_text_is_duplicate(self):
         self.game_word.text = "new york city"
         self.game_word.save(update_fields=("text", "updated_at"))
