@@ -35,3 +35,7 @@
 ## Apr 15
 
 - Added Time-Based Scoring & Multi-Guesser Round Resolution.
+
+## Apr 20
+
+- Added near-match, duplicate, and correct-once guess rules.
