@@ -75,6 +75,24 @@ Implemented A05 empty-room grace: empty rooms now enter empty_grace, persist emp
 ## 12/04
 Graded N4 and N5 ticket for Nikos. There were critical bugs in both but after pointing them out, Nikos patched them up swiftly and I merged.
 
-# 13/04
+## 13/04
 Implemented A6. Implemented server-authoritative live lobby WebSocket updates by sending initial and change-driven room.state snapshots, plus host.changed on real host handoffs, for joins, leaves, disconnects, and reconnects.
 
+## 15/04
+Graded Kostas's K4 ticket regarding full game-cycle drawer rotation and word uniqueness. I suggested a small fix, he implemented it, and I then approved and merged the PR.
+
+## 18/04
+Graded Nikos's PR #69. I found a few issues, reported them, and Nikos patched them swiftly. I then reassessed the updated work and merged it.
+
+## 19/04
+Graded Nikos's pull requests #77, #76, and #75. I found bugs in all three, reported them to Nikos, and he resolved them. I then reassessed the updated work and pushed them forward.
+
+## 20/04
+Implemented A7, which adds the mid-game joiner and reconnect reclaim rules so players who join during an active game become spectators for the current turn, reconnecting same-session players keep their original place and score, and the room behavior stays consistent with the SDS for session-based guest identity.
+
+Nikos graded my implementation and found some testing gaps and one critical bug. After discussing it with him, I fixed the problems and he merged the ticket.
+
+## 21/04
+Implemented issue #79 by fixing the dead-end room entry flow for stale or hidden guest-session room ownership. Expired same-session participant rows are now cleaned up before create/join rejects the request, valid existing ownership returns a recoverable response with `room_url`, the entry-page JavaScript redirects guests back into their existing room for that recoverable case, and room entry is now serialized by Django session to prevent concurrent duplicate room ownership.
+
+Graded Kostas's K6 ticket and gave feedback. After reassessing the updated implementation, I merged it.

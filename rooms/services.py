@@ -514,6 +514,47 @@ def purge_expired_participants(
     return purged_count
 
 
+def purge_expired_participants_for_session(
+    *,
+    redis_client,
+    session_key: str,
+    now: datetime | None = None,
+) -> int:
+    """Remove expired participants that belong to one guest session.
+
+    The room-entry flow only needs to clean up stale ownership rows for the
+    browser session making the current request. Keeping this helper
+    session-scoped avoids doing unrelated expiry cleanup for other guests on
+    the critical path of create/join requests.
+    """
+
+    current_time = now or timezone.now()
+    expired_player_ids = list(
+        Player.objects.filter(
+            session_key=session_key,
+            session_expires_at__lte=current_time,
+        )
+        .order_by("session_expires_at", "id")
+        .values_list("id", flat=True)
+    )
+
+    purged_count = 0
+    for player_id in expired_player_ids:
+        try:
+            # Route the delete through the normal leave path so host handoff,
+            # empty-room grace, and runtime cleanup stay consistent.
+            leave_participant(
+                redis_client=redis_client,
+                player_id=player_id,
+            )
+        except Player.DoesNotExist:
+            # A concurrent request may have already removed this stale row.
+            continue
+        purged_count += 1
+
+    return purged_count
+
+
 def cleanup_expired_empty_rooms(
     *,
     redis_client,
