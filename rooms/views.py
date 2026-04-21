@@ -106,6 +106,25 @@ def _build_room_response(room, *, status):
     )
 
 
+def _build_room_assignment_conflict_response(room):
+    """Return a recoverable conflict payload for an already-owned valid room.
+
+    The create/join entry flow still treats this as a conflict because the
+    guest cannot own two rooms at once. Including ``room_url`` lets the browser
+    recover by navigating back into the authoritative existing room instead of
+    leaving the guest stuck on the entry page.
+    """
+
+    return JsonResponse(
+        {
+            "detail": "This guest session is already assigned to a room.",
+            "join_code": room.join_code,
+            "room_url": f"/rooms/{room.join_code}/",
+        },
+        status=409,
+    )
+
+
 def _serialize_host(player):
     if player is None:
         return None
