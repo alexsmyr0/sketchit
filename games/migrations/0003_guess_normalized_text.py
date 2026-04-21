@@ -28,7 +28,7 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name="guess",
             name="normalized_text",
-            field=models.CharField(db_index=True, default="", max_length=255),
+            field=models.TextField(default=""),
         ),
         migrations.RunPython(
             code=populate_normalized_guess_text,
@@ -37,8 +37,8 @@ class Migration(migrations.Migration):
         migrations.AddIndex(
             model_name="guess",
             index=models.Index(
-                fields=["round", "player", "normalized_text"],
-                name="games_guess_round_player_norm",
+                fields=["round", "player"],
+                name="games_guess_round_player",
             ),
         ),
     ]
