@@ -56,6 +56,12 @@ def get_redis_client() -> redis.Redis:
     return _redis_client
 
 
+def reset_redis_client() -> None:
+    """Reset the cached Redis client. Used for test isolation."""
+    global _redis_client
+    _redis_client = None
+
+
 @database_sync_to_async
 def _mark_participant_connected(
     player_id: int,
@@ -244,21 +250,12 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                     },
                 )
 
-        # Send canvas snapshot first, then round state
         await self._send_initial_canvas_snapshot()
-
-        # A reconnecting/late-joining client needs an immediate phase snapshot
-        # after the lobby snapshot so timer UI does not depend on waiting for
-        # the next periodic tick.
         for event in await _get_runtime_sync_events(self.join_code, self.player.id):
             await self.send_json(event)
 
     async def disconnect(self, code: int) -> None:
         """Remove this socket from channel groups and update lifecycle state.
-
-        Disconnect only closes this one socket. The service layer decides
-        whether the participant still counts as connected overall, because the
-        same guest session may still have another open tab/socket in the room.
         """
         if hasattr(self, "room_group"):
             await self.channel_layer.group_discard(self.room_group, self.channel_name)
@@ -274,6 +271,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
 
     async def receive_json(self, content: dict, **kwargs) -> None:
         """Handle inbound JSON events."""
+        print(f"DEBUG: Consumer received: {content.get('type')}")
         message_type = content.get("type")
 
         if message_type == "echo":

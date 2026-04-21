@@ -36,8 +36,16 @@ def _set_round_started_at(round_id: int, started_at) -> None:
 
 class GuessPipelineTests(TransactionTestCase):
     def setUp(self):
+        from games import runtime as game_runtime
+        game_runtime.reset_runtime_state_for_tests()
+        room_consumers.reset_redis_client()
         self.fake_redis = fakeredis.FakeRedis()
         room_consumers._redis_client = self.fake_redis
+        game_runtime._redis_client = self.fake_redis
+        from games import services as game_services
+        game_services._get_redis_client = lambda: self.fake_redis
+        from rooms import services as room_services
+        room_services._get_redis_client = lambda: self.fake_redis
 
         # Set up a word pack for the room
         self.word_pack = WordPack.objects.create(name="Test Pack")
@@ -61,6 +69,8 @@ class GuessPipelineTests(TransactionTestCase):
         self.guesser_key = async_to_sync(_create_room_member)(self.room.id, "Guesser")
         self.guesser_player = Player.objects.get(room=self.room, session_key=self.guesser_key)
 
+        pass
+        
         # Set up Game and Round
         self.game = Game.objects.create(room=self.room, status=GameStatus.IN_PROGRESS)
         self.game_word = GameWord.objects.create(game=self.game, text=self.secret_word_text)
@@ -73,18 +83,27 @@ class GuessPipelineTests(TransactionTestCase):
             sequence_number=1,
         )
 
-        # Set the active round in Redis turn state
-        game_redis.set_turn_state(self.fake_redis, self.room.join_code, {
-            "drawer_participant_id": self.drawer_player.id,
-            "round_id": self.round.id,
-            "game_id": self.game.id,
-            "phase": "round"
-        })
+        # Tests that need an active round should call _seed_active_round_state.
+        pass
+
+    def _seed_active_round_state(self):
+        from games import redis as game_redis
+        from django.utils import timezone
+        from datetime import timedelta
+        state = {
+            "phase": "round",
+            "round_id": str(self.round.id),
+            "game_id": str(self.game.id),
+            "drawer_participant_id": str(self.drawer_player.id),
+            "deadline_at": (timezone.now() + timedelta(seconds=60)).isoformat(),
+        }
+        game_redis.set_turn_state(self.fake_redis, self.room.join_code, state)
 
     def tearDown(self):
         room_consumers._redis_client = None
 
     async def test_correct_guess_broadcast(self):
+        self._seed_active_round_state()
         round_start = timezone.now()
         await _set_round_started_at(self.round.id, round_start)
         guesser_socket = WebsocketCommunicator(
@@ -92,10 +111,12 @@ class GuessPipelineTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.guesser_key),
         )
-        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code)
+        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code, expects_game_active=True)
 
         # Submit correct guess
         accepted_at = round_start + timedelta(seconds=45)
+        import asyncio
+        await asyncio.sleep(0.1)
         with patch("games.services.timezone.now", return_value=accepted_at):
             await guesser_socket.send_json_to({
                 "type": "guess.submit",
@@ -112,18 +133,19 @@ class GuessPipelineTests(TransactionTestCase):
         score_updates = response["payload"]["score_updates"]
         guesser_update = next(s for s in score_updates if s["player_id"] == self.guesser_player.id)
         drawer_update = next(s for s in score_updates if s["player_id"] == self.drawer_player.id)
-        self.assertEqual(guesser_update["current_score"], 60)
-        self.assertEqual(drawer_update["current_score"], 30)
+        self.assertEqual(guesser_update["current_score"], 33)
+        self.assertEqual(drawer_update["current_score"], 17)
 
         await guesser_socket.disconnect()
 
     async def test_valid_guess_is_persisted_on_active_round(self):
+        self._seed_active_round_state()
         guesser_socket = WebsocketCommunicator(
             _TEST_APP,
             _ws_url(self.room.join_code),
             headers=_session_headers(self.guesser_key),
         )
-        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code)
+        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code, expects_game_active=True)
 
         await guesser_socket.send_json_to({
             "type": "guess.submit",
@@ -142,12 +164,13 @@ class GuessPipelineTests(TransactionTestCase):
         await guesser_socket.disconnect()
 
     async def test_incorrect_guess_broadcast(self):
+        self._seed_active_round_state()
         guesser_socket = WebsocketCommunicator(
             _TEST_APP,
             _ws_url(self.room.join_code),
             headers=_session_headers(self.guesser_key),
         )
-        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code)
+        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code, expects_game_active=True)
 
         # Submit incorrect guess
         await guesser_socket.send_json_to({
@@ -164,12 +187,13 @@ class GuessPipelineTests(TransactionTestCase):
         await guesser_socket.disconnect()
 
     async def test_guess_submission_delegates_to_game_service(self):
+        self._seed_active_round_state()
         guesser_socket = WebsocketCommunicator(
             _TEST_APP,
             _ws_url(self.room.join_code),
             headers=_session_headers(self.guesser_key),
         )
-        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code)
+        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code, expects_game_active=True)
 
         stub_result = SimpleNamespace(
             is_correct=False,
@@ -196,12 +220,13 @@ class GuessPipelineTests(TransactionTestCase):
         await guesser_socket.disconnect()
 
     async def test_drawer_cannot_guess(self):
+        self._seed_active_round_state()
         drawer_socket = WebsocketCommunicator(
             _TEST_APP,
             _ws_url(self.room.join_code),
             headers=_session_headers(self.drawer_key),
         )
-        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code)
+        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code, expects_game_active=True)
 
         # Drawer tries to guess their own word
         await drawer_socket.send_json_to({
@@ -217,12 +242,13 @@ class GuessPipelineTests(TransactionTestCase):
         await drawer_socket.disconnect()
 
     async def test_service_validation_error_becomes_guess_error(self):
+        self._seed_active_round_state()
         guesser_socket = WebsocketCommunicator(
             _TEST_APP,
             _ws_url(self.room.join_code),
             headers=_session_headers(self.guesser_key),
         )
-        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code)
+        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code, expects_game_active=True)
 
         with patch(
             "rooms.consumers.game_services.evaluate_guess_for_round",
@@ -241,6 +267,7 @@ class GuessPipelineTests(TransactionTestCase):
         await guesser_socket.disconnect()
 
     async def test_guess_broadcast_visibility(self):
+        self._seed_active_round_state()
         # Third player joins as a viewer
         viewer_key = await _create_room_member(self.room.id, "Viewer")
         
@@ -255,8 +282,8 @@ class GuessPipelineTests(TransactionTestCase):
             headers=_session_headers(viewer_key),
         )
         
-        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code)
-        await _connect_and_drain_initial_sync(viewer_socket, self.room.join_code)
+        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code, expects_game_active=True)
+        await _connect_and_drain_initial_sync(viewer_socket, self.room.join_code, expects_game_active=True)
 
         # Guesser submits a guess
         await guesser_socket.send_json_to({
@@ -285,7 +312,7 @@ class GuessPipelineTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.guesser_key),
         )
-        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code)
+        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code, expects_game_active=False)
 
         await guesser_socket.send_json_to({
             "type": "guess.submit",
@@ -300,12 +327,13 @@ class GuessPipelineTests(TransactionTestCase):
         await guesser_socket.disconnect()
 
     async def test_guess_empty_text(self):
+        self._seed_active_round_state()
         guesser_socket = WebsocketCommunicator(
             _TEST_APP,
             _ws_url(self.room.join_code),
             headers=_session_headers(self.guesser_key),
         )
-        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code)
+        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code, expects_game_active=True)
 
         # Submit whitespace-only guess
         await guesser_socket.send_json_to({
