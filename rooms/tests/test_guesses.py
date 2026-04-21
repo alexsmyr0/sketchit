@@ -30,12 +30,22 @@ def _set_round_started_at(round_id: int, started_at) -> None:
     round.save(update_fields=("started_at", "updated_at"))
 
 
+@database_sync_to_async
+def _set_round_target_word(round_id: int, target_word: str) -> None:
+    round = Round.objects.select_related("selected_game_word").get(pk=round_id)
+    round.selected_game_word.text = target_word
+    round.selected_game_word.save(update_fields=("text", "updated_at"))
+
+
 async def _receive_until_type(
     communicator: WebsocketCommunicator,
     expected_type: str,
     *,
     max_messages: int = 8,
 ) -> dict:
+    # Room sockets emit a direct room.state (and may emit runtime sync frames)
+    # immediately after connect, so guess tests should drain until the event
+    # under assertion appears.
     for _ in range(max_messages):
         message = await communicator.receive_json_from()
         if message.get("type") == expected_type:
@@ -171,6 +181,53 @@ class GuessPipelineTests(TransactionTestCase):
         self.assertFalse(response["payload"]["is_correct"])
         self.assertEqual(response["payload"]["outcome"], game_services.GuessOutcome.INCORRECT)
         self.assertEqual(response["payload"]["text"], "wrongword")
+
+        await guesser_socket.disconnect()
+
+    async def test_near_match_outcome_broadcast(self):
+        await _set_round_target_word(self.round.id, "new york city")
+        guesser_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.guesser_key),
+        )
+        await guesser_socket.connect()
+
+        await guesser_socket.send_json_to({
+            "type": "guess.submit",
+            "payload": {"text": "york"}
+        })
+
+        response = await _receive_until_type(guesser_socket, "guess.result")
+        self.assertEqual(response["type"], "guess.result")
+        self.assertFalse(response["payload"]["is_correct"])
+        self.assertEqual(response["payload"]["outcome"], game_services.GuessOutcome.NEAR_MATCH)
+
+        await guesser_socket.disconnect()
+
+    async def test_duplicate_outcome_broadcast(self):
+        guesser_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.guesser_key),
+        )
+        await guesser_socket.connect()
+
+        await guesser_socket.send_json_to({
+            "type": "guess.submit",
+            "payload": {"text": "planet"}
+        })
+        first_response = await _receive_until_type(guesser_socket, "guess.result")
+
+        await guesser_socket.send_json_to({
+            "type": "guess.submit",
+            "payload": {"text": "  PLANET "}
+        })
+        second_response = await _receive_until_type(guesser_socket, "guess.result")
+
+        self.assertEqual(first_response["payload"]["outcome"], game_services.GuessOutcome.INCORRECT)
+        self.assertEqual(second_response["payload"]["outcome"], game_services.GuessOutcome.DUPLICATE)
+        self.assertFalse(second_response["payload"]["is_correct"])
 
         await guesser_socket.disconnect()
 

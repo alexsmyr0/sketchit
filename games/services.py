@@ -135,15 +135,39 @@ def _is_same_player_duplicate_guess(
     normalized_guess_text: str,
     excluded_guess_id: int,
 ) -> bool:
-    return any(
-        _normalize_guess_text(previous_guess_text) == normalized_guess_text
-        for previous_guess_text in Guess.objects.filter(
-            round_id=round_id,
-            player_id=player_id,
-        )
-        .exclude(pk=excluded_guess_id)
-        .values_list("text", flat=True)
-    )
+    return Guess.objects.filter(
+        round_id=round_id,
+        player_id=player_id,
+        normalized_text=normalized_guess_text,
+    ).exclude(pk=excluded_guess_id).exists()
+
+
+def _is_player_already_correct_for_round(*, round_id: int, player_id: int) -> bool:
+    return Guess.objects.filter(
+        round_id=round_id,
+        player_id=player_id,
+        is_correct=True,
+    ).exists()
+
+
+def _already_correct_outcome_for_guess(
+    *,
+    round_id: int,
+    player_id: int,
+    normalized_guess_text: str,
+    excluded_guess_id: int,
+) -> str:
+    # Already-correct guesses remain ignored for scoring/round progression.
+    # If the guess text itself is a repeat, label it as duplicate so clients
+    # can present accurate feedback.
+    if _is_same_player_duplicate_guess(
+        round_id=round_id,
+        player_id=player_id,
+        normalized_guess_text=normalized_guess_text,
+        excluded_guess_id=excluded_guess_id,
+    ):
+        return GuessOutcome.DUPLICATE
+    return GuessOutcome.INCORRECT
 
 
 def _is_near_match_guess(
@@ -151,6 +175,11 @@ def _is_near_match_guess(
     normalized_guess_text: str,
     normalized_target_text: str,
 ) -> bool:
+    """Return near-match for non-correct guesses only.
+
+    Callers must evaluate exact equality first and only call this function for
+    guesses that are already known not to be an exact correct match.
+    """
     if not normalized_guess_text or not normalized_target_text:
         return False
 
@@ -653,18 +682,22 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
             score_updates=(),
         )
 
-    normalized_guess_text = _normalize_guess_text(guess.text)
+    normalized_guess_text = guess.normalized_text
     normalized_target_text = _normalize_guess_text(locked_round.selected_game_word.text)
 
-    if Guess.objects.filter(
+    if _is_player_already_correct_for_round(
         round_id=locked_round.id,
         player_id=guessing_player.id,
-        is_correct=True,
-    ).exists():
+    ):
         return _build_guess_evaluation_result(
             guess=guess,
             locked_round=locked_round,
-            outcome=GuessOutcome.INCORRECT,
+            outcome=_already_correct_outcome_for_guess(
+                round_id=locked_round.id,
+                player_id=guessing_player.id,
+                normalized_guess_text=normalized_guess_text,
+                excluded_guess_id=guess.id,
+            ),
             is_correct=False,
             round_completed_now=False,
             winning_player_id=None,
