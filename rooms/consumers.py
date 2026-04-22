@@ -212,10 +212,10 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         self.session_key: str = session_key
 
         # The lifecycle service call below marks the participant connected in
-        # Redis/MySQL and may schedule a room-wide ``room.state`` broadcast.
-        # We therefore wait to join the room group until after ``accept()`` and
-        # use the returned flag to broadcast only to already-connected peers.
-        connection_state_changed = await _mark_participant_connected(
+        # Redis/MySQL and will schedule a room-wide ``room.state`` broadcast
+        # via the room-group. Using the service for broadcasts ensures that
+        # peers receive state derived from a successful DB commit.
+        await _mark_participant_connected(
             self.player.id,
             self.join_code,
             self.session_key,
@@ -223,32 +223,15 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         )
         await self.accept()
 
-        # The socket must be accepted before we try to send frames back to the
-        # browser; the direct snapshot therefore belongs after ``accept()``.
-        #
-        # This direct send is separate from room-group fan-out because the
-        # connecting client must not depend on timing of any room-wide
-        # broadcast to receive its initial authoritative lobby state.
-        initial_room_state_event = await _get_initial_room_state_event(self.room.id)
-        await self.send_json(initial_room_state_event)
-
         await self.channel_layer.group_add(self.room_group, self.channel_name)
         await self.channel_layer.group_add(self.player_group, self.channel_name)
 
-        if connection_state_changed:
-            # Existing peers still need the connect/reconnect ``room.state``
-            # update, but the connecting client already received the same
-            # snapshot directly above. Fan-out via each peer's player group so
-            # the newly connected socket is fully subscribed before connect()
-            # returns without receiving a duplicate lobby snapshot.
-            for peer_id in await _get_connected_peer_ids(self.room.id, self.player.id):
-                await self.channel_layer.group_send(
-                    _player_group_name(self.join_code, peer_id),
-                    {
-                        "type": "room.server_event",
-                        "event": initial_room_state_event,
-                    },
-                )
+        # The socket must be accepted before we try to send frames back to the
+        # browser. We send the initial snapshot directly so the connecting 
+        # client has authoritative state immediately without waiting for a
+        # group broadcast.
+        initial_room_state_event = await _get_initial_room_state_event(self.room.id)
+        await self.send_json(initial_room_state_event)
 
         # Send canvas snapshot first, then round state
         await self._send_initial_canvas_snapshot()

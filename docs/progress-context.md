@@ -4,62 +4,54 @@ This file is a concise snapshot of the current implementation state. It describe
 
 ## Overall state
 
-- The repository is an early Django project scaffold.
+- The repository is a functional Django project with a multi-client real-time game loop.
 - Core domain models exist for rooms, participants, games, rounds, guesses, and words.
-- The app is not yet playable end to end.
-- `Example_starting_code/` is reference material only and is not part of the live app.
+- Ticket G-02 (Live Lobby Page Template & Room Client) has been implemented, providing a synchronized real-time lobby experience.
 
 ## UI
 
-- No live product UI is implemented in the main app.
-- No templates, frontend app, or browser game screens exist outside `Example_starting_code/`.
-- Django admin is the only wired HTTP route.
+- Real-time product UI is partially implemented.
+- `room_entry.html` (G-01) and `room_lobby.html` (G-02) exist and are fully functional.
+- `room_lobby.js` handles WebSocket synchronization, host controls (starting game, updating settings), and participant list updates.
+- Premium styling has been applied to the entry and lobby screens.
 
 ## Backend
 
 - Django is configured with apps for `core`, `rooms`, `games`, and `words`.
-- App views are still stubs.
-- No REST API, form flow, or room/game endpoints are implemented.
+- `rooms/views.py` includes fully functional views for creating rooms, joining rooms, lobby state, and updating settings.
+- `rooms/services.py` centralizes participant lifecycle logic (connect, disconnect, leave, host handoff) and handles real-time broadcasts.
+- `games/services.py` and `games/runtime.py` exist for gameplay logic.
 
 ## WebSockets / Real-time
 
-- Channels is installed and ASGI is configured.
-- Project websocket routing is currently empty.
-- No consumers or realtime event flows exist in the live app.
+- Channels is installed and ASGI is fully configured.
+- `rooms/consumers.py` implements a robust `RoomConsumer` for real-time communication.
+- Real-time events include `room.state`, `host.changed`, `drawing.stroke`, and `guess.submit`.
+- WebSocket routing is wired in `config/routing.py`.
 
 ## Database
 
 - Persistent models exist in `rooms`, `games`, and `words`.
-- `rooms` currently defines `Room` and `Player`.
-- `games` currently defines `Game`, `GameWord`, `Round`, and `Guess`.
-- `words` currently defines `WordPack`, `Word`, and `WordPackEntry`.
-- A default seeded word pack exists through migration.
-- Some intended product relationships are not implemented yet, such as a room-to-word-pack relation.
+- `Room`, `Player`, `Game`, `GameWord`, `Round`, `Guess`, `WordPack`, `Word`.
+- MySQL is used for persistent storage, as specified in the PRD.
 
 ## Game logic
 
-- There is no implemented game service layer yet.
-- Some model-level validation exists for game and round consistency.
-- Turn flow, scoring rules, guess evaluation, reconnect handling, host reassignment, timers, and cleanup behavior are not implemented yet.
+- A game service layer is being implemented.
+- Turn flow, scoring, and round transitions are partially implemented.
+- Drawers can draw, and non-drawers can submit guesses (G-03/G-04 implementation in progress or partially present).
 
 ## AI integration
 
-- No AI features or integrations exist in the codebase.
+- No AI features or integrations exist in the codebase currently.
 
 ## Infrastructure
 
-- The default project settings use MySQL for persistent data.
-- The default project settings use Redis channel layers.
-- `config.test_settings` keeps MySQL but swaps the channel layer to in-memory for tests that do not need Redis transport behavior.
-- Local Docker files exist for app, MySQL, and Redis setup.
+- The project uses MySQL for persistent data and Redis for Channels and real-time state.
+- Docker configuration is provided for all services.
+- Cleanup management commands (e.g. for empty rooms) exist.
 
 ## Testing
 
-- Automated tests exist in `rooms/tests.py`, `games/tests.py`, and `words/tests.py`.
-- Tests should use MySQL-backed settings rather than SQLite.
-- Running `manage.py test` without environment variables still fails because the default settings require MySQL configuration.
-
-## Notes for future work
-
-- Use this file as implementation-state context.
-- Use `docs/mvp-spec.md` as intended-product context.
+- Automated tests exist for views, services, models, and real-time consumers.
+- Tests use `fakeredis` for Redis isolation and standard Django test runner with MySQL.

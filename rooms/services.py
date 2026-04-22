@@ -374,7 +374,14 @@ def connect_participant(
     # Returning whether the durable status changed lets the consumer broadcast
     # to existing peers after the DB commit without treating extra tabs as a
     # fake reconnect.
-    return previous_connection_status != Player.ConnectionStatus.CONNECTED
+    status_changed = previous_connection_status != Player.ConnectionStatus.CONNECTED
+    if status_changed:
+        schedule_room_state_broadcast_after_commit(
+            join_code=room_join_code,
+            room_id=player.room_id,
+        )
+
+    return status_changed
 
 
 @transaction.atomic

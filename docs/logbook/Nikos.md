@@ -17,3 +17,12 @@ Completed ticket N-03 by implementing a Redis-based Round Runtime state layer wi
 ## 11/04
 
 Completed ticket N-04 by developing the drawing event broadcast system and canvas snapshot synchronization, ensuring that drawing data is correctly propagated to all participants and preserved for late joiners.
+
+### 20/04
+**G-02: Live Lobby Page Template & Room Client**
+Implemented the real-time lobby for Sketchit. 
+- Integrated backend broadcasts for room state changes (settings updates, game start, participant connections).
+- Redesigned the lobby UI with a premium, modern look.
+- Implemented `room_lobby.js` for WebSocket synchronization and dynamic UI updates (participant list, room metadata, host controls).
+- Added "Copy Join URL" functionality for easy room sharing.
+- Ensured host-only controls are correctly restricted and functional.
