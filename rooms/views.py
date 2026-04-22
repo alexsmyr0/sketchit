@@ -196,6 +196,15 @@ def _build_room_lobby_state_response(room):
     )
 
 
+def _count_eligible_lobby_participants(participants):
+    return sum(
+        1
+        for participant in participants
+        if participant.connection_status == Player.ConnectionStatus.CONNECTED
+        and participant.participation_status != Player.ParticipationStatus.SPECTATING
+    )
+
+
 def _request_prefers_html(request):
     accept_header = request.headers.get("Accept", "")
     normalized_accept = accept_header.lower()
@@ -444,7 +453,18 @@ def room_lobby_state(request, join_code):
         )
 
     if _request_prefers_html(request):
-        participants = room.participants.order_by("created_at", "id")
+        participants = list(room.participants.order_by("created_at", "id"))
+        eligible_participant_count = _count_eligible_lobby_participants(participants)
+        can_start_game = (
+            room.status == Room.Status.LOBBY and eligible_participant_count >= 2
+        )
+        if room.status != Room.Status.LOBBY:
+            initial_start_hint = "Game already started."
+        elif eligible_participant_count >= 2:
+            initial_start_hint = ""
+        else:
+            initial_start_hint = "Need at least 2 eligible players to start."
+
         return render(
             request,
             "rooms/room_lobby.html",
@@ -453,6 +473,8 @@ def room_lobby_state(request, join_code):
                 "host": room.host,
                 "participant": participant,
                 "participants": participants,
+                "can_start_game": can_start_game,
+                "initial_start_hint": initial_start_hint,
             },
         )
 

@@ -373,6 +373,46 @@ test("startGame ignored duplicate clicks and left the host in read-only mode aft
 });
 
 
+test("startGame success kept the lobby locked until the next room.state arrived", async () => {
+    const harness = await loadRoomLobbyScript({
+        fetchResponse: async () => ({
+            ok: true,
+            async json() {
+                return {
+                    room_status: "in_progress",
+                    room: {
+                        status: "in_progress",
+                    },
+                };
+            },
+        }),
+    });
+    harness.client.updateLobbyUI(buildRoomState());
+
+    await harness.client.startGame();
+    await harness.client.startGame();
+
+    assert.equal(harness.fetchCalls.length, 1);
+    assert.equal(harness.elementsById.get("start-game-button").disabled, true);
+    assert.equal(harness.elementsById.get("edit-room-name").disabled, true);
+    assert.equal(harness.elementsById.get("copy-url-button").disabled, true);
+    assert.equal(harness.elementsById.get("room-status-badge").textContent, "in_progress");
+    assert.equal(harness.elementsById.get("host-controls-note").hidden, false);
+    assert.equal(
+        harness.elementsById.get("lobby-status").textContent,
+        "Game started. Waiting for live room sync...",
+    );
+
+    harness.client.updateLobbyUI(buildRoomState({ roomStatus: "in_progress" }));
+
+    assert.equal(harness.elementsById.get("copy-url-button").disabled, false);
+    assert.equal(
+        harness.elementsById.get("lobby-status").textContent,
+        "Game started. Lobby controls are now read-only.",
+    );
+});
+
+
 test("guest promotion via host.changed exposed host controls before the next room.state", async () => {
     const harness = await loadRoomLobbyScript({
         currentPlayerId: 9,

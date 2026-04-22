@@ -45,6 +45,7 @@ class LobbyClient {
         this.hasReceivedRoomState = false;
         this.isSavingSettings = false;
         this.isStartingGame = false;
+        this.isAwaitingStartRoomState = false;
 
         this.init();
     }
@@ -146,7 +147,9 @@ class LobbyClient {
         const { room, host, participants } = state;
         const previousHostId = this.currentHostId;
         const previousStatus = this.currentRoomStatus;
+        const wasAwaitingStartRoomState = this.isAwaitingStartRoomState;
 
+        this.isAwaitingStartRoomState = false;
         this.hasReceivedRoomState = true;
         this.currentParticipants = participants;
         this.currentHostId = host ? host.id : null;
@@ -170,6 +173,8 @@ class LobbyClient {
 
         if (previousHostId !== null && previousHostId !== this.currentHostId) {
             this.showStatus('Room host changed', { autoHideMs: 3000 });
+        } else if (wasAwaitingStartRoomState && room.status === 'in_progress') {
+            this.showStatus('Game started. Lobby controls are now read-only.', { autoHideMs: 3000 });
         } else if (previousStatus === 'lobby' && room.status === 'in_progress') {
             this.showStatus('Game started. Lobby controls are now read-only.', { autoHideMs: 3000 });
         }
@@ -357,7 +362,7 @@ class LobbyClient {
     }
 
     isBusy() {
-        return this.isSavingSettings || this.isStartingGame;
+        return this.isSavingSettings || this.isStartingGame || this.isAwaitingStartRoomState;
     }
 
     async readResponseData(response) {
@@ -450,6 +455,34 @@ class LobbyClient {
             if (!response.ok) {
                 throw new Error(this.getErrorMessage(data, 'Failed to start game.'));
             }
+
+            const responseRoomStatus = (
+                data && typeof data.room_status === 'string'
+                    ? data.room_status
+                    : data && data.room && typeof data.room.status === 'string'
+                        ? data.room.status
+                        : null
+            );
+            const shouldAwaitRoomState = this.currentRoomStatus === 'lobby';
+            this.isAwaitingStartRoomState = shouldAwaitRoomState;
+
+            if (responseRoomStatus) {
+                this.currentRoomStatus = responseRoomStatus;
+            }
+
+            if (this.elements.roomStatusBadge && this.currentRoomStatus) {
+                this.elements.roomStatusBadge.textContent = this.currentRoomStatus;
+                this.elements.roomStatusBadge.className = `badge ${this.currentRoomStatus.toLowerCase()}`;
+            }
+
+            this.syncHostControls();
+            this.syncLobbyLockState(this.currentRoomStatus);
+            this.showStatus(
+                shouldAwaitRoomState
+                    ? 'Game started. Waiting for live room sync...'
+                    : 'Game started. Lobby controls are now read-only.',
+                { autoHideMs: 3000 },
+            );
         } catch (error) {
             this.showError(error.message);
         } finally {

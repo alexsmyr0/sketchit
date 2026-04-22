@@ -86,6 +86,21 @@ class RoomLobbyUITests(TestCase):
         # Verify guest listing in the same response
         self.assertContains(response, "GuestUser")
 
+    def test_lobby_template_disables_start_until_two_eligible_players_exist(self):
+        self.guest.connection_status = Player.ConnectionStatus.DISCONNECTED
+        self.guest.participation_status = Player.ParticipationStatus.SPECTATING
+        self.guest.save(update_fields=["connection_status", "participation_status", "updated_at"])
+
+        response = self.host_client.get(
+            reverse("room-lobby-state", args=[self.room.join_code]),
+            HTTP_ACCEPT="text/html",
+        )
+        content = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('id="start-game-button" type="button" class="action-button primary" disabled', content)
+        self.assertContains(response, "Need at least 2 eligible players to start.")
+
     @patch("rooms.views.schedule_room_state_broadcast_after_commit")
     def test_update_settings_triggers_broadcast(self, mock_broadcast):
         url = reverse("update-lobby-settings", args=[self.room.join_code])

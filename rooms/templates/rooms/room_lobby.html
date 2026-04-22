@@ -70,11 +70,11 @@
                     </form>
 
                     <div class="start-game-section">
-                        <button id="start-game-button" type="button" class="action-button primary" {% if participants|length < 2 %}disabled{% endif %}>
+                        <button id="start-game-button" type="button" class="action-button primary" {% if not can_start_game %}disabled{% endif %}>
                             Start Game
                         </button>
-                        <p id="min-players-hint" class="hint" {% if participants|length >= 2 %}hidden{% endif %}>
-                            Need at least 2 players to start.
+                        <p id="min-players-hint" class="hint" {% if not initial_start_hint %}hidden{% endif %}>
+                            {{ initial_start_hint }}
                         </p>
                     </div>
                 </div>
