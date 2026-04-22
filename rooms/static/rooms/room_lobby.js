@@ -18,7 +18,9 @@ class LobbyClient {
             startGameButton: document.getElementById('start-game-button'),
             minPlayersHint: document.getElementById('min-players-hint'),
             hostControls: document.getElementById('host-controls'),
-            guestView: document.querySelector('.guest-view'),
+            guestView: document.getElementById('guest-view'),
+            guestViewMessage: document.getElementById('guest-view-message'),
+            guestViewLoader: document.getElementById('guest-view-loader'),
             lobbyError: document.getElementById('lobby-error'),
             lobbyStatus: document.getElementById('lobby-status'),
         };
@@ -108,11 +110,27 @@ class LobbyClient {
                 this.updateLobbyUI(event.payload);
                 break;
             case 'host.changed':
-                this.showStatus('Room host changed');
-                this.scheduleHideStatus(3000);
+                this.handleHostChanged(event.payload);
                 break;
             default:
                 break;
+        }
+    }
+
+    handleHostChanged(payload) {
+        const previousHostId = this.currentHostId;
+        const nextHost = payload && payload.host ? payload.host.id : null;
+        this.currentHostId = nextHost;
+
+        if (this.currentParticipants.length > 0) {
+            this.renderParticipantList();
+        }
+        this.syncHostControls();
+        this.syncLobbyLockState(this.currentRoomStatus);
+
+        if (previousHostId !== nextHost) {
+            this.showStatus('Room host changed');
+            this.scheduleHideStatus(3000);
         }
     }
 
@@ -134,6 +152,9 @@ class LobbyClient {
             this.elements.roomStatusBadge.className = `badge ${room.status.toLowerCase()}`;
         }
 
+        this.syncSettingsFormValues(room, {
+            force: previousHostId !== this.currentPlayerId && this.isCurrentPlayerHost(),
+        });
         this.renderParticipantList();
         this.syncHostControls();
         this.syncLobbyLockState(room.status);
@@ -147,16 +168,22 @@ class LobbyClient {
         }
     }
 
+    isCurrentPlayerHost() {
+        return this.currentHostId === this.currentPlayerId;
+    }
+
     syncHostControls() {
-        const isHost = this.currentHostId === this.currentPlayerId;
+        const isHost = this.isCurrentPlayerHost();
 
         if (this.elements.hostControls) {
             this.elements.hostControls.hidden = !isHost;
         }
 
-        if (this.elements.guestView && this.elements.hostControls) {
+        if (this.elements.guestView) {
             this.elements.guestView.hidden = isHost;
         }
+
+        this.syncGuestView();
 
         if (!this.elements.startGameButton) {
             return;
@@ -187,18 +214,55 @@ class LobbyClient {
             : 'Need at least 2 eligible players to start.';
     }
 
+    syncGuestView() {
+        if (!this.elements.guestViewMessage
+            || !this.elements.guestViewLoader
+            || this.isCurrentPlayerHost()
+            || this.currentRoomStatus === null) {
+            return;
+        }
+
+        const isLobby = this.currentRoomStatus === 'lobby';
+        this.elements.guestViewMessage.textContent = isLobby
+            ? 'Waiting for the host to start the game...'
+            : 'Game already started. Lobby settings are read-only.';
+        this.elements.guestViewLoader.hidden = !isLobby;
+    }
+
+    syncSettingsFormValues(room, { force = false } = {}) {
+        if (!this.elements.editRoomName || !this.elements.editVisibility) {
+            return;
+        }
+
+        const shouldSyncName = force
+            || !this.isCurrentPlayerHost()
+            || document.activeElement !== this.elements.editRoomName;
+        const shouldSyncVisibility = force
+            || !this.isCurrentPlayerHost()
+            || document.activeElement !== this.elements.editVisibility;
+
+        if (shouldSyncName) {
+            this.elements.editRoomName.value = room.name;
+        }
+
+        if (shouldSyncVisibility) {
+            this.elements.editVisibility.value = room.visibility;
+        }
+    }
+
     syncLobbyLockState(roomStatus) {
         if (!this.elements.settingsForm) {
             return;
         }
 
         const isLobby = roomStatus === 'lobby';
+        const canEdit = isLobby && this.isCurrentPlayerHost();
         Array.from(this.elements.settingsForm.elements).forEach((element) => {
             if (element instanceof HTMLButtonElement
                 || element instanceof HTMLInputElement
                 || element instanceof HTMLSelectElement
                 || element instanceof HTMLTextAreaElement) {
-                element.disabled = !isLobby;
+                element.disabled = !canEdit;
             }
         });
     }

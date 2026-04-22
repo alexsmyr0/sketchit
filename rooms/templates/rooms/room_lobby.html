@@ -50,40 +50,38 @@
 
                 <hr class="divider">
 
-                {% if participant.id == host.id %}
-                    <div id="host-controls" class="host-controls">
-                        <h3>Lobby Settings</h3>
-                        <form id="settings-form" class="settings-form">
-                            {% csrf_token %}
-                            <div class="field">
-                                <label for="edit-room-name">Room Name</label>
-                                <input id="edit-room-name" type="text" value="{{ room.name }}" maxlength="255">
-                            </div>
-                            <div class="field">
-                                <label for="edit-visibility">Visibility</label>
-                                <select id="edit-visibility">
-                                    <option value="public" {% if room.visibility == "public" %}selected{% endif %}>Public</option>
-                                    <option value="private" {% if room.visibility == "private" %}selected{% endif %}>Private</option>
-                                </select>
-                            </div>
-                            <button id="save-settings-button" type="submit" class="action-button secondary">Save Settings</button>
-                        </form>
-
-                        <div class="start-game-section">
-                            <button id="start-game-button" type="button" class="action-button primary" {% if participants|length < 2 %}disabled{% endif %}>
-                                Start Game
-                            </button>
-                            <p id="min-players-hint" class="hint" {% if participants|length >= 2 %}hidden{% endif %}>
-                                Need at least 2 players to start.
-                            </p>
+                <div id="host-controls" class="host-controls"{% if participant.id != host.id %} hidden{% endif %}>
+                    <h3>Lobby Settings</h3>
+                    <form id="settings-form" class="settings-form">
+                        {% csrf_token %}
+                        <div class="field">
+                            <label for="edit-room-name">Room Name</label>
+                            <input id="edit-room-name" type="text" value="{{ room.name }}" maxlength="255">
                         </div>
+                        <div class="field">
+                            <label for="edit-visibility">Visibility</label>
+                            <select id="edit-visibility">
+                                <option value="public" {% if room.visibility == "public" %}selected{% endif %}>Public</option>
+                                <option value="private" {% if room.visibility == "private" %}selected{% endif %}>Private</option>
+                            </select>
+                        </div>
+                        <button id="save-settings-button" type="submit" class="action-button secondary">Save Settings</button>
+                    </form>
+
+                    <div class="start-game-section">
+                        <button id="start-game-button" type="button" class="action-button primary" {% if participants|length < 2 %}disabled{% endif %}>
+                            Start Game
+                        </button>
+                        <p id="min-players-hint" class="hint" {% if participants|length >= 2 %}hidden{% endif %}>
+                            Need at least 2 players to start.
+                        </p>
                     </div>
-                {% else %}
-                    <div class="guest-view">
-                        <p>Waiting for the host to start the game...</p>
-                        <div class="loader"></div>
-                    </div>
-                {% endif %}
+                </div>
+
+                <div id="guest-view" class="guest-view"{% if participant.id == host.id %} hidden{% endif %}>
+                    <p id="guest-view-message">Waiting for the host to start the game...</p>
+                    <div id="guest-view-loader" class="loader"></div>
+                </div>
                 
                 <p id="lobby-error" class="message error" hidden></p>
                 <p id="lobby-status" class="message status" hidden></p>

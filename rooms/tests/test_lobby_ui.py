@@ -49,24 +49,30 @@ class RoomLobbyUITests(TestCase):
 
     def test_lobby_template_renders_host_controls_for_host(self):
         response = self.host_client.get(reverse("room-lobby-state", args=[self.room.join_code]), HTTP_ACCEPT="text/html")
+        content = response.content.decode()
         
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'id="host-controls"')
         self.assertContains(response, 'id="settings-form"')
         self.assertContains(response, 'id="start-game-button"')
-        self.assertNotContains(response, 'class="guest-view"')
+        self.assertContains(response, 'id="guest-view"')
+        self.assertIn('id="guest-view" class="guest-view" hidden', content)
+        self.assertNotIn('id="host-controls" class="host-controls" hidden', content)
         
         # Verify join URL
         # Note: test server host might varies, checking for relative path link
         expected_join_path = reverse('join-room', args=[self.room.join_code])
         self.assertContains(response, expected_join_path)
 
-    def test_lobby_template_hides_host_controls_for_guest(self):
+    def test_lobby_template_keeps_host_controls_hidden_for_guest(self):
         response = self.guest_client.get(reverse("room-lobby-state", args=[self.room.join_code]), HTTP_ACCEPT="text/html")
+        content = response.content.decode()
         
         self.assertEqual(response.status_code, 200)
-        self.assertNotContains(response, 'id="host-controls"')
-        self.assertContains(response, 'class="guest-view"')
+        self.assertContains(response, 'id="host-controls"')
+        self.assertContains(response, 'id="guest-view"')
+        self.assertIn('id="host-controls" class="host-controls" hidden', content)
+        self.assertNotIn('id="guest-view" class="guest-view" hidden', content)
         self.assertContains(response, "Waiting for the host to start the game...")
 
     def test_lobby_participant_list_labels(self):
