@@ -6,7 +6,7 @@ import fakeredis
 from asgiref.sync import async_to_sync
 from channels.db import database_sync_to_async
 from channels.testing import WebsocketCommunicator
-from django.test import TransactionTestCase
+from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 
 from games import services as game_services
@@ -57,6 +57,7 @@ async def _receive_until_type(
     raise AssertionError(f"Did not receive {expected_type!r} within {max_messages} messages.")
 
 
+@override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)
 class GuessPipelineTests(TransactionTestCase):
     def setUp(self):
         from games import runtime as game_runtime

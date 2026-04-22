@@ -173,43 +173,51 @@ def _drain_output_queue_nowait(communicator) -> list[dict]:
     return messages
 
 
+async def _receive_output_json(communicator, *, timeout: float) -> dict:
+    """Read one JSON websocket.send frame directly from the output queue."""
+    raw = await asyncio.wait_for(communicator.output_queue.get(), timeout=timeout)
+    if raw.get("type") != "websocket.send":
+        raise AssertionError(f"Expected websocket.send frame, got {raw.get('type')!r}.")
+
+    payload = raw.get("text")
+    if not isinstance(payload, str):
+        raise AssertionError(f"Expected text websocket payload, got {type(payload)!r}.")
+
+    return json.loads(payload)
+
+
 async def _drain_output_queue_safe(communicator, timeout: float = 0.2) -> list[dict]:
     """Timed drain of the communicator output queue without calling receive_output."""
-    import asyncio, json
     messages = []
     while True:
         try:
-            raw = await asyncio.wait_for(communicator.output_queue.get(), timeout=timeout)
-            if raw.get("type") == "websocket.send":
-                messages.append(json.loads(raw["text"]))
+            messages.append(await _receive_output_json(communicator, timeout=timeout))
             timeout = 0.1
         except asyncio.TimeoutError:
             break
     return messages
 
 
-
 async def _connect_and_receive_initial_room_state(
     communicator,
     join_code: str,
-    expect_broadcast: bool = False,
 ):
-    """Perform WebSocket connect and consume the initial room.state message(s)."""
+    """Connect and consume exactly the mandatory initial room.state event."""
     connected, _ = await communicator.connect()
     if not connected:
         raise AssertionError("WebSocket failed to connect.")
 
-    # A-06 handshake sends messages in a burst.
-    # We wait for the first mandatory room.state.
-    room_state = await _receive_until_type(communicator, "room.state")
-    
-    # Drain any additional messages that arrived in the same burst (like the duplicate broadcast)
-    # This is safe because it only takes what is already in the queue.
-    import asyncio
-    while not communicator.output_queue.empty():
-        # If we expect the broadcast, we can consume it here.
-        # If we don't expect it, we still consume it to avoid polluting later receives.
-        await communicator.receive_json_from()
+    room_state = await _receive_output_json(communicator, timeout=2.0)
+    if room_state.get("type") != "room.state":
+        raise AssertionError(
+            f"Expected initial event 'room.state', got {room_state.get('type')!r}."
+        )
+
+    actual_join_code = room_state["payload"]["room"]["join_code"]
+    if actual_join_code != join_code.upper():
+        raise AssertionError(
+            f"Expected room.state for {join_code.upper()}, got {actual_join_code}."
+        )
 
     return room_state
 
@@ -220,30 +228,85 @@ async def _connect_and_drain_initial_sync(
     expects_game_active: bool = False,
     timeout: float = 5.0,
 ) -> list[dict]:
-    """Connect to a room and safely collect all initial A-06 handshake events."""
-    import asyncio
+    """Connect to a room and collect only the allowed initial handshake events."""
     connected, _ = await communicator.connect(timeout=timeout)
     if not connected:
         raise ConnectionError(f"Failed to connect to room {join_code}")
 
-    try:
-        first_msg = await communicator.receive_json_from(timeout=4)
-    except asyncio.TimeoutError:
-        burst = await _drain_output_queue_safe(communicator, timeout=1.0)
-        if not burst: raise ConnectionError(f"Handshake timeout in {join_code}")
-        first_msg = burst[0]
-        
+    first_msg = await _receive_output_json(communicator, timeout=4.0)
+    if first_msg.get("type") != "room.state":
+        raise AssertionError(
+            f"Expected initial event 'room.state', got {first_msg.get('type')!r}."
+        )
+
+    actual_join_code = first_msg["payload"]["room"]["join_code"]
+    if actual_join_code != join_code.upper():
+        raise AssertionError(
+            f"Expected room.state for {join_code.upper()}, got {actual_join_code}."
+        )
+
     messages = [first_msg]
+    allowed_followup_types = {
+        "drawing.stroke",
+        "drawing.end_stroke",
+        "drawing.clear",
+        "round.state",
+        "round.timer",
+        "round.intermission_timer",
+        "round.started",
+        "round.drawer_word",
+    }
+
+    def _append_and_validate(message: dict) -> None:
+        message_type = message.get("type")
+        if message_type not in allowed_followup_types:
+            raise AssertionError(
+                f"Unexpected connect-time event {message_type!r} after room.state."
+            )
+        messages.append(message)
+
     if expects_game_active:
-        for _ in range(25):
-            burst = await _drain_output_queue_safe(communicator, timeout=0.2)
-            messages.extend(burst)
-            if any(m.get("type") in ("round.timer", "round.intermission_timer", "round.state") for m in burst):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 2.0
+
+        while loop.time() < deadline:
+            has_round_state = any(
+                message.get("type") == "round.state" for message in messages
+            )
+            has_timer = any(
+                message.get("type") in {"round.timer", "round.intermission_timer"}
+                for message in messages
+            )
+            if has_round_state and has_timer:
                 break
-            await asyncio.sleep(0.1)
+
+            try:
+                remaining = deadline - loop.time()
+                message = await _receive_output_json(
+                    communicator,
+                    timeout=min(0.5, remaining),
+                )
+            except asyncio.TimeoutError:
+                continue
+
+            _append_and_validate(message)
+
+        if not any(message.get("type") == "round.state" for message in messages):
+            raise AssertionError("Expected connect-time round.state sync event.")
+        if not any(
+            message.get("type") in {"round.timer", "round.intermission_timer"}
+            for message in messages
+        ):
+            raise AssertionError(
+                "Expected connect-time round timer or intermission timer sync event."
+            )
+
+        for message in await _drain_output_queue_safe(communicator, timeout=0.1):
+            _append_and_validate(message)
     else:
-        burst = await _drain_output_queue_safe(communicator, timeout=0.3)
-        messages.extend(burst)
+        for message in await _drain_output_queue_safe(communicator, timeout=0.1):
+            _append_and_validate(message)
+
     return messages
 
 
@@ -313,7 +376,6 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             communicator,
             self.room.join_code,
-            expect_broadcast=True,
         )
         await communicator.disconnect()
 
@@ -326,7 +388,6 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             communicator,
             self.room.join_code,
-            expect_broadcast=True,
         )
         self.assertEqual(
             len(self._group_members(_room_group_name(self.room.join_code))),
@@ -377,7 +438,6 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             communicator,
             self.room.join_code,
-            expect_broadcast=True,
         )
         await communicator.disconnect()
 
@@ -398,12 +458,10 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             first,
             self.room.join_code,
-            expect_broadcast=True,
         )
         await _connect_and_receive_initial_room_state(
             second,
             self.room.join_code,
-            expect_broadcast=True,
         )
         self.assertEqual(
             len(self._group_members(_room_group_name(self.room.join_code))),
@@ -422,7 +480,6 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             communicator,
             self.room.join_code,
-            expect_broadcast=True,
         )
         self.assertEqual(
             len(self._group_members(_room_group_name(self.room.join_code))),
@@ -449,7 +506,6 @@ class RoomConsumerConnectTests(TransactionTestCase):
         room_state = await _connect_and_receive_initial_room_state(
             communicator,
             self.room.join_code,
-            expect_broadcast=True,
         )
         self.assertEqual(
             room_state["payload"]["participants"][0]["connection_status"],
@@ -498,12 +554,10 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             host_socket,
             self.room.join_code,
-            expect_broadcast=True,
         )
         await _connect_and_receive_initial_room_state(
             member_socket,
             self.room.join_code,
-            expect_broadcast=True,
         )
 
         await host_socket.disconnect()
@@ -523,7 +577,6 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             first_socket,
             self.room.join_code,
-            expect_broadcast=True,
         )
 
         original_player_id = self.player.id
@@ -543,7 +596,6 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             second_socket,
             self.room.join_code,
-            expect_broadcast=True,
         )
 
         refreshed_player = await database_sync_to_async(Player.objects.get)(
@@ -575,12 +627,10 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             first,
             self.room.join_code,
-            expect_broadcast=True,
         )
         await _connect_and_receive_initial_room_state(
             second,
             self.room.join_code,
-            expect_broadcast=True,
         )
 
         await first.disconnect()
@@ -623,7 +673,6 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             communicator,
             self.room.join_code,
-            expect_broadcast=True,
         )
 
         await communicator.send_json_to({"type": "echo", "message": "hello world"})
@@ -643,7 +692,6 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             communicator,
             self.room.join_code,
-            expect_broadcast=True,
         )
 
         event_payload = {
@@ -679,7 +727,7 @@ class RoomConsumerConnectTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.session_key),
         )
-        await _connect_and_receive_initial_room_state(communicator, self.room.join_code, expect_broadcast=True)
+        await _connect_and_receive_initial_room_state(communicator, self.room.join_code)
 
         await _start_game(self.room.id)
 
@@ -747,7 +795,6 @@ class RoomConsumerConnectTests(TransactionTestCase):
         room_state = await _connect_and_receive_initial_room_state(
             communicator,
             self.room.join_code,
-            expect_broadcast=True,
         )
 
         self.assertEqual(room_state["type"], "room.state")
@@ -790,7 +837,6 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             communicator,
             self.room.join_code,
-            expect_broadcast=True,
         )
 
         status_code, response_content = await _join_room_via_http(
@@ -828,12 +874,10 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             first_socket,
             self.room.join_code,
-            expect_broadcast=True,
         )
         await _connect_and_receive_initial_room_state(
             second_socket,
             self.room.join_code,
-            expect_broadcast=True,
         )
         await _receive_until_type(first_socket, "room.state")
 
@@ -868,12 +912,10 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             first_socket,
             self.room.join_code,
-            expect_broadcast=True,
         )
         await _connect_and_receive_initial_room_state(
             second_socket,
             self.room.join_code,
-            expect_broadcast=True,
         )
         await _receive_until_type(first_socket, "room.state")
 
@@ -888,7 +930,6 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             reconnect_socket,
             self.room.join_code,
-            expect_broadcast=True,
         )
 
         room_state = await _receive_until_type(first_socket, "room.state")
@@ -921,12 +962,10 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             alice_primary_socket,
             self.room.join_code,
-            expect_broadcast=True,
         )
         await _connect_and_receive_initial_room_state(
             bob_socket,
             self.room.join_code,
-            expect_broadcast=True,
         )
         await _receive_until_type(alice_primary_socket, "room.state")
 
@@ -938,7 +977,6 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             alice_second_socket,
             self.room.join_code,
-            expect_broadcast=False,
         )
 
         self.assertTrue(await bob_socket.receive_nothing(timeout=0.2))
@@ -962,7 +1000,6 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             bob_socket,
             self.room.join_code,
-            expect_broadcast=True,
         )
 
         await _leave_room_member(
@@ -1033,7 +1070,6 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             first_socket,
             self.room.join_code,
-            expect_broadcast=True,
         )
 
         await first_socket.disconnect()
@@ -1054,7 +1090,6 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await _connect_and_receive_initial_room_state(
             reconnect_socket,
             self.room.join_code,
-            expect_broadcast=True,
         )
 
         refreshed_player = await database_sync_to_async(Player.objects.get)(
@@ -1133,19 +1168,24 @@ class RoomConsumerConnectTests(TransactionTestCase):
             },
         )
 
-        communicator = WebsocketCommunicator(
-            _TEST_APP,
-            _ws_url(self.room.join_code),
-            headers=_session_headers(spectator_session_key),
-        )
-        await _connect_and_drain_initial_sync(communicator, self.room.join_code, expects_game_active=True)
+        with override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True):
+            communicator = WebsocketCommunicator(
+                _TEST_APP,
+                _ws_url(self.room.join_code),
+                headers=_session_headers(spectator_session_key),
+            )
+            await _connect_and_drain_initial_sync(
+                communicator,
+                self.room.join_code,
+                expects_game_active=True,
+            )
 
-        await communicator.send_json_to({
-            "type": "guess.submit",
-            "payload": {"text": "rocket"},
-        })
+            await communicator.send_json_to({
+                "type": "guess.submit",
+                "payload": {"text": "rocket"},
+            })
 
-        response = await communicator.receive_json_from(timeout=1)
+            response = await communicator.receive_json_from(timeout=1)
 
         self.assertEqual(response["type"], "guess.error")
         self.assertEqual(

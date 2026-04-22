@@ -10,7 +10,7 @@ import json
 import fakeredis
 from channels.db import database_sync_to_async
 from channels.testing import WebsocketCommunicator
-from django.test import TransactionTestCase
+from django.test import TransactionTestCase, override_settings
 
 from asgiref.sync import async_to_sync
 from rooms.models import Player, Room
@@ -27,6 +27,7 @@ from games import services as game_services
 from words.models import Word, WordPack, WordPackEntry
 
 
+@override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)
 class DrawingEventTests(TransactionTestCase):
     """Tests for drawer authorization and event broadcasting."""
 
@@ -324,6 +325,7 @@ class DrawingEventTests(TransactionTestCase):
         await viewer_socket.disconnect()
 
 
+@override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)
 class SnapshotSyncTests(TransactionTestCase):
     """Tests for canvas snapshot recovery on connection."""
 
@@ -448,7 +450,6 @@ class SnapshotSyncTests(TransactionTestCase):
         await database_sync_to_async(game_services.complete_round_due_to_timer)(self.round.id)
         new_viewer_key = await _create_room_member(self.room.id, "Intermission Bob")
         v_socket = WebsocketCommunicator(_TEST_APP, _ws_url(self.room.join_code), headers=_session_headers(new_viewer_key))
-        game_redis.set_turn_state(self.fake_redis, self.room.join_code, {"phase": "intermission", "round_id": str(self.round.id)})
         await _connect_and_drain_initial_sync(v_socket, self.room.join_code, expects_game_active=True)
         drawn = [m for m in _drain_output_queue_nowait(v_socket) if m.get("type", "").startswith("drawing.")]
         self.assertEqual(drawn, [])
