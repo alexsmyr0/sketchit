@@ -20,6 +20,14 @@ function parseErrorMessage(data) {
         .join(" ");
 }
 
+function buildRequestError(data) {
+    // Preserve the parsed response body on thrown errors so the entry flow can
+    // distinguish a recoverable conflict from a plain validation failure.
+    const error = new Error(parseErrorMessage(data));
+    error.responseData = data;
+    return error;
+}
+
 async function postJson(url, payload) {
     const response = await fetch(url, {
         method: "POST",
@@ -38,7 +46,7 @@ async function postJson(url, payload) {
     }
 
     if (!response.ok) {
-        throw new Error(parseErrorMessage(data));
+        throw buildRequestError(data);
     }
 
     return data;
@@ -70,6 +78,23 @@ function showStatus(message) {
     entryError.hidden = true;
     entryStatus.textContent = message;
     entryStatus.hidden = false;
+}
+
+function handleEntryRequestFailure(error) {
+    // The backend returns a recoverable 409 with room_url when this session
+    // already owns another valid room. Redirecting immediately avoids leaving
+    // the guest stuck on the entry page with an error they cannot fix there.
+    if (
+        error &&
+        typeof error.responseData === "object" &&
+        typeof error.responseData.room_url === "string"
+    ) {
+        redirectToRoom(error.responseData);
+        return;
+    }
+
+    showError(error instanceof Error ? error.message : "Something went wrong. Please try again.");
+    setIdleState();
 }
 
 function setIdleState() {
@@ -149,8 +174,7 @@ document.getElementById("entry-form").addEventListener("submit", async function 
 
         await createPrivateRoom(displayName);
     } catch (error) {
-        showError(error.message);
-        setIdleState();
+        handleEntryRequestFailure(error);
     }
 });
 
@@ -167,8 +191,7 @@ createButton.addEventListener("click", async function () {
     try {
         await createPrivateRoom(displayName);
     } catch (error) {
-        showError(error.message);
-        setIdleState();
+        handleEntryRequestFailure(error);
     }
 });
 
@@ -192,8 +215,7 @@ publicJoinButtons.forEach((button) => {
         try {
             await joinRoomByCode(joinCode, displayName);
         } catch (error) {
-            showError(error.message);
-            setIdleState();
+            handleEntryRequestFailure(error);
         }
     });
 });

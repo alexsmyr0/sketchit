@@ -56,6 +56,12 @@ def get_redis_client() -> redis.Redis:
     return _redis_client
 
 
+def reset_redis_client() -> None:
+    """Reset the cached Redis client. Used for test isolation."""
+    global _redis_client
+    _redis_client = None
+
+
 @database_sync_to_async
 def _mark_participant_connected(
     player_id: int,
@@ -462,6 +468,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                     "player_id": self.player.id,
                     "player_nickname": self.player.display_name,
                     "text": guess_text,
+                    "outcome": evaluation_result.outcome,
                     "is_correct": evaluation_result.is_correct,
                     "round_completed": evaluation_result.round_completed,
                     "score_updates": [
@@ -496,6 +503,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                 "player_id": event["player_id"],
                 "player_nickname": event["player_nickname"],
                 "text": event["text"],
+                "outcome": event["outcome"],
                 "is_correct": event["is_correct"],
                 "round_completed": event["round_completed"],
                 "score_updates": event["score_updates"]

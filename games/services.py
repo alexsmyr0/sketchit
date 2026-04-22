@@ -23,6 +23,13 @@ class GuessEvaluationError(Exception):
     pass
 
 
+class GuessOutcome:
+    CORRECT = "correct"
+    INCORRECT = "incorrect"
+    NEAR_MATCH = "near_match"
+    DUPLICATE = "duplicate"
+
+
 @dataclass(frozen=True)
 class StartedGame:
     game: Game
@@ -38,6 +45,7 @@ class PlayerScoreUpdate:
 @dataclass(frozen=True)
 class GuessEvaluationResult:
     guess: Guess
+    outcome: str
     is_correct: bool
     round_completed: bool
     round_completed_now: bool
@@ -117,7 +125,80 @@ def _dedupe_snapshot_words_case_insensitive(word_texts: list[str]) -> list[str]:
 
 
 def _normalize_guess_text(value: str) -> str:
-    return value.strip().casefold()
+    return " ".join(value.strip().split()).casefold()
+
+
+def _is_same_player_duplicate_guess(
+    *,
+    round_id: int,
+    player_id: int,
+    normalized_guess_text: str,
+    excluded_guess_id: int,
+) -> bool:
+    return (
+        Guess.objects.filter(
+            round_id=round_id,
+            player_id=player_id,
+        )
+        .exclude(pk=excluded_guess_id)
+        .filter(normalized_text=normalized_guess_text)
+        .exists()
+    )
+
+
+def _is_player_already_correct_for_round(*, round_id: int, player_id: int) -> bool:
+    return Guess.objects.filter(
+        round_id=round_id,
+        player_id=player_id,
+        is_correct=True,
+    ).exists()
+
+
+def _already_correct_outcome_for_guess(
+    *,
+    round_id: int,
+    player_id: int,
+    normalized_guess_text: str,
+    excluded_guess_id: int,
+) -> str:
+    # Already-correct guesses remain ignored for scoring/round progression.
+    # If the guess text itself is a repeat, label it as duplicate so clients
+    # can present accurate feedback.
+    if _is_same_player_duplicate_guess(
+        round_id=round_id,
+        player_id=player_id,
+        normalized_guess_text=normalized_guess_text,
+        excluded_guess_id=excluded_guess_id,
+    ):
+        return GuessOutcome.DUPLICATE
+    return GuessOutcome.INCORRECT
+
+
+def _is_near_match_guess(
+    *,
+    normalized_guess_text: str,
+    normalized_target_text: str,
+) -> bool:
+    """Return near-match for non-correct guesses only.
+
+    Callers must evaluate exact equality first and only call this function for
+    guesses that are already known not to be an exact correct match.
+    """
+    if not normalized_guess_text or not normalized_target_text:
+        return False
+
+    target_tokens = normalized_target_text.split(" ")
+    if len(target_tokens) > 1:
+        return (
+            normalized_guess_text != normalized_target_text
+            and normalized_guess_text in set(target_tokens)
+        )
+
+    return (
+        len(normalized_guess_text) >= 3
+        and len(normalized_guess_text) < len(normalized_target_text)
+        and normalized_target_text.startswith(normalized_guess_text)
+    )
 
 
 def _round_duration_seconds() -> float:
@@ -219,6 +300,7 @@ def _build_guess_evaluation_result(
     *,
     guess: Guess,
     locked_round: Round,
+    outcome: str,
     is_correct: bool,
     round_completed_now: bool,
     winning_player_id: int | None,
@@ -227,6 +309,7 @@ def _build_guess_evaluation_result(
     round_completed = bool(locked_round.status or locked_round.ended_at)
     return GuessEvaluationResult(
         guess=guess,
+        outcome=outcome,
         is_correct=is_correct,
         round_completed=round_completed,
         round_completed_now=round_completed_now,
@@ -585,6 +668,7 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
         return _build_guess_evaluation_result(
             guess=guess,
             locked_round=locked_round,
+            outcome=GuessOutcome.INCORRECT,
             is_correct=False,
             round_completed_now=False,
             winning_player_id=_get_round_winning_player_id(locked_round.id),
@@ -595,83 +679,124 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
         return _build_guess_evaluation_result(
             guess=guess,
             locked_round=locked_round,
+            outcome=GuessOutcome.INCORRECT,
             is_correct=False,
             round_completed_now=False,
             winning_player_id=None,
             score_updates=(),
         )
 
-    if Guess.objects.filter(
+    normalized_guess_text = guess.normalized_text
+    normalized_target_text = _normalize_guess_text(locked_round.selected_game_word.text)
+
+    if _is_player_already_correct_for_round(
         round_id=locked_round.id,
         player_id=guessing_player.id,
-        is_correct=True,
-    ).exists():
+    ):
         return _build_guess_evaluation_result(
             guess=guess,
             locked_round=locked_round,
+            outcome=_already_correct_outcome_for_guess(
+                round_id=locked_round.id,
+                player_id=guessing_player.id,
+                normalized_guess_text=normalized_guess_text,
+                excluded_guess_id=guess.id,
+            ),
             is_correct=False,
             round_completed_now=False,
             winning_player_id=None,
             score_updates=(),
         )
 
-    if _normalize_guess_text(guess.text) != _normalize_guess_text(locked_round.selected_game_word.text):
+    if normalized_guess_text == normalized_target_text:
+        guess.is_correct = True
+        guess.save(update_fields=["is_correct", "updated_at"])
+
+        accepted_at = timezone.now()
+        guesser_points, drawer_bonus = _time_based_scores_for_correct_guess(
+            locked_round=locked_round,
+            accepted_at=accepted_at,
+        )
+        score_deltas_by_participant_id = {
+            guessing_player.id: guesser_points,
+        }
+        drawer_participant_id = locked_round.drawer_participant_id
+        if drawer_participant_id is not None and drawer_participant_id != guessing_player.id:
+            score_deltas_by_participant_id[drawer_participant_id] = drawer_bonus
+
+        for participant_id, score_delta in score_deltas_by_participant_id.items():
+            Player.objects.filter(pk=participant_id).update(
+                current_score=F("current_score") + score_delta
+            )
+
+        updated_scores = tuple(
+            PlayerScoreUpdate(player_id=row["id"], current_score=row["current_score"])
+            for row in Player.objects.filter(pk__in=score_deltas_by_participant_id)
+            .order_by("id")
+            .values("id", "current_score")
+        )
+        all_eligible_guessers_correct = _all_eligible_non_drawer_guessers_are_correct(
+            locked_round=locked_round,
+            newest_correct_guesser_id=guessing_player.id,
+        )
+        round_completed_now = False
+        if all_eligible_guessers_correct:
+            locked_round.status = RoundStatus.COMPLETED
+            locked_round.ended_at = accepted_at
+            locked_round.save(update_fields=["status", "ended_at", "updated_at"])
+            round_completed_now = True
+            _handle_round_completed(locked_round, completion_reason="all_guessers_correct")
+
         return _build_guess_evaluation_result(
             guess=guess,
             locked_round=locked_round,
+            outcome=GuessOutcome.CORRECT,
+            is_correct=True,
+            round_completed_now=round_completed_now,
+            winning_player_id=(
+                _get_round_winning_player_id(locked_round.id)
+                if round_completed_now
+                else None
+            ),
+            score_updates=updated_scores,
+        )
+
+    if _is_same_player_duplicate_guess(
+        round_id=locked_round.id,
+        player_id=guessing_player.id,
+        normalized_guess_text=normalized_guess_text,
+        excluded_guess_id=guess.id,
+    ):
+        return _build_guess_evaluation_result(
+            guess=guess,
+            locked_round=locked_round,
+            outcome=GuessOutcome.DUPLICATE,
             is_correct=False,
             round_completed_now=False,
             winning_player_id=None,
             score_updates=(),
         )
 
-    guess.is_correct = True
-    guess.save(update_fields=["is_correct", "updated_at"])
-
-    accepted_at = timezone.now()
-    guesser_points, drawer_bonus = _time_based_scores_for_correct_guess(
-        locked_round=locked_round,
-        accepted_at=accepted_at,
-    )
-    score_deltas_by_participant_id = {
-        guessing_player.id: guesser_points,
-    }
-    drawer_participant_id = locked_round.drawer_participant_id
-    if drawer_participant_id is not None and drawer_participant_id != guessing_player.id:
-        score_deltas_by_participant_id[drawer_participant_id] = drawer_bonus
-
-    for participant_id, score_delta in score_deltas_by_participant_id.items():
-        Player.objects.filter(pk=participant_id).update(
-            current_score=F("current_score") + score_delta
+    if _is_near_match_guess(
+        normalized_guess_text=normalized_guess_text,
+        normalized_target_text=normalized_target_text,
+    ):
+        return _build_guess_evaluation_result(
+            guess=guess,
+            locked_round=locked_round,
+            outcome=GuessOutcome.NEAR_MATCH,
+            is_correct=False,
+            round_completed_now=False,
+            winning_player_id=None,
+            score_updates=(),
         )
-
-    updated_scores = tuple(
-        PlayerScoreUpdate(player_id=row["id"], current_score=row["current_score"])
-        for row in Player.objects.filter(pk__in=score_deltas_by_participant_id)
-        .order_by("id")
-        .values("id", "current_score")
-    )
-    all_eligible_guessers_correct = _all_eligible_non_drawer_guessers_are_correct(
-        locked_round=locked_round,
-        newest_correct_guesser_id=guessing_player.id,
-    )
-    round_completed_now = False
-    if all_eligible_guessers_correct:
-        locked_round.status = RoundStatus.COMPLETED
-        locked_round.ended_at = accepted_at
-        locked_round.save(update_fields=["status", "ended_at", "updated_at"])
-        round_completed_now = True
-        _handle_round_completed(locked_round, completion_reason="all_guessers_correct")
 
     return _build_guess_evaluation_result(
         guess=guess,
         locked_round=locked_round,
-        is_correct=True,
-        round_completed_now=round_completed_now,
-        winning_player_id=(
-            _get_round_winning_player_id(locked_round.id)
-            if round_completed_now
-            else None
-        ),
-        score_updates=updated_scores,
+        outcome=GuessOutcome.INCORRECT,
+        is_correct=False,
+        round_completed_now=False,
+        winning_player_id=None,
+        score_updates=(),
     )

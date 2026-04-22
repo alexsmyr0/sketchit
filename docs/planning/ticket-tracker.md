@@ -82,7 +82,7 @@ Use this as the default claim order for the next wave of work:
 - [x] **K-03** P2 - Round Timer & Early-Finish Coordinator | Server-owned round timing, intermission countdown, and early-finish triggers. (Depends on: K-01; N-03) | Blocks: K-04; N-05; K-05; K-07; G-03
 - [x] **K-04** P2 - Full Game Cycle Drawer Rotation & Word Uniqueness | Remaining-drawer tracking, unique words, and role-specific round-start payloads. (Depends on: K-01; N-03; K-03) | Blocks: A-07; K-07; A-08
 - [x] **K-05** P3 - Time-Based Scoring & Multi-Guesser Round Resolution | Replace placeholder scoring with the final bounded time-based model. (Depends on: K-03; K-04; N-05) | Blocks: A-08; G-05
-- [ ] **K-06** P3 - Near-Match, Duplicate, And Correct-Once Guess Rules | Rich guess outcomes and per-player round guess-state rules. (Depends on: N-03; N-05) | Blocks: G-05
+- [x] **K-06** P3 - Near-Match, Duplicate, And Correct-Once Guess Rules | Rich guess outcomes and per-player round guess-state rules. (Depends on: N-03; N-05) | Blocks: G-05
 - [ ] **K-07** P3 - Drawer Disconnect Grace & Turn Outcome Handling | `15`-second drawer grace, reconnect resume, and `drawer_disconnected` outcome. (Depends on: N-03; K-03; K-04) | Blocks: A-08; G-05
 
 ### Track N
