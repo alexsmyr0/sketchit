@@ -12,12 +12,14 @@ class LobbyClient {
             participantList: document.getElementById('participant-list'),
             joinUrlInput: document.getElementById('join-url'),
             copyUrlButton: document.getElementById('copy-url-button'),
+            saveSettingsButton: document.getElementById('save-settings-button'),
             settingsForm: document.getElementById('settings-form'),
             editRoomName: document.getElementById('edit-room-name'),
             editVisibility: document.getElementById('edit-visibility'),
             startGameButton: document.getElementById('start-game-button'),
             minPlayersHint: document.getElementById('min-players-hint'),
             hostControls: document.getElementById('host-controls'),
+            hostControlsNote: document.getElementById('host-controls-note'),
             guestView: document.getElementById('guest-view'),
             guestViewMessage: document.getElementById('guest-view-message'),
             guestViewLoader: document.getElementById('guest-view-loader'),
@@ -32,9 +34,17 @@ class LobbyClient {
         this.maxReconnectDelay = 10000;
         this.statusTimeout = null;
         this.errorTimeout = null;
+        this.copyFeedbackTimeout = null;
         this.currentParticipants = [];
-        this.currentHostId = null;
-        this.currentRoomStatus = null;
+        this.currentHostId = this.elements.hostControls && !this.elements.hostControls.hidden
+            ? this.currentPlayerId
+            : null;
+        this.currentRoomStatus = this.elements.roomStatusBadge
+            ? this.elements.roomStatusBadge.textContent.trim().toLowerCase()
+            : null;
+        this.hasReceivedRoomState = false;
+        this.isSavingSettings = false;
+        this.isStartingGame = false;
 
         this.init();
     }
@@ -69,8 +79,7 @@ class LobbyClient {
 
         this.socket.onopen = () => {
             this.reconnectAttempts = 0;
-            this.showStatus('Connected to live lobby');
-            this.scheduleHideStatus(3000);
+            this.showStatus('Connected to live lobby', { autoHideMs: 3000 });
         };
 
         this.socket.onmessage = (event) => {
@@ -129,8 +138,7 @@ class LobbyClient {
         this.syncLobbyLockState(this.currentRoomStatus);
 
         if (previousHostId !== nextHost) {
-            this.showStatus('Room host changed');
-            this.scheduleHideStatus(3000);
+            this.showStatus('Room host changed', { autoHideMs: 3000 });
         }
     }
 
@@ -139,6 +147,7 @@ class LobbyClient {
         const previousHostId = this.currentHostId;
         const previousStatus = this.currentRoomStatus;
 
+        this.hasReceivedRoomState = true;
         this.currentParticipants = participants;
         this.currentHostId = host ? host.id : null;
         this.currentRoomStatus = room.status;
@@ -160,11 +169,9 @@ class LobbyClient {
         this.syncLobbyLockState(room.status);
 
         if (previousHostId !== null && previousHostId !== this.currentHostId) {
-            this.showStatus('Room host changed');
-            this.scheduleHideStatus(3000);
+            this.showStatus('Room host changed', { autoHideMs: 3000 });
         } else if (previousStatus === 'lobby' && room.status === 'in_progress') {
-            this.showStatus('Game started. Lobby controls are now read-only.');
-            this.scheduleHideStatus(3000);
+            this.showStatus('Game started. Lobby controls are now read-only.', { autoHideMs: 3000 });
         }
     }
 
@@ -174,18 +181,29 @@ class LobbyClient {
 
     syncHostControls() {
         const isHost = this.isCurrentPlayerHost();
+        const isLobby = this.currentRoomStatus === 'lobby';
+        const isReadOnly = this.hasReceivedRoomState && !isLobby;
 
         if (this.elements.hostControls) {
             this.elements.hostControls.hidden = !isHost;
+            this.elements.hostControls.dataset.mode = isReadOnly ? 'read-only' : 'editable';
+            this.elements.hostControls.dataset.busy = this.isBusy() ? 'true' : 'false';
         }
 
         if (this.elements.guestView) {
             this.elements.guestView.hidden = isHost;
         }
 
+        this.syncHostControlsNote();
         this.syncGuestView();
+        this.syncActionButtons();
 
         if (!this.elements.startGameButton) {
+            return;
+        }
+
+        if (!this.hasReceivedRoomState) {
+            this.elements.startGameButton.disabled = this.elements.startGameButton.disabled || this.isBusy();
             return;
         }
 
@@ -193,8 +211,7 @@ class LobbyClient {
             participant.connection_status === 'CONNECTED'
             && participant.participation_status !== 'SPECTATING'
         )).length;
-        const isLobby = this.currentRoomStatus === 'lobby';
-        const canStart = isHost && isLobby && eligibleCount >= 2;
+        const canStart = isHost && isLobby && eligibleCount >= 2 && !this.isBusy();
 
         this.elements.startGameButton.disabled = !canStart;
 
@@ -214,6 +231,18 @@ class LobbyClient {
             : 'Need at least 2 eligible players to start.';
     }
 
+    syncHostControlsNote() {
+        if (!this.elements.hostControlsNote) {
+            return;
+        }
+
+        const shouldShowReadOnlyNote = this.isCurrentPlayerHost() && this.hasReceivedRoomState && this.currentRoomStatus !== 'lobby';
+        this.elements.hostControlsNote.hidden = !shouldShowReadOnlyNote;
+        this.elements.hostControlsNote.textContent = shouldShowReadOnlyNote
+            ? 'Lobby settings are locked after the game starts.'
+            : '';
+    }
+
     syncGuestView() {
         if (!this.elements.guestViewMessage
             || !this.elements.guestViewLoader
@@ -227,6 +256,24 @@ class LobbyClient {
             ? 'Waiting for the host to start the game...'
             : 'Game already started. Lobby settings are read-only.';
         this.elements.guestViewLoader.hidden = !isLobby;
+    }
+
+    syncActionButtons() {
+        if (this.elements.saveSettingsButton) {
+            this.elements.saveSettingsButton.textContent = this.isSavingSettings
+                ? 'Saving...'
+                : 'Save Settings';
+        }
+
+        if (this.elements.startGameButton) {
+            this.elements.startGameButton.textContent = this.isStartingGame
+                ? 'Starting Game...'
+                : 'Start Game';
+        }
+
+        if (this.elements.copyUrlButton) {
+            this.elements.copyUrlButton.disabled = this.isBusy();
+        }
     }
 
     syncSettingsFormValues(room, { force = false } = {}) {
@@ -255,8 +302,8 @@ class LobbyClient {
             return;
         }
 
-        const isLobby = roomStatus === 'lobby';
-        const canEdit = isLobby && this.isCurrentPlayerHost();
+        const isLobby = !this.hasReceivedRoomState || roomStatus === 'lobby';
+        const canEdit = isLobby && this.isCurrentPlayerHost() && !this.isBusy();
         Array.from(this.elements.settingsForm.elements).forEach((element) => {
             if (element instanceof HTMLButtonElement
                 || element instanceof HTMLInputElement
@@ -309,7 +356,40 @@ class LobbyClient {
         });
     }
 
+    isBusy() {
+        return this.isSavingSettings || this.isStartingGame;
+    }
+
+    async readResponseData(response) {
+        try {
+            return await response.json();
+        } catch (error) {
+            return {};
+        }
+    }
+
+    getErrorMessage(data, fallbackMessage) {
+        if (data && typeof data.detail === 'string') {
+            return data.detail;
+        }
+
+        if (!data || typeof data.errors !== 'object') {
+            return fallbackMessage;
+        }
+
+        return Object.entries(data.errors).map(([fieldName, messages]) => {
+            if (Array.isArray(messages)) {
+                return `${fieldName}: ${messages.join(' ')}`;
+            }
+            return `${fieldName}: ${String(messages)}`;
+        }).join(' ');
+    }
+
     async updateSettings() {
+        if (this.isBusy()) {
+            return;
+        }
+
         const name = this.elements.editRoomName.value.trim();
         const visibility = this.elements.editVisibility.value;
 
@@ -318,6 +398,9 @@ class LobbyClient {
             return;
         }
 
+        this.isSavingSettings = true;
+        this.syncHostControls();
+        this.syncLobbyLockState(this.currentRoomStatus);
         this.showStatus('Saving settings...');
 
         try {
@@ -330,19 +413,29 @@ class LobbyClient {
                 body: JSON.stringify({ name, visibility }),
             });
 
+            const data = await this.readResponseData(response);
             if (!response.ok) {
-                const data = await response.json();
-                throw new Error(data.detail || 'Failed to update settings');
+                throw new Error(this.getErrorMessage(data, 'Failed to update settings.'));
             }
 
-            this.showStatus('Settings saved!');
-            this.scheduleHideStatus(3000);
+            this.showStatus('Settings saved!', { autoHideMs: 3000 });
         } catch (error) {
             this.showError(error.message);
+        } finally {
+            this.isSavingSettings = false;
+            this.syncHostControls();
+            this.syncLobbyLockState(this.currentRoomStatus);
         }
     }
 
     async startGame() {
+        if (this.isBusy()) {
+            return;
+        }
+
+        this.isStartingGame = true;
+        this.syncHostControls();
+        this.syncLobbyLockState(this.currentRoomStatus);
         this.showStatus('Starting game...');
 
         try {
@@ -353,36 +446,62 @@ class LobbyClient {
                 },
             });
 
+            const data = await this.readResponseData(response);
             if (!response.ok) {
-                const data = await response.json();
-                throw new Error(data.detail || 'Failed to start game');
+                throw new Error(this.getErrorMessage(data, 'Failed to start game.'));
             }
-
-            this.hideStatus();
         } catch (error) {
             this.showError(error.message);
+        } finally {
+            this.isStartingGame = false;
+            this.syncHostControls();
+            this.syncLobbyLockState(this.currentRoomStatus);
         }
     }
 
     async copyJoinUrl() {
+        if (!this.elements.joinUrlInput || !this.elements.copyUrlButton || this.isBusy()) {
+            return;
+        }
+
         const text = this.elements.joinUrlInput.value;
 
         try {
-            if (navigator.clipboard && navigator.clipboard.writeText) {
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
                 await navigator.clipboard.writeText(text);
             } else {
-                this.elements.joinUrlInput.select();
-                document.execCommand('copy');
+                if (typeof this.elements.joinUrlInput.select === 'function') {
+                    this.elements.joinUrlInput.select();
+                }
+                const copied = typeof document.execCommand === 'function' && document.execCommand('copy');
+                if (!copied) {
+                    throw new Error('Clipboard copy failed');
+                }
             }
 
-            const originalText = this.elements.copyUrlButton.textContent;
-            this.elements.copyUrlButton.textContent = '✅';
-            window.setTimeout(() => {
-                this.elements.copyUrlButton.textContent = originalText;
-            }, 2000);
+            this.showStatus('Invite link copied.', { autoHideMs: 2000 });
+            this.setCopyButtonFeedback('✅', 2000);
         } catch (error) {
-            this.showError('Failed to copy. Please copy manually.');
+            this.showError('Failed to copy invite link. Please copy it manually.');
         }
+    }
+
+    setCopyButtonFeedback(text, resetDelayMs) {
+        if (!this.elements.copyUrlButton) {
+            return;
+        }
+
+        if (this.copyFeedbackTimeout) {
+            clearTimeout(this.copyFeedbackTimeout);
+            this.copyFeedbackTimeout = null;
+        }
+
+        const originalText = '📋';
+        this.elements.copyUrlButton.textContent = text;
+        this.copyFeedbackTimeout = window.setTimeout(() => {
+            this.elements.copyUrlButton.textContent = originalText;
+            this.copyFeedbackTimeout = null;
+        }, resetDelayMs);
     }
 
     getCsrfToken() {
@@ -390,43 +509,32 @@ class LobbyClient {
         return csrfField ? csrfField.value : '';
     }
 
-    showError(message) {
+    showError(message, { autoHideMs = 5000 } = {}) {
         if (!this.elements.lobbyError || !this.elements.lobbyStatus) {
             return;
         }
 
-        if (this.statusTimeout) {
-            clearTimeout(this.statusTimeout);
-            this.statusTimeout = null;
-        }
-        if (this.errorTimeout) {
-            clearTimeout(this.errorTimeout);
-        }
-
-        this.elements.lobbyStatus.hidden = true;
+        this.hideStatus();
+        this.hideError();
         this.elements.lobbyError.textContent = message;
         this.elements.lobbyError.hidden = false;
-        this.errorTimeout = window.setTimeout(() => {
-            this.elements.lobbyError.hidden = true;
-        }, 5000);
+        if (autoHideMs !== null) {
+            this.scheduleHideError(autoHideMs);
+        }
     }
 
-    showStatus(message) {
+    showStatus(message, { autoHideMs = null } = {}) {
         if (!this.elements.lobbyError || !this.elements.lobbyStatus) {
             return;
         }
 
-        if (this.statusTimeout) {
-            clearTimeout(this.statusTimeout);
-        }
-        if (this.errorTimeout) {
-            clearTimeout(this.errorTimeout);
-            this.errorTimeout = null;
-        }
-
-        this.elements.lobbyError.hidden = true;
+        this.hideError();
+        this.hideStatus();
         this.elements.lobbyStatus.textContent = message;
         this.elements.lobbyStatus.hidden = false;
+        if (autoHideMs !== null) {
+            this.scheduleHideStatus(autoHideMs);
+        }
     }
 
     scheduleHideStatus(delayMs) {
@@ -436,13 +544,32 @@ class LobbyClient {
         this.statusTimeout = window.setTimeout(() => this.hideStatus(), delayMs);
     }
 
+    scheduleHideError(delayMs) {
+        if (this.errorTimeout) {
+            clearTimeout(this.errorTimeout);
+        }
+        this.errorTimeout = window.setTimeout(() => this.hideError(), delayMs);
+    }
+
     hideStatus() {
         if (this.elements.lobbyStatus) {
             this.elements.lobbyStatus.hidden = true;
+            this.elements.lobbyStatus.textContent = '';
         }
         if (this.statusTimeout) {
             clearTimeout(this.statusTimeout);
             this.statusTimeout = null;
+        }
+    }
+
+    hideError() {
+        if (this.elements.lobbyError) {
+            this.elements.lobbyError.hidden = true;
+            this.elements.lobbyError.textContent = '';
+        }
+        if (this.errorTimeout) {
+            clearTimeout(this.errorTimeout);
+            this.errorTimeout = null;
         }
     }
 }

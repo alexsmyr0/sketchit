@@ -192,6 +192,11 @@ body {
     background: var(--accent-hover);
 }
 
+.icon-button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
 .divider {
     border: none;
     border-top: 1px solid #f1f2f6;
@@ -203,6 +208,10 @@ body {
     display: flex;
     flex-direction: column;
     gap: 1.5rem;
+}
+
+.host-controls[data-mode="read-only"] {
+    opacity: 0.9;
 }
 
 .settings-form {
@@ -229,6 +238,13 @@ body {
     border-radius: 8px;
     font-family: inherit;
     font-size: 0.95rem;
+}
+
+.field input:disabled,
+.field select:disabled {
+    background: #f1f2f6;
+    color: var(--text-secondary);
+    cursor: not-allowed;
 }
 
 .action-button {
@@ -267,6 +283,11 @@ body {
     background: #dfe6e9;
 }
 
+.action-button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
 .start-game-section {
     margin-top: 1rem;
     display: flex;
@@ -279,6 +300,11 @@ body {
     color: var(--danger);
     text-align: center;
     font-weight: 500;
+}
+
+.status-note {
+    margin: -0.5rem 0 0;
+    color: var(--text-secondary);
 }
 
 /* Toasts / Messages */

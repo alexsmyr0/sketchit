@@ -55,6 +55,7 @@ class RoomLobbyUITests(TestCase):
         self.assertContains(response, 'id="host-controls"')
         self.assertContains(response, 'id="settings-form"')
         self.assertContains(response, 'id="start-game-button"')
+        self.assertContains(response, 'id="host-controls-note"')
         self.assertContains(response, 'id="guest-view"')
         self.assertIn('id="guest-view" class="guest-view" hidden', content)
         self.assertNotIn('id="host-controls" class="host-controls" hidden', content)
