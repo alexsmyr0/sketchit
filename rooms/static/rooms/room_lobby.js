@@ -143,7 +143,7 @@ class LobbyClient {
         }
     }
 
-    updateLobbyUI(state) {
+    updateLobbyUI(state, { forceSettingsSync = false } = {}) {
         const { room, host, participants } = state;
         const previousHostId = this.currentHostId;
         const previousStatus = this.currentRoomStatus;
@@ -165,7 +165,7 @@ class LobbyClient {
         }
 
         this.syncSettingsFormValues(room, {
-            force: previousHostId !== this.currentPlayerId && this.isCurrentPlayerHost(),
+            force: forceSettingsSync || (previousHostId !== this.currentPlayerId && this.isCurrentPlayerHost()),
         });
         this.renderParticipantList();
         this.syncHostControls();
@@ -423,6 +423,9 @@ class LobbyClient {
                 throw new Error(this.getErrorMessage(data, 'Failed to update settings.'));
             }
 
+            if (data && data.room && Array.isArray(data.participants)) {
+                this.updateLobbyUI(data, { forceSettingsSync: true });
+            }
             this.showStatus('Settings saved!', { autoHideMs: 3000 });
         } catch (error) {
             this.showError(error.message);

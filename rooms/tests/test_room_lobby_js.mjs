@@ -327,6 +327,39 @@ test("updateSettings ignored duplicate submits while the save request was in fli
 });
 
 
+test("updateSettings applied the successful response without waiting for websocket sync", async () => {
+    const responsePayload = {
+        ...buildRoomState(),
+        room: {
+            ...buildRoomState().room,
+            name: "Renamed From Server",
+            visibility: "public",
+        },
+    };
+    const harness = await loadRoomLobbyScript({
+        fetchResponse: async () => ({
+            ok: true,
+            async json() {
+                return responsePayload;
+            },
+        }),
+    });
+    harness.client.updateLobbyUI(buildRoomState());
+    harness.elementsById.get("edit-room-name").value = "Renamed From Server";
+    harness.elementsById.get("edit-visibility").value = "public";
+
+    harness.fetchCalls.length = 0;
+
+    await harness.client.updateSettings();
+
+    assert.equal(harness.fetchCalls.length, 1);
+    assert.equal(harness.elementsById.get("room-name-display").textContent, "Renamed From Server");
+    assert.equal(harness.elementsById.get("edit-room-name").value, "Renamed From Server");
+    assert.equal(harness.elementsById.get("edit-visibility").value, "public");
+    assert.equal(harness.elementsById.get("lobby-status").textContent, "Settings saved!");
+});
+
+
 test("startGame ignored duplicate clicks and left the host in read-only mode after the game started", async () => {
     const deferredResponse = makeDeferred();
     const harness = await loadRoomLobbyScript({
