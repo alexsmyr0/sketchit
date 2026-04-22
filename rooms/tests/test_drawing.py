@@ -8,6 +8,7 @@ reconnect recovery.
 
 import json
 import fakeredis
+from channels.db import database_sync_to_async
 from channels.testing import WebsocketCommunicator
 from django.test import TransactionTestCase
 
@@ -441,13 +442,13 @@ class SnapshotSyncTests(TransactionTestCase):
         await drawer_socket.send_json_to({"type": "drawing.stroke", "payload": {"test": 1}})
         await _receive_until_type(sync_viewer, "drawing.stroke")
         self.assertEqual(len(room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code)), 1)
-        from channels.db import database_sync_to_async
-        game_word = await database_sync_to_async(GameWord.objects.create)(game=self.game, text="rocket")
-        round_obj = await database_sync_to_async(Round.objects.create)(game=self.game, sequence_number=100, drawer_participant=self.drawer_player, drawer_nickname=self.drawer_player.display_name, selected_game_word=game_word)
-        await database_sync_to_async(game_services.complete_round_due_to_timer)(round_obj.id)
+        # Completing a round progresses the game to the next round, so the test
+        # must provide one unused snapshot word for the transition to stay valid.
+        await database_sync_to_async(GameWord.objects.create)(game=self.game, text="planet")
+        await database_sync_to_async(game_services.complete_round_due_to_timer)(self.round.id)
         new_viewer_key = await _create_room_member(self.room.id, "Intermission Bob")
         v_socket = WebsocketCommunicator(_TEST_APP, _ws_url(self.room.join_code), headers=_session_headers(new_viewer_key))
-        game_redis.set_turn_state(self.fake_redis, self.room.join_code, {"phase": "intermission", "round_id": str(round_obj.id)})
+        game_redis.set_turn_state(self.fake_redis, self.room.join_code, {"phase": "intermission", "round_id": str(self.round.id)})
         await _connect_and_drain_initial_sync(v_socket, self.room.join_code, expects_game_active=True)
         drawn = [m for m in _drain_output_queue_nowait(v_socket) if m.get("type", "").startswith("drawing.")]
         self.assertEqual(drawn, [])
