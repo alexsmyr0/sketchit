@@ -17,14 +17,63 @@ from rooms.models import Player, Room
 from games.models import Game, GameStatus, GameWord, Round
 from rooms.tests.test_consumers import (
     _ws_url, _session_headers, _create_room_member, _TEST_APP,
-    _receive_until_type, _connect_and_receive_initial_room_state,
-    _connect_and_drain_initial_sync, _drain_output_queue_nowait
+    _receive_until_type, _connect_and_drain_initial_sync,
 )
 from rooms import consumers as room_consumers
 from rooms import redis as room_redis
 from games import redis as game_redis
 from games import services as game_services
 from words.models import Word, WordPack, WordPackEntry
+
+
+def _drawing_replay_events(messages: list[dict]) -> list[dict]:
+    return [
+        message
+        for message in messages
+        if message.get("type", "").startswith("drawing.")
+    ]
+
+
+def _assert_active_connect_messages(
+    testcase: TransactionTestCase,
+    messages: list[dict],
+    *,
+    replayed_drawing: list[dict] | None = None,
+) -> None:
+    testcase.assertEqual(messages[0].get("type"), "room.state")
+    testcase.assertTrue(
+        any(message.get("type") == "round.state" for message in messages),
+        "Expected connect-time round.state sync event.",
+    )
+    testcase.assertTrue(
+        any(
+            message.get("type") in {"round.timer", "round.intermission_timer"}
+            for message in messages
+        ),
+        "Expected connect-time round timer or intermission timer sync event.",
+    )
+    expected_replay = [] if replayed_drawing is None else replayed_drawing
+    testcase.assertEqual(_drawing_replay_events(messages), expected_replay)
+
+
+async def _connect_and_assert_active_handshake(
+    testcase: TransactionTestCase,
+    communicator: WebsocketCommunicator,
+    join_code: str,
+    *,
+    replayed_drawing: list[dict] | None = None,
+) -> list[dict]:
+    messages = await _connect_and_drain_initial_sync(
+        communicator,
+        join_code,
+        expects_game_active=True,
+    )
+    _assert_active_connect_messages(
+        testcase,
+        messages,
+        replayed_drawing=replayed_drawing,
+    )
+    return messages
 
 
 @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)
@@ -107,8 +156,16 @@ class DrawingEventTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.viewer_session_key),
         )
-        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code, expects_game_active=True)
-        await _connect_and_drain_initial_sync(viewer_socket, self.room.join_code, expects_game_active=True)
+        await _connect_and_assert_active_handshake(
+            self,
+            drawer_socket,
+            self.room.join_code,
+        )
+        await _connect_and_assert_active_handshake(
+            self,
+            viewer_socket,
+            self.room.join_code,
+        )
 
         stroke_data = {"lines": [[0,0], [10,10]], "color": "blue"}
         await drawer_socket.send_json_to({
@@ -135,8 +192,17 @@ class DrawingEventTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.viewer_session_key),
         )
-        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code, expects_game_active=True)
-        await _connect_and_drain_initial_sync(viewer_socket, self.room.join_code, expects_game_active=True)
+        await _connect_and_assert_active_handshake(
+            self,
+            drawer_socket,
+            self.room.join_code,
+        )
+        await _connect_and_assert_active_handshake(
+            self,
+            viewer_socket,
+            self.room.join_code,
+        )
+        await _receive_until_type(drawer_socket, "room.state")
 
         stroke_data = {"lines": [[0,0], [10,10]], "color": "red"}
         await drawer_socket.send_json_to({
@@ -148,8 +214,7 @@ class DrawingEventTests(TransactionTestCase):
         response = await _receive_until_type(viewer_socket, "drawing.stroke")
         self.assertEqual(response["payload"], stroke_data)
 
-        # Drawer should NOT receive their own broadcast
-        _drain_output_queue_nowait(drawer_socket)
+        # Drawer should NOT receive their own broadcast.
         self.assertTrue(await drawer_socket.receive_nothing())
 
         await drawer_socket.disconnect()
@@ -168,8 +233,16 @@ class DrawingEventTests(TransactionTestCase):
             headers=_session_headers(self.viewer_session_key),
         )
         
-        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code, expects_game_active=True)
-        await _connect_and_drain_initial_sync(viewer_socket, self.room.join_code, expects_game_active=True)
+        await _connect_and_assert_active_handshake(
+            self,
+            drawer_socket,
+            self.room.join_code,
+        )
+        await _connect_and_assert_active_handshake(
+            self,
+            viewer_socket,
+            self.room.join_code,
+        )
         # Drawer sends an end stroke
         await drawer_socket.send_json_to({
             "type": "drawing.end_stroke",
@@ -203,9 +276,21 @@ class DrawingEventTests(TransactionTestCase):
             headers=_session_headers(second_viewer_key),
         )
         
-        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code, expects_game_active=True)
-        await _connect_and_drain_initial_sync(viewer1_socket, self.room.join_code, expects_game_active=True)
-        await _connect_and_drain_initial_sync(viewer2_socket, self.room.join_code, expects_game_active=True)
+        await _connect_and_assert_active_handshake(
+            self,
+            drawer_socket,
+            self.room.join_code,
+        )
+        await _connect_and_assert_active_handshake(
+            self,
+            viewer1_socket,
+            self.room.join_code,
+        )
+        await _connect_and_assert_active_handshake(
+            self,
+            viewer2_socket,
+            self.room.join_code,
+        )
 
         stroke_data = {"lines": [[0,0], [10,10]]}
         await drawer_socket.send_json_to({
@@ -237,8 +322,17 @@ class DrawingEventTests(TransactionTestCase):
             headers=_session_headers(self.viewer_session_key),
         )
         
-        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code, expects_game_active=True)
-        await _connect_and_drain_initial_sync(viewer_socket, self.room.join_code, expects_game_active=True)
+        await _connect_and_assert_active_handshake(
+            self,
+            drawer_socket,
+            self.room.join_code,
+        )
+        await _connect_and_assert_active_handshake(
+            self,
+            viewer_socket,
+            self.room.join_code,
+        )
+        await _receive_until_type(drawer_socket, "room.state")
 
         # Viewer (non-drawer) tries to send a stroke
         await viewer_socket.send_json_to({
@@ -246,8 +340,7 @@ class DrawingEventTests(TransactionTestCase):
             "payload": {"naughty": "secret"}
         })
 
-        # Drawer should receive nothing
-        _drain_output_queue_nowait(drawer_socket)
+        # Drawer should receive nothing from the unauthorized viewer stroke.
         self.assertTrue(await drawer_socket.receive_nothing())
 
         await drawer_socket.disconnect()
@@ -260,7 +353,11 @@ class DrawingEventTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.drawer_session_key),
         )
-        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code, expects_game_active=True)
+        await _connect_and_assert_active_handshake(
+            self,
+            drawer_socket,
+            self.room.join_code,
+        )
 
         # Pre-seed a snapshot in Redis (list of JSON strings)
         stroke_data = {"type": "drawing.stroke", "payload": {"data": "seeded"}}
@@ -271,15 +368,17 @@ class DrawingEventTests(TransactionTestCase):
             _ws_url(self.room.join_code),
             headers=_session_headers(self.viewer_session_key),
         )
-        # Replayed stroke will be drained by the handshake helper
-        messages = await _connect_and_drain_initial_sync(viewer_socket, self.room.join_code, expects_game_active=True)
-        self.assertTrue(any(m.get("type") == "drawing.stroke" for m in messages))
+        await _connect_and_assert_active_handshake(
+            self,
+            viewer_socket,
+            self.room.join_code,
+            replayed_drawing=[stroke_data],
+        )
 
         # Drawer clears the canvas
         await drawer_socket.send_json_to({"type": "drawing.clear"})
         
-        # Viewer should receive the clear event broadcast
-        # Room.state arrival broadcasts were drained by handshake, so clear should be next
+        # Viewer should receive the clear event broadcast after handshake sync.
         response = await _receive_until_type(viewer_socket, "drawing.clear")
 
         # Snapshot should be gone from Redis
@@ -317,8 +416,7 @@ class DrawingEventTests(TransactionTestCase):
             "payload": {"wont": "work"}
         })
 
-        # Viewer should receive nothing
-                # Viewer should receive nothing
+        # Viewer should receive nothing.
         self.assertTrue(await viewer_socket.receive_nothing())
 
         await drawer_socket.disconnect()
@@ -409,10 +507,12 @@ class SnapshotSyncTests(TransactionTestCase):
             headers=_session_headers(self.viewer_session_key),
         )
         
-        messages = await _connect_and_drain_initial_sync(communicator, self.room.join_code, expects_game_active=True)
-
-        # Client should have received the replayed event in the burst.
-        self.assertTrue(any(m == snapshot_payload for m in messages))
+        await _connect_and_assert_active_handshake(
+            self,
+            communicator,
+            self.room.join_code,
+            replayed_drawing=[snapshot_payload],
+        )
 
         await communicator.disconnect()
 
@@ -420,17 +520,28 @@ class SnapshotSyncTests(TransactionTestCase):
         self._seed_active_round_state()
         drawer_socket = WebsocketCommunicator(_TEST_APP, _ws_url(self.room.join_code), headers=_session_headers(self.drawer_session_key))
         sync_viewer = WebsocketCommunicator(_TEST_APP, _ws_url(self.room.join_code), headers=_session_headers(self.viewer_session_key))
-        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code, expects_game_active=True)
-        await _connect_and_drain_initial_sync(sync_viewer, self.room.join_code, expects_game_active=True)
+        await _connect_and_assert_active_handshake(
+            self,
+            drawer_socket,
+            self.room.join_code,
+        )
+        await _connect_and_assert_active_handshake(
+            self,
+            sync_viewer,
+            self.room.join_code,
+        )
         strokes = [{"type": "drawing.stroke", "payload": {"id": 1}}, {"type": "drawing.stroke", "payload": {"id": 2}}, {"type": "drawing.end_stroke", "payload": {}}]
         for s in strokes:
             await drawer_socket.send_json_to(s)
             await _receive_until_type(sync_viewer, s["type"])
         new_viewer_key = await _create_room_member(self.room.id, "Late Bob")
         viewer_socket = WebsocketCommunicator(_TEST_APP, _ws_url(self.room.join_code), headers=_session_headers(new_viewer_key))
-        messages = await _connect_and_drain_initial_sync(viewer_socket, self.room.join_code, expects_game_active=True)
-        replayed = [m for m in messages if m.get("type", "").startswith("drawing.")]
-        self.assertEqual(replayed, strokes)
+        await _connect_and_assert_active_handshake(
+            self,
+            viewer_socket,
+            self.room.join_code,
+            replayed_drawing=strokes,
+        )
         await drawer_socket.disconnect()
         await viewer_socket.disconnect()
         await sync_viewer.disconnect()
@@ -438,9 +549,17 @@ class SnapshotSyncTests(TransactionTestCase):
     async def test_snapshot_isolation_between_rounds(self):
         self._seed_active_round_state()
         drawer_socket = WebsocketCommunicator(_TEST_APP, _ws_url(self.room.join_code), headers=_session_headers(self.drawer_session_key))
-        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code, expects_game_active=True)
+        await _connect_and_assert_active_handshake(
+            self,
+            drawer_socket,
+            self.room.join_code,
+        )
         sync_viewer = WebsocketCommunicator(_TEST_APP, _ws_url(self.room.join_code), headers=_session_headers(self.viewer_session_key))
-        await _connect_and_drain_initial_sync(sync_viewer, self.room.join_code, expects_game_active=True)
+        await _connect_and_assert_active_handshake(
+            self,
+            sync_viewer,
+            self.room.join_code,
+        )
         await drawer_socket.send_json_to({"type": "drawing.stroke", "payload": {"test": 1}})
         await _receive_until_type(sync_viewer, "drawing.stroke")
         self.assertEqual(len(room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code)), 1)
@@ -450,9 +569,11 @@ class SnapshotSyncTests(TransactionTestCase):
         await database_sync_to_async(game_services.complete_round_due_to_timer)(self.round.id)
         new_viewer_key = await _create_room_member(self.room.id, "Intermission Bob")
         v_socket = WebsocketCommunicator(_TEST_APP, _ws_url(self.room.join_code), headers=_session_headers(new_viewer_key))
-        await _connect_and_drain_initial_sync(v_socket, self.room.join_code, expects_game_active=True)
-        drawn = [m for m in _drain_output_queue_nowait(v_socket) if m.get("type", "").startswith("drawing.")]
-        self.assertEqual(drawn, [])
+        await _connect_and_assert_active_handshake(
+            self,
+            v_socket,
+            self.room.join_code,
+        )
         await drawer_socket.disconnect()
         await sync_viewer.disconnect()
         await v_socket.disconnect()
