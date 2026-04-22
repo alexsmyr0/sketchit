@@ -56,6 +56,12 @@ def get_redis_client() -> redis.Redis:
     return _redis_client
 
 
+def reset_redis_client() -> None:
+    """Reset the cached Redis client. Used for test isolation."""
+    global _redis_client
+    _redis_client = None
+
+
 @database_sync_to_async
 def _mark_participant_connected(
     player_id: int,
