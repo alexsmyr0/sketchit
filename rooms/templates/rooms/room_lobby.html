@@ -9,9 +9,10 @@
 </head>
 <body>
     <div class="lobby-container">
+        {% csrf_token %}
         <header class="lobby-header">
             <h1 class="logo" aria-label="sketchit">
-                <span style="color:#ff595e;">s</span><span style="color:#ffca3a;">k</span><span style="color:#8ac926;">e</span><span style="color:#1982c4;">t</span><span style="color:#6a4c93;">c</span><span style="color:#ff924c;">h</span><span style="color:#52b788;">i</span><span style="color:#4cc9f0;">t</span>
+                <span class="s">s</span><span class="k">k</span><span class="e">e</span><span class="t">t</span><span class="c">c</span><span class="h">h</span><span class="i">i</span><span class="t2">t</span>
             </h1>
             <div class="room-info">
                 <h2 id="room-name-display">{{ room.name }}</h2>
@@ -42,47 +43,46 @@
                 <div class="join-link-section">
                     <label for="join-url">Invite Friends</label>
                     <div class="copy-input-group">
-                        <input id="join-url" type="text" readonly value="{{ request.build_absolute_uri }}">
-                        <button id="copy-url-button" class="icon-button" title="Copy Link">📋</button>
+                        <input id="join-url" type="text" readonly value="{{ request.scheme }}://{{ request.get_host }}{% url 'join-room' room.join_code %}">
+                        <button id="copy-url-button" type="button" class="icon-button" title="Copy Link">📋</button>
                     </div>
                 </div>
 
                 <hr class="divider">
 
-                {% if participant.id == host.id %}
-                    <div id="host-controls" class="host-controls">
-                        <h3>Lobby Settings</h3>
-                        <form id="settings-form" class="settings-form">
-                            {% csrf_token %}
-                            <div class="field">
-                                <label for="edit-room-name">Room Name</label>
-                                <input id="edit-room-name" type="text" value="{{ room.name }}" maxlength="255">
-                            </div>
-                            <div class="field">
-                                <label for="edit-visibility">Visibility</label>
-                                <select id="edit-visibility">
-                                    <option value="public" {% if room.visibility == "public" %}selected{% endif %}>Public</option>
-                                    <option value="private" {% if room.visibility == "private" %}selected{% endif %}>Private</option>
-                                </select>
-                            </div>
-                            <button id="save-settings-button" type="submit" class="action-button secondary">Save Settings</button>
-                        </form>
-
-                        <div class="start-game-section">
-                            <button id="start-game-button" class="action-button primary" {% if participants|length < 2 %}disabled{% endif %}>
-                                Start Game
-                            </button>
-                            <p id="min-players-hint" class="hint" {% if participants|length >= 2 %}hidden{% endif %}>
-                                Need at least 2 players to start.
-                            </p>
+                <div id="host-controls" class="host-controls"{% if participant.id != host.id %} hidden{% endif %}>
+                    <h3>Lobby Settings</h3>
+                    <p id="host-controls-note" class="hint status-note" hidden></p>
+                    <form id="settings-form" class="settings-form">
+                        {% csrf_token %}
+                        <div class="field">
+                            <label for="edit-room-name">Room Name</label>
+                            <input id="edit-room-name" type="text" value="{{ room.name }}" maxlength="255">
                         </div>
+                        <div class="field">
+                            <label for="edit-visibility">Visibility</label>
+                            <select id="edit-visibility">
+                                <option value="public" {% if room.visibility == "public" %}selected{% endif %}>Public</option>
+                                <option value="private" {% if room.visibility == "private" %}selected{% endif %}>Private</option>
+                            </select>
+                        </div>
+                        <button id="save-settings-button" type="submit" class="action-button secondary">Save Settings</button>
+                    </form>
+
+                    <div class="start-game-section">
+                        <button id="start-game-button" type="button" class="action-button primary" {% if not can_start_game %}disabled{% endif %}>
+                            Start Game
+                        </button>
+                        <p id="min-players-hint" class="hint" {% if not initial_start_hint %}hidden{% endif %}>
+                            {{ initial_start_hint }}
+                        </p>
                     </div>
-                {% else %}
-                    <div class="guest-view">
-                        <p>Waiting for the host to start the game...</p>
-                        <div class="loader"></div>
-                    </div>
-                {% endif %}
+                </div>
+
+                <div id="guest-view" class="guest-view"{% if participant.id == host.id %} hidden{% endif %}>
+                    <p id="guest-view-message">Waiting for the host to start the game...</p>
+                    <div id="guest-view-loader" class="loader"></div>
+                </div>
                 
                 <p id="lobby-error" class="message error" hidden></p>
                 <p id="lobby-status" class="message status" hidden></p>

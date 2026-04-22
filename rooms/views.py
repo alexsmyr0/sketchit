@@ -4,6 +4,7 @@ import string
 
 from django import forms
 from django.conf import settings
+from django.contrib.sessions.models import Session
 from django.db import transaction
 from django.db.models import Count
 from django.db.utils import IntegrityError
@@ -18,6 +19,7 @@ from rooms.models import Player, Room
 from rooms.services import (
     delete_room_if_empty_grace_expired,
     get_empty_room_cleanup_deadline,
+    purge_expired_participants_for_session,
     restore_room_from_empty_grace,
     schedule_host_changed_broadcast_after_commit,
     schedule_room_state_broadcast_after_commit,
@@ -94,6 +96,26 @@ def _get_or_create_session_key(request):
     return request.session.session_key
 
 
+def _lock_guest_session(request, session_key):
+    """Lock the durable Django session row for the current guest identity.
+
+    The MVP uses the Django session as the guest identity anchor. Locking the
+    session row serializes concurrent create/join requests from the same
+    browser so two requests cannot both conclude that no active room ownership
+    exists and then create conflicting participant rows.
+    """
+
+    if not Session.objects.filter(session_key=session_key).exists():
+        # A stale cookie can point at a missing DB session row after expiry
+        # cleanup. Saving recreates durable session state so there is a real row
+        # to lock for the remainder of this request.
+        request.session.save()
+        session_key = request.session.session_key
+
+    Session.objects.select_for_update().get(session_key=session_key)
+    return session_key
+
+
 def _build_room_response(room, *, status):
     # Both create and join return the same small payload so clients can treat
     # the success responses consistently.
@@ -103,6 +125,25 @@ def _build_room_response(room, *, status):
             "room_url": f"/rooms/{room.join_code}/",
         },
         status=status,
+    )
+
+
+def _build_room_assignment_conflict_response(room):
+    """Return a recoverable conflict payload for an already-owned valid room.
+
+    The create/join entry flow still treats this as a conflict because the
+    guest cannot own two rooms at once. Including ``room_url`` lets the browser
+    recover by navigating back into the authoritative existing room instead of
+    leaving the guest stuck on the entry page.
+    """
+
+    return JsonResponse(
+        {
+            "detail": "This guest session is already assigned to a room.",
+            "join_code": room.join_code,
+            "room_url": f"/rooms/{room.join_code}/",
+        },
+        status=409,
     )
 
 
@@ -155,6 +196,15 @@ def _build_room_lobby_state_response(room):
     )
 
 
+def _count_eligible_lobby_participants(participants):
+    return sum(
+        1
+        for participant in participants
+        if participant.connection_status == Player.ConnectionStatus.CONNECTED
+        and participant.participation_status != Player.ParticipationStatus.SPECTATING
+    )
+
+
 def _request_prefers_html(request):
     accept_header = request.headers.get("Accept", "")
     normalized_accept = accept_header.lower()
@@ -202,16 +252,27 @@ def create_room(request):
         return JsonResponse({"errors": form.errors}, status=400)
 
     session_key = _get_or_create_session_key(request)
-    # A guest session can only belong to one room at a time.
-    if Player.objects.filter(session_key=session_key).exists():
-        return JsonResponse(
-            {"detail": "This guest session is already assigned to a room."},
-            status=409,
-        )
-
     cleaned_data = form.cleaned_data
+    room_runtime_redis_client = _get_room_runtime_redis_client()
 
     with transaction.atomic():
+        session_key = _lock_guest_session(request, session_key)
+        # Clean up stale ownership for this browser session before enforcing the
+        # one-room-at-a-time rule. Persistent MySQL rows can survive app
+        # restarts after the underlying Django session has already expired.
+        purge_expired_participants_for_session(
+            redis_client=room_runtime_redis_client,
+            session_key=session_key,
+        )
+        existing_player = (
+            Player.objects.select_related("room")
+            .filter(session_key=session_key)
+            .order_by("created_at", "id")
+            .first()
+        )
+        if existing_player is not None:
+            return _build_room_assignment_conflict_response(existing_player.room)
+
         room = _create_room_with_unique_join_code(
             name=cleaned_data["name"],
             visibility=cleaned_data["visibility"],
@@ -248,8 +309,18 @@ def join_room(request, join_code):
 
     # The Django session is our guest identity for the MVP.
     session_key = _get_or_create_session_key(request)
+    room_runtime_redis_client = _get_room_runtime_redis_client()
 
     with transaction.atomic():
+        session_key = _lock_guest_session(request, session_key)
+        # Entry flow cleanup is session-scoped on purpose: remove stale rows
+        # that no longer belong to a live Django session before deciding
+        # whether this request is a valid rejoin or a real cross-room conflict.
+        purge_expired_participants_for_session(
+            redis_client=room_runtime_redis_client,
+            session_key=session_key,
+        )
+
         try:
             # Generated join codes are uppercase, so we normalize user input
             # before querying to allow lowercase requests like "abc12345".
@@ -272,27 +343,32 @@ def join_room(request, join_code):
                 # A join that arrives after the grace window should not revive a
                 # zombie room just because the async cleanup path has not run yet.
                 delete_room_if_empty_grace_expired(
-                    redis_client=_get_room_runtime_redis_client(),
+                    redis_client=room_runtime_redis_client,
                     room_id=room.id,
                     now=current_time,
                 )
                 return JsonResponse({"detail": "Room not found."}, status=404)
 
             restore_room_from_empty_grace(
-                redis_client=_get_room_runtime_redis_client(),
+                redis_client=room_runtime_redis_client,
                 room_id=room.id,
             )
             room.refresh_from_db()
 
         # If the session already has a Player, we either reuse it for the same room
         # or reject the request if it belongs to a different room.
-        player = Player.objects.filter(session_key=session_key).first()
+        player = (
+            Player.objects.select_related("room")
+            .filter(session_key=session_key)
+            .order_by("created_at", "id")
+            .first()
+        )
         if player is not None:
             if player.room_id != room.id:
-                return JsonResponse(
-                    {"detail": "This guest session is already assigned to a room."},
-                    status=409,
-                )
+                # Keep the conflict semantics, but include a recovery target so
+                # the entry page can send the guest back to the room they still
+                # validly own instead of leaving them stuck at a dead end.
+                return _build_room_assignment_conflict_response(player.room)
 
             # Rejoining the same room should not create a duplicate participant or
             # change the original display name, but it should refresh the session
@@ -377,7 +453,18 @@ def room_lobby_state(request, join_code):
         )
 
     if _request_prefers_html(request):
-        participants = room.participants.order_by("created_at", "id")
+        participants = list(room.participants.order_by("created_at", "id"))
+        eligible_participant_count = _count_eligible_lobby_participants(participants)
+        can_start_game = (
+            room.status == Room.Status.LOBBY and eligible_participant_count >= 2
+        )
+        if room.status != Room.Status.LOBBY:
+            initial_start_hint = "Game already started."
+        elif eligible_participant_count >= 2:
+            initial_start_hint = ""
+        else:
+            initial_start_hint = "Need at least 2 eligible players to start."
+
         return render(
             request,
             "rooms/room_lobby.html",
@@ -386,6 +473,8 @@ def room_lobby_state(request, join_code):
                 "host": room.host,
                 "participant": participant,
                 "participants": participants,
+                "can_start_game": can_start_game,
+                "initial_start_hint": initial_start_hint,
             },
         )
 
