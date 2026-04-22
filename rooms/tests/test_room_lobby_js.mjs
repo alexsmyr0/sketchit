@@ -70,7 +70,27 @@ function makeDeferred() {
 }
 
 
-function buildRoomState({ roomStatus = "lobby" } = {}) {
+function buildRoomState({
+    roomStatus = "lobby",
+    hostId = 7,
+    hostName = "Host Alex",
+    participants = null,
+} = {}) {
+    const participantList = participants ?? [
+        {
+            id: 7,
+            display_name: "Host Alex",
+            connection_status: "CONNECTED",
+            participation_status: "PLAYING",
+        },
+        {
+            id: 9,
+            display_name: "Jamie",
+            connection_status: "CONNECTED",
+            participation_status: "PLAYING",
+        },
+    ];
+
     return {
         room: {
             name: "Sketch Room",
@@ -79,23 +99,10 @@ function buildRoomState({ roomStatus = "lobby" } = {}) {
             status: roomStatus,
         },
         host: {
-            id: 7,
-            display_name: "Host Alex",
+            id: hostId,
+            display_name: hostName,
         },
-        participants: [
-            {
-                id: 7,
-                display_name: "Host Alex",
-                connection_status: "CONNECTED",
-                participation_status: "PLAYING",
-            },
-            {
-                id: 9,
-                display_name: "Jamie",
-                connection_status: "CONNECTED",
-                participation_status: "PLAYING",
-            },
-        ],
+        participants: participantList,
     };
 }
 
@@ -111,6 +118,10 @@ async function loadRoomLobbyScript({
         async writeText() {},
     },
     execCommandResult = true,
+    currentPlayerId = 7,
+    hostControlsInitiallyHidden = false,
+    guestViewInitiallyHidden = true,
+    roomStatusText = "lobby",
 } = {}) {
     const source = await readFile(ROOM_LOBBY_JS_PATH, "utf8");
     const listeners = new Map();
@@ -120,12 +131,12 @@ async function loadRoomLobbyScript({
     let nextTimerId = 1;
 
     const roomJoinCode = new MockElement({ textContent: JSON.stringify("ROOM1234") });
-    const currentPlayerId = new MockElement({ textContent: JSON.stringify(7) });
+    const currentPlayerIdElement = new MockElement({ textContent: JSON.stringify(currentPlayerId) });
     const csrfInput = new MockInputElement({ value: "csrf-token" });
     const participantList = new MockElement();
     const hostControls = new MockElement();
-    hostControls.hidden = false;
-    const guestView = new MockElement({ hidden: true });
+    hostControls.hidden = hostControlsInitiallyHidden;
+    const guestView = new MockElement({ hidden: guestViewInitiallyHidden });
     const guestViewMessage = new MockElement();
     const guestViewLoader = new MockElement();
     const saveSettingsButton = new MockButtonElement({ textContent: "Save Settings" });
@@ -135,7 +146,7 @@ async function loadRoomLobbyScript({
     const minPlayersHint = new MockElement({ hidden: true });
     const copyUrlButton = new MockButtonElement({ textContent: "📋" });
     const joinUrlInput = new MockInputElement({ value: "http://localhost:8000/rooms/join/ROOM1234/" });
-    const roomStatusBadge = new MockElement({ textContent: "lobby" });
+    const roomStatusBadge = new MockElement({ textContent: roomStatusText });
     const settingsForm = new MockElement();
     settingsForm.elements = [editRoomName, editVisibility, saveSettingsButton];
 
@@ -159,7 +170,7 @@ async function loadRoomLobbyScript({
         ["lobby-error", new MockElement({ hidden: true })],
         ["lobby-status", new MockElement({ hidden: true })],
         ["room-join-code", roomJoinCode],
-        ["current-player-id", currentPlayerId],
+        ["current-player-id", currentPlayerIdElement],
     ]);
 
     class MockWebSocket {
@@ -359,4 +370,72 @@ test("startGame ignored duplicate clicks and left the host in read-only mode aft
         harness.elementsById.get("lobby-status").textContent,
         "Game started. Lobby controls are now read-only.",
     );
+});
+
+
+test("guest promotion via host.changed exposed host controls before the next room.state", async () => {
+    const harness = await loadRoomLobbyScript({
+        currentPlayerId: 9,
+        hostControlsInitiallyHidden: true,
+        guestViewInitiallyHidden: false,
+    });
+    harness.client.updateLobbyUI(buildRoomState());
+
+    harness.client.handleServerEvent({
+        type: "host.changed",
+        payload: {
+            host: {
+                id: 9,
+                display_name: "Jamie",
+            },
+        },
+    });
+
+    assert.equal(harness.elementsById.get("host-controls").hidden, false);
+    assert.equal(harness.elementsById.get("guest-view").hidden, true);
+    assert.equal(harness.elementsById.get("start-game-button").disabled, false);
+    assert.equal(harness.elementsById.get("edit-room-name").disabled, false);
+    assert.equal(harness.elementsById.get("lobby-status").textContent, "Room host changed");
+
+    const participantEntries = harness.elementsById.get("participant-list").children;
+    assert.equal(participantEntries.length, 2);
+    assert.equal(participantEntries[1].children[2].textContent, "👑");
+});
+
+
+test("room.state after host promotion kept the new host editable and moved the crown", async () => {
+    const harness = await loadRoomLobbyScript({
+        currentPlayerId: 9,
+        hostControlsInitiallyHidden: true,
+        guestViewInitiallyHidden: false,
+    });
+    harness.client.updateLobbyUI(buildRoomState());
+
+    harness.client.handleServerEvent({
+        type: "host.changed",
+        payload: {
+            host: {
+                id: 9,
+                display_name: "Jamie",
+            },
+        },
+    });
+    harness.client.handleServerEvent({
+        type: "room.state",
+        payload: buildRoomState({
+            hostId: 9,
+            hostName: "Jamie",
+        }),
+    });
+
+    assert.equal(harness.elementsById.get("host-controls").hidden, false);
+    assert.equal(harness.elementsById.get("guest-view").hidden, true);
+    assert.equal(harness.elementsById.get("start-game-button").disabled, false);
+    assert.equal(harness.elementsById.get("edit-room-name").disabled, false);
+
+    const participantEntries = harness.elementsById.get("participant-list").children;
+    assert.equal(participantEntries.length, 2);
+    assert.equal(participantEntries[0].children.length, 2);
+    assert.equal(participantEntries[1].children[2].textContent, "👑");
+    assert.equal(participantEntries[1].children[3].textContent, "(You)");
 });

@@ -96,7 +96,7 @@ Use this as the default claim order for the next wave of work:
 ### Track G
 
 - [x] **G-01** P1 - Entry Screen & Public Room Discovery UI | Browser entry page, create/join forms, and public-room list rendering. (Depends on: A-02; K-02) | Blocks: G-02
-- [ ] **G-02** P1 - Live Lobby Page Template & Room Client | Lobby page, room socket client, derived join URL, and host controls. (Depends on: A-03; N-02; A-06; G-01) | Blocks: G-03; G-04
+- [x] **G-02** P1 - Live Lobby Page Template & Room Client | Lobby page, room socket client, derived join URL, and host controls. (Depends on: A-03; N-02; A-06; G-01) | Blocks: G-03; G-04
 - [ ] **G-03** P2 - Gameplay Page Shell, HUD, And Guess UI | Gameplay browser shell, timer/score HUD, and guess input/result rendering. (Depends on: A-06; K-03; K-04; N-05; G-02) | Blocks: G-05
 - [ ] **G-04** P2 - Browser Drawing Surface & Room Socket Integration | Drawer canvas UI, viewer drawing replay, and clear/end-stroke browser handling. (Depends on: N-04; G-02) | Blocks: G-05
 - [ ] **G-05** P4 - End-To-End Multiplayer Verification & Bug Sweep | Full MVP verification, multi-client testing, and bug-fix sweep. (Depends on: N-04; K-05; K-06; K-07; A-08; G-03; G-04) | Blocks: G-06
