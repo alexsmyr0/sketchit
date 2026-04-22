@@ -13,6 +13,7 @@ from games import services as game_services
 from rooms.models import Player, Room
 from rooms.tests.test_consumers import (
     _ws_url, _session_headers, _create_room_member, _TEST_APP,
+    _receive_until_type,
     _connect_and_drain_initial_sync,
 )
 from rooms import consumers as room_consumers
@@ -38,22 +39,6 @@ def _set_round_target_word(round_id: int, target_word: str) -> None:
     round = Round.objects.select_related("selected_game_word").get(pk=round_id)
     round.selected_game_word.text = target_word
     round.selected_game_word.save(update_fields=("text", "updated_at"))
-
-
-async def _receive_until_type(
-    communicator: WebsocketCommunicator,
-    expected_type: str,
-    *,
-    max_messages: int = 8,
-) -> dict:
-    # Room sockets emit a direct room.state (and may emit runtime sync frames)
-    # immediately after connect, so guess tests should drain until the event
-    # under assertion appears.
-    for _ in range(max_messages):
-        message = await communicator.receive_json_from()
-        if message.get("type") == expected_type:
-            return message
-    raise AssertionError(f"Did not receive {expected_type!r} within {max_messages} messages.")
 
 
 def _assert_active_connect_messages(
@@ -105,10 +90,8 @@ class GuessPipelineTests(TransactionTestCase):
         self.fake_redis = fakeredis.FakeRedis()
         room_consumers._redis_client = self.fake_redis
         game_runtime._redis_client = self.fake_redis
-        from games import services as game_services
+        self._orig_game_services_redis = game_services._get_redis_client
         game_services._get_redis_client = lambda: self.fake_redis
-        from rooms import services as room_services
-        room_services._get_redis_client = lambda: self.fake_redis
 
         # Set up a word pack for the room
         self.word_pack = WordPack.objects.create(name="Test Pack")
@@ -159,7 +142,9 @@ class GuessPipelineTests(TransactionTestCase):
         game_redis.set_turn_state(self.fake_redis, self.room.join_code, state)
 
     def tearDown(self):
-        room_consumers._redis_client = None
+        room_consumers.reset_redis_client()
+        game_services._get_redis_client = self._orig_game_services_redis
+        super().tearDown()
 
     async def test_correct_guess_broadcast(self):
         round_start = timezone.now()

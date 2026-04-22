@@ -81,20 +81,16 @@ class DrawingEventTests(TransactionTestCase):
     """Tests for drawer authorization and event broadcasting."""
 
     def setUp(self):
-        from rooms import consumers as room_consumers
         from games import runtime as game_runtime
-        from games import services as game_services
-        from rooms import services as room_services
-        
         game_runtime.reset_runtime_state_for_tests()
         room_consumers.reset_redis_client()
-        
+
         self.fake_redis = fakeredis.FakeRedis()
         room_consumers._redis_client = self.fake_redis
         game_runtime._redis_client = self.fake_redis
-        
+
+        self._orig_game_services_redis = game_services._get_redis_client
         game_services._get_redis_client = lambda: self.fake_redis
-        room_services._get_redis_client = lambda: self.fake_redis
 
         # Set up a word pack for the room
         self.word_pack = WordPack.objects.create(name="Test Pack")
@@ -116,7 +112,6 @@ class DrawingEventTests(TransactionTestCase):
         self.viewer_player = Player.objects.get(room=self.room, session_key=self.viewer_session_key)
 
         # Create mandatory Game and Round objects for runtime sync
-        from games.models import Game, GameStatus, GameWord, Round
         self.game = Game.objects.create(room=self.room, status=GameStatus.IN_PROGRESS)
         self.game_word = GameWord.objects.create(game=self.game, text="testword")
         self.round = Round.objects.create(
@@ -142,6 +137,7 @@ class DrawingEventTests(TransactionTestCase):
 
     def tearDown(self):
         room_consumers.reset_redis_client()
+        game_services._get_redis_client = self._orig_game_services_redis
         super().tearDown()
 
     async def test_drawer_can_broadcast_stroke(self):
@@ -166,6 +162,7 @@ class DrawingEventTests(TransactionTestCase):
             viewer_socket,
             self.room.join_code,
         )
+        await _receive_until_type(drawer_socket, "room.state")
 
         stroke_data = {"lines": [[0,0], [10,10]], "color": "blue"}
         await drawer_socket.send_json_to({
@@ -243,6 +240,7 @@ class DrawingEventTests(TransactionTestCase):
             viewer_socket,
             self.room.join_code,
         )
+        await _receive_until_type(drawer_socket, "room.state")
         # Drawer sends an end stroke
         await drawer_socket.send_json_to({
             "type": "drawing.end_stroke",
@@ -291,6 +289,8 @@ class DrawingEventTests(TransactionTestCase):
             viewer2_socket,
             self.room.join_code,
         )
+        await _receive_until_type(drawer_socket, "room.state")
+        await _receive_until_type(drawer_socket, "room.state")
 
         stroke_data = {"lines": [[0,0], [10,10]]}
         await drawer_socket.send_json_to({
@@ -428,10 +428,7 @@ class SnapshotSyncTests(TransactionTestCase):
     """Tests for canvas snapshot recovery on connection."""
 
     def setUp(self):
-        from rooms import consumers as room_consumers
         from games import runtime as game_runtime
-        from games import services as game_services
-        from rooms import services as room_services
 
         game_runtime.reset_runtime_state_for_tests()
         room_consumers.reset_redis_client()
@@ -440,8 +437,8 @@ class SnapshotSyncTests(TransactionTestCase):
         room_consumers._redis_client = self.fake_redis
         game_runtime._redis_client = self.fake_redis
 
+        self._orig_game_services_redis = game_services._get_redis_client
         game_services._get_redis_client = lambda: self.fake_redis
-        room_services._get_redis_client = lambda: self.fake_redis
 
         # Set up a word pack for the room
         self.word_pack = WordPack.objects.create(name="Snapshot Pack")
@@ -462,7 +459,6 @@ class SnapshotSyncTests(TransactionTestCase):
         self.viewer_session_key = async_to_sync(_create_room_member)(self.room.id, "Viewer")
         self.viewer_player = Player.objects.get(room=self.room, session_key=self.viewer_session_key)
         
-        from games.models import Game, GameStatus, GameWord, Round
         self.game = Game.objects.create(room=self.room, status=GameStatus.IN_PROGRESS)
         self.game_word = GameWord.objects.create(game=self.game, text="testword")
         self.round = Round.objects.create(
@@ -487,8 +483,8 @@ class SnapshotSyncTests(TransactionTestCase):
         game_redis.set_turn_state(self.fake_redis, self.room.join_code, state)
 
     def tearDown(self):
-        from rooms import consumers as room_consumers
         room_consumers.reset_redis_client()
+        game_services._get_redis_client = self._orig_game_services_redis
         super().tearDown()
 
     async def test_client_receives_snapshot_on_connect(self):
@@ -567,6 +563,10 @@ class SnapshotSyncTests(TransactionTestCase):
         # must provide one unused snapshot word for the transition to stay valid.
         await database_sync_to_async(GameWord.objects.create)(game=self.game, text="planet")
         await database_sync_to_async(game_services.complete_round_due_to_timer)(self.round.id)
+        self.assertEqual(
+            room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code),
+            [],
+        )
         new_viewer_key = await _create_room_member(self.room.id, "Intermission Bob")
         v_socket = WebsocketCommunicator(_TEST_APP, _ws_url(self.room.join_code), headers=_session_headers(new_viewer_key))
         await _connect_and_assert_active_handshake(

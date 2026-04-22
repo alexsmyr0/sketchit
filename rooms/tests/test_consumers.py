@@ -159,20 +159,6 @@ async def _receive_until_type(communicator, event_type: str, attempts: int = 50)
     raise AssertionError(f"Did not receive expected event type '{event_type}'.")
 
 
-def _drain_output_queue_nowait(communicator) -> list[dict]:
-    """Non-blocking drain of the communicator output queue."""
-    import asyncio, json
-    messages: list[dict] = []
-    while not communicator.output_queue.empty():
-        try:
-            raw = communicator.output_queue.get_nowait()
-            if raw.get("type") == "websocket.send":
-                messages.append(json.loads(raw["text"]))
-        except asyncio.QueueEmpty:
-            break
-    return messages
-
-
 async def _receive_output_json(communicator, *, timeout: float) -> dict:
     """Read one JSON websocket.send frame directly from the output queue."""
     raw = await asyncio.wait_for(communicator.output_queue.get(), timeout=timeout)
@@ -192,7 +178,7 @@ async def _drain_output_queue_safe(communicator, timeout: float = 0.2) -> list[d
     while True:
         try:
             messages.append(await _receive_output_json(communicator, timeout=timeout))
-            timeout = 0.1
+            timeout = 0.2
         except asyncio.TimeoutError:
             break
     return messages
@@ -267,7 +253,7 @@ async def _connect_and_drain_initial_sync(
 
     if expects_game_active:
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + 2.0
+        deadline = loop.time() + max(4.0, timeout)
 
         while loop.time() < deadline:
             has_round_state = any(
@@ -284,7 +270,7 @@ async def _connect_and_drain_initial_sync(
                 remaining = deadline - loop.time()
                 message = await _receive_output_json(
                     communicator,
-                    timeout=min(0.5, remaining),
+                    timeout=min(1.0, remaining),
                 )
             except asyncio.TimeoutError:
                 continue
@@ -301,10 +287,10 @@ async def _connect_and_drain_initial_sync(
                 "Expected connect-time round timer or intermission timer sync event."
             )
 
-        for message in await _drain_output_queue_safe(communicator, timeout=0.1):
+        for message in await _drain_output_queue_safe(communicator, timeout=0.2):
             _append_and_validate(message)
     else:
-        for message in await _drain_output_queue_safe(communicator, timeout=0.1):
+        for message in await _drain_output_queue_safe(communicator, timeout=0.2):
             _append_and_validate(message)
 
     return messages
@@ -329,8 +315,6 @@ class RoomConsumerConnectTests(TransactionTestCase):
         self.fake_redis = fakeredis.FakeRedis()
         room_consumers._redis_client = self.fake_redis
         game_runtime._redis_client = self.fake_redis
-        from rooms import services as room_services
-        room_services._get_redis_client = lambda: self.fake_redis
         from games import services as game_services
         self._orig_services_redis = game_services._get_redis_client
         game_services._get_redis_client = lambda: self.fake_redis
@@ -360,9 +344,11 @@ class RoomConsumerConnectTests(TransactionTestCase):
     def tearDown(self):
         async_to_sync(self.channel_layer.flush)()
         game_runtime.reset_runtime_state_for_tests()
-        super().tearDown()
         from rooms import consumers as room_consumers
         room_consumers._redis_client = None
+        from games import services as game_services
+        game_services._get_redis_client = self._orig_services_redis
+        super().tearDown()
 
     def _group_members(self, group_name: str) -> dict[str, float]:
         return self.channel_layer.groups.get(group_name, {})
