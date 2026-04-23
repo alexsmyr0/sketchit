@@ -252,6 +252,7 @@ def get_timer_status_for_tests(join_code: str) -> dict[str, bool]:
             return {
                 "round_timer_running": False,
                 "intermission_timer_running": False,
+                "drawer_disconnect_timer_running": False,
             }
 
         return {
@@ -261,6 +262,10 @@ def get_timer_status_for_tests(join_code: str) -> dict[str, bool]:
             "intermission_timer_running": bool(
                 handles.intermission_thread is not None
                 and handles.intermission_thread.is_alive()
+            ),
+            "drawer_disconnect_timer_running": bool(
+                handles.drawer_disconnect_thread is not None
+                and handles.drawer_disconnect_thread.is_alive()
             ),
         }
 
@@ -540,36 +545,43 @@ def _drawer_disconnect_timer_worker(
     round_id: int,
     stop_event: threading.Event,
 ) -> None:
-    poll_interval_seconds = max(_timer_tick_interval_seconds(), 0.05)
     client = get_redis_client()
+    turn_state = game_redis.get_turn_state(client, join_code)
+    if not turn_state:
+        return
+    if turn_state.get("phase") != "round":
+        return
+    if turn_state.get("round_id") != str(round_id):
+        return
 
-    while not stop_event.is_set():
-        turn_state = game_redis.get_turn_state(client, join_code)
-        if not turn_state:
-            return
-        if turn_state.get("phase") != "round":
-            return
-        if turn_state.get("round_id") != str(round_id):
-            return
+    disconnect_deadline = _parse_iso_datetime(
+        turn_state.get("drawer_disconnect_deadline_at")
+    )
+    if disconnect_deadline is None:
+        return
 
-        disconnect_deadline = _parse_iso_datetime(
-            turn_state.get("drawer_disconnect_deadline_at")
-        )
-        if disconnect_deadline is None:
-            return
-
-        seconds_until_deadline = max(
-            0.0,
-            (disconnect_deadline - timezone.now()).total_seconds(),
-        )
-        if seconds_until_deadline <= 0:
-            break
-
-        wait_seconds = min(poll_interval_seconds, seconds_until_deadline)
-        if stop_event.wait(wait_seconds):
-            return
+    wait_seconds = max(0.0, (disconnect_deadline - timezone.now()).total_seconds())
+    if wait_seconds > 0 and stop_event.wait(wait_seconds):
+        return
 
     if stop_event.is_set():
+        return
+
+    latest_turn_state = game_redis.get_turn_state(client, join_code)
+    if not latest_turn_state:
+        return
+    if latest_turn_state.get("phase") != "round":
+        return
+    if latest_turn_state.get("round_id") != str(round_id):
+        return
+
+    latest_disconnect_deadline = _parse_iso_datetime(
+        latest_turn_state.get("drawer_disconnect_deadline_at")
+    )
+    if latest_disconnect_deadline is None:
+        return
+    if latest_disconnect_deadline > timezone.now():
+        # Deadline moved forward unexpectedly; caller should own any re-arm.
         return
 
     from games.services import complete_round_due_to_drawer_disconnect

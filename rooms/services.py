@@ -705,6 +705,10 @@ def leave_participant(*, redis_client, player_id: int) -> None:
         player.room.join_code,
         player.session_key,
     )
+    _schedule_drawer_disconnect_grace_after_commit(
+        join_code=room.join_code,
+        player_id=player.id,
+    )
     player.delete()
     if room.host_id != previous_host_id:
         schedule_host_changed_broadcast_after_commit(
