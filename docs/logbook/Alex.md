@@ -78,14 +78,31 @@ Graded N4 and N5 ticket for Nikos. There were critical bugs in both but after po
 # 14/04
 Implemented A6. Implemented server-authoritative live lobby WebSocket updates by sending initial and change-driven room.state snapshots, plus host.changed on real host handoffs, for joins, leaves, disconnects, and reconnects.
 
-# 15/04
+## 15/04
+Graded Kostas's K4 ticket regarding full game-cycle drawer rotation and word uniqueness. I suggested a small fix, he implemented it, and I then approved and merged the PR.
 Updated implementation documentation and issue-PR templates
 
-# 18/04
-Implemented A7 ticket which focused on Mid-game joiners handling and functionality 
+## 18/04
+Graded Nikos's PR #69. I found a few issues, reported them, and Nikos patched them swiftly. I then reassessed the updated work and merged it.
 
-# 19/04
-Graded G2 and G3 implementation ticket by Nikos. There were a few critical bugs I uncovered and testing coverage limitations. After my review he patched them shortly.
+## 19/04
+Graded Nikos's pull requests #77, #76, and #75. I found bugs in all three, reported them to Nikos, and he resolved them. I then reassessed the updated work and pushed them forward.
 
-# 20/04
+## 20/04
+Implemented A7, which adds the mid-game joiner and reconnect reclaim rules so players who join during an active game become spectators for the current turn, reconnecting same-session players keep their original place and score, and the room behavior stays consistent with the SDS for session-based guest identity.
+Nikos graded my implementation and found some testing gaps and one critical bug. After discussing it with him, I fixed the problems, and he merged the ticket.
+Graded G2 and G3 implementation ticket by Nikos. There were a few critical bugs I uncovered and testing coverage limitations. After my review he patched G2 shortly but G3 remains incomplete.
 
+## 21/04
+Implemented issue #79 by fixing the dead-end room entry flow for stale or hidden guest-session room ownership. Expired same-session participant rows are now cleaned up before create/join rejects the request, valid existing ownership returns a recoverable response with `room_url`, the entry-page JavaScript redirects guests back into their existing room for that recoverable case, and room entry is now serialized by Django session to prevent concurrent duplicate room ownership.
+Graded Kostas's K6 ticket and gave feedback. After reassessing the updated implementation, I merged it.
+
+## 22/04
+Graded Niko's G3 implementation and found he fixed the original problem but reintroduced a new bug. Gave him a comment
+
+## 23/04
+Reviewed Niko's G3 implementation and it now passes. Merged.
+Reviewed Kosta's K7 implementation where he handles drawer disconnect grace & turn outcome handling. There were a few issues and a part of the implementation was incomplete
+
+## 24/04
+Looked into Kosta's K7 patches and it now passes. I merged shortly

@@ -21,7 +21,9 @@ from rooms.services import (
     enter_empty_room_grace,
     get_empty_room_cleanup_deadline,
     leave_participant,
+    promote_mid_game_spectators_to_players,
     purge_expired_participants,
+    purge_expired_participants_for_session,
     restore_room_from_empty_grace,
 )
 
@@ -833,3 +835,209 @@ class EmptyRoomGraceServiceTests(TestCase):
         self.assertEqual(purged_count, 0)
         self.assertTrue(Player.objects.filter(pk=active_player.id).exists())
         self.assertEqual(self.room.status, Room.Status.LOBBY)
+
+    def test_purge_expired_participants_for_session_only_removes_matching_session(self):
+        expired_at = timezone.now() - timedelta(minutes=1)
+        target_player = Player.objects.create(
+            room=self.room,
+            session_key="target-session",
+            display_name="Expired Alex",
+            connection_status=Player.ConnectionStatus.DISCONNECTED,
+            session_expires_at=expired_at,
+        )
+        self.room.host = target_player
+        self.room.save(update_fields=["host", "updated_at"])
+        other_room = Room.objects.create(
+            name="Other Room",
+            join_code="OTHER123",
+            visibility=Room.Visibility.PRIVATE,
+        )
+        other_player = Player.objects.create(
+            room=other_room,
+            session_key="other-session",
+            display_name="Expired Jamie",
+            connection_status=Player.ConnectionStatus.DISCONNECTED,
+            session_expires_at=expired_at,
+        )
+        other_room.host = other_player
+        other_room.save(update_fields=["host", "updated_at"])
+
+        purged_counts: list[int] = []
+        self._execute_on_commit(
+            lambda: purged_counts.append(
+                purge_expired_participants_for_session(
+                    redis_client=self.redis_client,
+                    session_key="target-session",
+                    now=timezone.now(),
+                )
+            )
+        )
+        purged_count = purged_counts[0]
+
+        self.room.refresh_from_db()
+        other_room.refresh_from_db()
+        self.assertEqual(purged_count, 1)
+        self.assertFalse(Player.objects.filter(pk=target_player.id).exists())
+        self.assertTrue(Player.objects.filter(pk=other_player.id).exists())
+        self.assertEqual(self.room.status, Room.Status.EMPTY_GRACE)
+        self.assertEqual(other_room.status, Room.Status.LOBBY)
+        self.assertEqual(other_room.host_id, other_player.id)
+
+
+class PromoteMidGameSpectatorsServiceTests(TestCase):
+    """Service-level coverage for the mid-game spectator promotion function."""
+
+    def setUp(self):
+        self.redis_client = fakeredis.FakeRedis()
+        self.room = Room.objects.create(
+            name="Promotion Room",
+            join_code="PROMO123",
+            visibility=Room.Visibility.PRIVATE,
+            status=Room.Status.IN_PROGRESS,
+        )
+
+    def _make_player(self, session_key, display_name, participation_status):
+        """Helper that creates a participant with the given participation status."""
+        return Player.objects.create(
+            room=self.room,
+            session_key=session_key,
+            display_name=display_name,
+            participation_status=participation_status,
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+
+    def test_promote_mid_game_spectators_promotes_all_spectating_participants(self):
+        # Two spectators who joined mid-game should both be promoted to PLAYING.
+        spectator_a = self._make_player(
+            "session-spec-a", "Spectator A", Player.ParticipationStatus.SPECTATING
+        )
+        spectator_b = self._make_player(
+            "session-spec-b", "Spectator B", Player.ParticipationStatus.SPECTATING
+        )
+
+        promote_mid_game_spectators_to_players(room_id=self.room.id)
+
+        spectator_a.refresh_from_db()
+        spectator_b.refresh_from_db()
+        self.assertEqual(spectator_a.participation_status, Player.ParticipationStatus.PLAYING)
+        self.assertEqual(spectator_b.participation_status, Player.ParticipationStatus.PLAYING)
+
+    def test_promote_mid_game_spectators_leaves_playing_participants_unchanged(self):
+        # Participants already marked PLAYING must not be touched by the promotion.
+        playing_player = self._make_player(
+            "session-playing", "Full Player", Player.ParticipationStatus.PLAYING
+        )
+        spectator = self._make_player(
+            "session-spec", "Spectator", Player.ParticipationStatus.SPECTATING
+        )
+
+        promote_mid_game_spectators_to_players(room_id=self.room.id)
+
+        playing_player.refresh_from_db()
+        spectator.refresh_from_db()
+        # The already-playing participant's status is unchanged.
+        self.assertEqual(playing_player.participation_status, Player.ParticipationStatus.PLAYING)
+        # The spectator is now promoted.
+        self.assertEqual(spectator.participation_status, Player.ParticipationStatus.PLAYING)
+
+    def test_promote_mid_game_spectators_returns_count_of_promoted_participants(self):
+        # The return value lets callers (e.g. game services) know how many
+        # promotions happened without issuing a second query.
+        self._make_player(
+            "session-spec-a", "Spectator A", Player.ParticipationStatus.SPECTATING
+        )
+        self._make_player(
+            "session-spec-b", "Spectator B", Player.ParticipationStatus.SPECTATING
+        )
+        self._make_player(
+            "session-playing", "Full Player", Player.ParticipationStatus.PLAYING
+        )
+
+        promoted_count = promote_mid_game_spectators_to_players(room_id=self.room.id)
+
+        # Only the two spectators should be counted; the playing participant is skipped.
+        self.assertEqual(promoted_count, 2)
+
+    def test_promote_mid_game_spectators_returns_zero_when_no_spectators_present(self):
+        # Rooms with no spectators (typical mid-round state) must return 0
+        # without raising an error — the caller at round transition calls this
+        # unconditionally, so a no-op path must be safe.
+        self._make_player(
+            "session-playing", "Full Player", Player.ParticipationStatus.PLAYING
+        )
+
+        promoted_count = promote_mid_game_spectators_to_players(room_id=self.room.id)
+
+        self.assertEqual(promoted_count, 0)
+
+    def test_promote_mid_game_spectators_only_affects_the_target_room(self):
+        # Spectators in a different room must not be promoted when this room's
+        # transition fires, otherwise a bulk UPDATE without a room filter would
+        # corrupt every room's state simultaneously.
+        other_room = Room.objects.create(
+            name="Other Room",
+            join_code="OTHER123",
+            visibility=Room.Visibility.PRIVATE,
+            status=Room.Status.IN_PROGRESS,
+        )
+        spectator_in_target = self._make_player(
+            "session-target-spec", "Target Spectator", Player.ParticipationStatus.SPECTATING
+        )
+        spectator_in_other = Player.objects.create(
+            room=other_room,
+            session_key="session-other-spec",
+            display_name="Other Spectator",
+            participation_status=Player.ParticipationStatus.SPECTATING,
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+
+        promote_mid_game_spectators_to_players(room_id=self.room.id)
+
+        spectator_in_target.refresh_from_db()
+        spectator_in_other.refresh_from_db()
+        # Only the spectator in the target room is promoted.
+        self.assertEqual(spectator_in_target.participation_status, Player.ParticipationStatus.PLAYING)
+        # The other room's spectator is untouched.
+        self.assertEqual(spectator_in_other.participation_status, Player.ParticipationStatus.SPECTATING)
+
+    def test_promote_mid_game_spectators_ignores_disconnected_spectators(self):
+        # A-07 safeguard: a DISCONNECTED spectator (e.g. a player who did an
+        # HTTP join but never opened a socket, or who dropped their
+        # connection while spectating) must NOT be silently promoted to
+        # PLAYING while they are offline. Promoting them would create a
+        # "ghost PLAYING" state where downstream code that combines
+        # participation_status with connection_status still filters them
+        # out but their stored status misrepresents their role. Keeping
+        # them in SPECTATING means they will be promoted naturally on the
+        # next round transition after they reconnect.
+        disconnected_spectator = Player.objects.create(
+            room=self.room,
+            session_key="session-disconnected-spec",
+            display_name="Disconnected Spectator",
+            participation_status=Player.ParticipationStatus.SPECTATING,
+            connection_status=Player.ConnectionStatus.DISCONNECTED,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        connected_spectator = self._make_player(
+            "session-connected-spec",
+            "Connected Spectator",
+            Player.ParticipationStatus.SPECTATING,
+        )
+
+        promoted_count = promote_mid_game_spectators_to_players(room_id=self.room.id)
+
+        disconnected_spectator.refresh_from_db()
+        connected_spectator.refresh_from_db()
+        # Only the connected spectator is promoted.
+        self.assertEqual(promoted_count, 1)
+        self.assertEqual(
+            connected_spectator.participation_status,
+            Player.ParticipationStatus.PLAYING,
+        )
+        # The disconnected spectator stays SPECTATING.
+        self.assertEqual(
+            disconnected_spectator.participation_status,
+            Player.ParticipationStatus.SPECTATING,
+        )

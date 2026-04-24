@@ -6,6 +6,7 @@ consumers, and later background tasks all apply the same rules.
 
 from __future__ import annotations
 
+import logging
 import random
 from datetime import datetime, timedelta
 
@@ -19,6 +20,8 @@ from games import redis as game_redis
 from rooms import redis as room_redis
 from rooms.models import Player, Room
 
+
+logger = logging.getLogger(__name__)
 
 EMPTY_ROOM_GRACE_PERIOD = timedelta(minutes=10)
 
@@ -312,6 +315,60 @@ def schedule_host_changed_broadcast_after_commit(
     )
 
 
+def _schedule_drawer_reconnect_resume_after_commit(
+    *,
+    join_code: str,
+    player_id: int,
+) -> None:
+    """Resume round runtime if an active drawer reconnects before grace expiry."""
+
+    def _resume_drawer_round_if_needed() -> None:
+        from games import runtime as game_runtime
+
+        try:
+            game_runtime.handle_participant_reconnected(
+                join_code=join_code,
+                participant_id=player_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to resume drawer round after reconnect.",
+                extra={
+                    "join_code": join_code,
+                    "player_id": player_id,
+                },
+            )
+
+    transaction.on_commit(_resume_drawer_round_if_needed)
+
+
+def _schedule_drawer_disconnect_grace_after_commit(
+    *,
+    join_code: str,
+    player_id: int,
+) -> None:
+    """Start drawer-disconnect grace runtime if the active drawer dropped."""
+
+    def _start_drawer_grace_if_needed() -> None:
+        from games import runtime as game_runtime
+
+        try:
+            game_runtime.handle_participant_disconnected(
+                join_code=join_code,
+                participant_id=player_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to start drawer disconnect grace window.",
+                extra={
+                    "join_code": join_code,
+                    "player_id": player_id,
+                },
+            )
+
+    transaction.on_commit(_start_drawer_grace_if_needed)
+
+
 def _validate_room_presence_identity(
     *,
     player: Player,
@@ -370,11 +427,23 @@ def connect_participant(
         connection_status=Player.ConnectionStatus.CONNECTED,
         last_seen_at=timezone.now(),
     )
+    if previous_connection_status != Player.ConnectionStatus.CONNECTED:
+        _schedule_drawer_reconnect_resume_after_commit(
+            join_code=room_join_code,
+            player_id=player.id,
+        )
     # Multiple tabs for the same session share one room-level participant.
     # Returning whether the durable status changed lets the consumer broadcast
     # to existing peers after the DB commit without treating extra tabs as a
     # fake reconnect.
-    return previous_connection_status != Player.ConnectionStatus.CONNECTED
+    status_changed = previous_connection_status != Player.ConnectionStatus.CONNECTED
+    if status_changed:
+        schedule_room_state_broadcast_after_commit(
+            join_code=room_join_code,
+            room_id=player.room_id,
+        )
+
+    return status_changed
 
 
 @transaction.atomic
@@ -514,6 +583,47 @@ def purge_expired_participants(
     return purged_count
 
 
+def purge_expired_participants_for_session(
+    *,
+    redis_client,
+    session_key: str,
+    now: datetime | None = None,
+) -> int:
+    """Remove expired participants that belong to one guest session.
+
+    The room-entry flow only needs to clean up stale ownership rows for the
+    browser session making the current request. Keeping this helper
+    session-scoped avoids doing unrelated expiry cleanup for other guests on
+    the critical path of create/join requests.
+    """
+
+    current_time = now or timezone.now()
+    expired_player_ids = list(
+        Player.objects.filter(
+            session_key=session_key,
+            session_expires_at__lte=current_time,
+        )
+        .order_by("session_expires_at", "id")
+        .values_list("id", flat=True)
+    )
+
+    purged_count = 0
+    for player_id in expired_player_ids:
+        try:
+            # Route the delete through the normal leave path so host handoff,
+            # empty-room grace, and runtime cleanup stay consistent.
+            leave_participant(
+                redis_client=redis_client,
+                player_id=player_id,
+            )
+        except Player.DoesNotExist:
+            # A concurrent request may have already removed this stale row.
+            continue
+        purged_count += 1
+
+    return purged_count
+
+
 def cleanup_expired_empty_rooms(
     *,
     redis_client,
@@ -602,6 +712,10 @@ def disconnect_participant(
             join_code=room_join_code,
             room_id=player.room_id,
         )
+        _schedule_drawer_disconnect_grace_after_commit(
+            join_code=room_join_code,
+            player_id=player.id,
+        )
 
 
 @transaction.atomic
@@ -639,6 +753,10 @@ def leave_participant(*, redis_client, player_id: int) -> None:
         player.room.join_code,
         player.session_key,
     )
+    _schedule_drawer_disconnect_grace_after_commit(
+        join_code=room.join_code,
+        player_id=player.id,
+    )
     player.delete()
     if room.host_id != previous_host_id:
         schedule_host_changed_broadcast_after_commit(
@@ -658,3 +776,60 @@ def leave_participant(*, redis_client, player_id: int) -> None:
             redis_client=redis_client,
             room_id=room.id,
         )
+
+
+def promote_mid_game_spectators_to_players(*, room_id: int) -> int:
+    """Promote connected spectators in a room to playing status.
+
+    Mid-game joiners are stored as SPECTATING so they cannot guess or draw
+    during the turn they joined in (see A-07 in the join_room view). This
+    function is called at each round transition — after one round ends and
+    before the next drawer is chosen — so that waiting spectators graduate
+    into the full eligible pool for the upcoming turn.
+
+    The CONNECTED filter avoids a "ghost PLAYING" state: a player who did an
+    HTTP join but never opened a socket (or who disconnected while spectating)
+    should not silently graduate to PLAYING while they are offline, because
+    downstream consumers combine ``participation_status=PLAYING`` with
+    ``connection_status=CONNECTED`` to decide eligibility. Keeping offline
+    spectators in SPECTATING also means they will be promoted naturally on a
+    later round transition once they reconnect.
+
+    Using a bulk UPDATE rather than per-row saves is intentional: the caller
+    (game services) already holds a lock on the game row inside a transaction,
+    so individual row locks here would be redundant overhead.
+
+    Returns the number of participants that were promoted from SPECTATING to
+    PLAYING, which lets the caller log or assert the promotion if needed.
+    """
+
+    promoted_count = Player.objects.filter(
+        room_id=room_id,
+        participation_status=Player.ParticipationStatus.SPECTATING,
+        connection_status=Player.ConnectionStatus.CONNECTED,
+    ).update(
+        participation_status=Player.ParticipationStatus.PLAYING,
+        updated_at=timezone.now(),
+    )
+    return promoted_count
+
+
+def is_player_spectating(*, player_id: int) -> bool:
+    """Return True if the given player currently has SPECTATING status.
+
+    Single source of truth for "is this participant a spectator right now?".
+    Both the socket consumer (guess submission gate) and the game runtime
+    (sync-event role selection) need the same answer, and they must agree —
+    if the rule ever extends beyond ``participation_status`` (e.g. a
+    ``joined_at_round_id`` field) it should only change here.
+
+    We re-query instead of trusting a cached Player instance because the
+    participation_status can flip between the moment the socket connected and
+    the moment the check runs (e.g. a round transition promoted the player
+    while the socket was open).
+    """
+
+    return Player.objects.filter(
+        pk=player_id,
+        participation_status=Player.ParticipationStatus.SPECTATING,
+    ).exists()

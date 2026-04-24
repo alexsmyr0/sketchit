@@ -56,6 +56,12 @@ def get_redis_client() -> redis.Redis:
     return _redis_client
 
 
+def reset_redis_client() -> None:
+    """Reset the cached Redis client. Used for test isolation."""
+    global _redis_client
+    _redis_client = None
+
+
 @database_sync_to_async
 def _mark_participant_connected(
     player_id: int,
@@ -206,10 +212,10 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         self.session_key: str = session_key
 
         # The lifecycle service call below marks the participant connected in
-        # Redis/MySQL and may schedule a room-wide ``room.state`` broadcast.
-        # We therefore wait to join the room group until after ``accept()`` and
-        # use the returned flag to broadcast only to already-connected peers.
-        connection_state_changed = await _mark_participant_connected(
+        # Redis/MySQL and will schedule a room-wide ``room.state`` broadcast
+        # via the room-group. Using the service for broadcasts ensures that
+        # peers receive state derived from a successful DB commit.
+        await _mark_participant_connected(
             self.player.id,
             self.join_code,
             self.session_key,
@@ -217,32 +223,15 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         )
         await self.accept()
 
-        # The socket must be accepted before we try to send frames back to the
-        # browser; the direct snapshot therefore belongs after ``accept()``.
-        #
-        # This direct send is separate from room-group fan-out because the
-        # connecting client must not depend on timing of any room-wide
-        # broadcast to receive its initial authoritative lobby state.
-        initial_room_state_event = await _get_initial_room_state_event(self.room.id)
-        await self.send_json(initial_room_state_event)
-
         await self.channel_layer.group_add(self.room_group, self.channel_name)
         await self.channel_layer.group_add(self.player_group, self.channel_name)
 
-        if connection_state_changed:
-            # Existing peers still need the connect/reconnect ``room.state``
-            # update, but the connecting client already received the same
-            # snapshot directly above. Fan-out via each peer's player group so
-            # the newly connected socket is fully subscribed before connect()
-            # returns without receiving a duplicate lobby snapshot.
-            for peer_id in await _get_connected_peer_ids(self.room.id, self.player.id):
-                await self.channel_layer.group_send(
-                    _player_group_name(self.join_code, peer_id),
-                    {
-                        "type": "room.server_event",
-                        "event": initial_room_state_event,
-                    },
-                )
+        # The socket must be accepted before we try to send frames back to the
+        # browser. We send the initial snapshot directly so the connecting 
+        # client has authoritative state immediately without waiting for a
+        # group broadcast.
+        initial_room_state_event = await _get_initial_room_state_event(self.room.id)
+        await self.send_json(initial_room_state_event)
 
         # Send canvas snapshot first, then round state
         await self._send_initial_canvas_snapshot()
@@ -351,6 +340,18 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         return self.player.id == int(drawer_participant_id)
 
     @database_sync_to_async
+    def _is_spectator(self) -> bool:
+        """Return True if the connected player is currently a spectator.
+
+        Delegates to ``rooms.services.is_player_spectating`` so the rule
+        (what counts as "spectator") lives in exactly one place; see the
+        docstring there for why we re-query instead of trusting self.player.
+        """
+        from rooms.services import is_player_spectating
+
+        return is_player_spectating(player_id=self.player.id)
+
+    @database_sync_to_async
     def _update_redis_snapshot(self, message_type: str, payload: dict) -> None:
         """Update or clear the canvas snapshot in Redis."""
         client = get_redis_client()
@@ -429,6 +430,19 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             })
             return
 
+        # A-07: spectators joined after the game started and are not eligible
+        # to guess until the next round promotes them to PLAYING. Checking here
+        # gives a clear, user-facing message rather than a generic service error.
+        if await self._is_spectator():
+            await self.send_json({
+                "type": "guess.error",
+                "payload": {
+                    "message": "Spectators cannot submit guesses during the current round.",
+                    "server_timestamp": timezone.now().isoformat()
+                }
+            })
+            return
+
         # 3. Evaluate the guess via the game service
         try:
             active_round = await self._resolve_round(int(round_id_str))
@@ -454,6 +468,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                     "player_id": self.player.id,
                     "player_nickname": self.player.display_name,
                     "text": guess_text,
+                    "outcome": evaluation_result.outcome,
                     "is_correct": evaluation_result.is_correct,
                     "round_completed": evaluation_result.round_completed,
                     "score_updates": [
@@ -488,6 +503,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                 "player_id": event["player_id"],
                 "player_nickname": event["player_nickname"],
                 "text": event["text"],
+                "outcome": event["outcome"],
                 "is_correct": event["is_correct"],
                 "round_completed": event["round_completed"],
                 "score_updates": event["score_updates"]

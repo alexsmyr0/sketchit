@@ -1,0 +1,3245 @@
+diff --git a/docs/logbook/Alex.md b/docs/logbook/Alex.md
+index 8994c3d..d8a6dbd 100644
+--- a/docs/logbook/Alex.md
++++ b/docs/logbook/Alex.md
+@@ -75,6 +75,24 @@ Implemented A05 empty-room grace: empty rooms now enter empty_grace, persist emp
+ ## 12/04
+ Graded N4 and N5 ticket for Nikos. There were critical bugs in both but after pointing them out, Nikos patched them up swiftly and I merged.
+ 
+-# 13/04
++## 13/04
+ Implemented A6. Implemented server-authoritative live lobby WebSocket updates by sending initial and change-driven room.state snapshots, plus host.changed on real host handoffs, for joins, leaves, disconnects, and reconnects.
+ 
++## 15/04
++Graded Kostas's K4 ticket regarding full game-cycle drawer rotation and word uniqueness. I suggested a small fix, he implemented it, and I then approved and merged the PR.
++
++## 18/04
++Graded Nikos's PR #69. I found a few issues, reported them, and Nikos patched them swiftly. I then reassessed the updated work and merged it.
++
++## 19/04
++Graded Nikos's pull requests #77, #76, and #75. I found bugs in all three, reported them to Nikos, and he resolved them. I then reassessed the updated work and pushed them forward.
++
++## 20/04
++Implemented A7, which adds the mid-game joiner and reconnect reclaim rules so players who join during an active game become spectators for the current turn, reconnecting same-session players keep their original place and score, and the room behavior stays consistent with the SDS for session-based guest identity.
++
++Nikos graded my implementation and found some testing gaps and one critical bug. After discussing it with him, I fixed the problems and he merged the ticket.
++
++## 21/04
++Implemented issue #79 by fixing the dead-end room entry flow for stale or hidden guest-session room ownership. Expired same-session participant rows are now cleaned up before create/join rejects the request, valid existing ownership returns a recoverable response with `room_url`, the entry-page JavaScript redirects guests back into their existing room for that recoverable case, and room entry is now serialized by Django session to prevent concurrent duplicate room ownership.
++
++Graded Kostas's K6 ticket and gave feedback. After reassessing the updated implementation, I merged it.
+diff --git a/docs/logbook/Kwstas.md b/docs/logbook/Kwstas.md
+index 5c627fd..c4b2540 100644
+--- a/docs/logbook/Kwstas.md
++++ b/docs/logbook/Kwstas.md
+@@ -39,3 +39,6 @@
+ ## Apr 21
+ 
+ - Added Drawer Disconnect Grace & Turn Outcome Handling.
++## Apr 20
++
++- Added near-match, duplicate, and correct-once guess rules.
+diff --git a/docs/planning/ticket-tracker.md b/docs/planning/ticket-tracker.md
+index 2f2979b..98366c7 100644
+--- a/docs/planning/ticket-tracker.md
++++ b/docs/planning/ticket-tracker.md
+@@ -82,7 +82,7 @@ Use this as the default claim order for the next wave of work:
+ - [x] **K-03** P2 - Round Timer & Early-Finish Coordinator | Server-owned round timing, intermission countdown, and early-finish triggers. (Depends on: K-01; N-03) | Blocks: K-04; N-05; K-05; K-07; G-03
+ - [x] **K-04** P2 - Full Game Cycle Drawer Rotation & Word Uniqueness | Remaining-drawer tracking, unique words, and role-specific round-start payloads. (Depends on: K-01; N-03; K-03) | Blocks: A-07; K-07; A-08
+ - [x] **K-05** P3 - Time-Based Scoring & Multi-Guesser Round Resolution | Replace placeholder scoring with the final bounded time-based model. (Depends on: K-03; K-04; N-05) | Blocks: A-08; G-05
+-- [ ] **K-06** P3 - Near-Match, Duplicate, And Correct-Once Guess Rules | Rich guess outcomes and per-player round guess-state rules. (Depends on: N-03; N-05) | Blocks: G-05
++- [x] **K-06** P3 - Near-Match, Duplicate, And Correct-Once Guess Rules | Rich guess outcomes and per-player round guess-state rules. (Depends on: N-03; N-05) | Blocks: G-05
+ - [x] **K-07** P3 - Drawer Disconnect Grace & Turn Outcome Handling | `15`-second drawer grace, reconnect resume, and `drawer_disconnected` outcome. (Depends on: N-03; K-03; K-04) | Blocks: A-08; G-05
+ 
+ ### Track N
+diff --git a/games/migrations/0003_guess_normalized_text.py b/games/migrations/0003_guess_normalized_text.py
+new file mode 100644
+index 0000000..39b32ee
+--- /dev/null
++++ b/games/migrations/0003_guess_normalized_text.py
+@@ -0,0 +1,44 @@
++from django.db import migrations, models
++
++
++def _normalize_guess_text(value: str) -> str:
++    return " ".join(value.strip().split()).casefold()
++
++
++def populate_normalized_guess_text(apps, schema_editor):
++    Guess = apps.get_model("games", "Guess")
++    for guess in Guess.objects.all().only("id", "text").iterator():
++        Guess.objects.filter(pk=guess.pk).update(
++            normalized_text=_normalize_guess_text(guess.text or "")
++        )
++
++
++def clear_normalized_guess_text(apps, schema_editor):
++    Guess = apps.get_model("games", "Guess")
++    Guess.objects.update(normalized_text="")
++
++
++class Migration(migrations.Migration):
++
++    dependencies = [
++        ("games", "0002_guess_is_correct"),
++    ]
++
++    operations = [
++        migrations.AddField(
++            model_name="guess",
++            name="normalized_text",
++            field=models.TextField(default=""),
++        ),
++        migrations.RunPython(
++            code=populate_normalized_guess_text,
++            reverse_code=clear_normalized_guess_text,
++        ),
++        migrations.AddIndex(
++            model_name="guess",
++            index=models.Index(
++                fields=["round", "player"],
++                name="games_guess_round_player",
++            ),
++        ),
++    ]
+diff --git a/games/models.py b/games/models.py
+index 31af85e..3181444 100644
+--- a/games/models.py
++++ b/games/models.py
+@@ -172,11 +172,22 @@ class Guess(TimestampedModel):
+         related_name="guesses",
+     )
+     text = models.CharField(max_length=255)
++    normalized_text = models.TextField(default="")
+     is_correct = models.BooleanField(default=False)
+     typed_at = models.DateTimeField(default=timezone.now)
+ 
+     class Meta:
+         ordering = ("round_id", "typed_at", "id")
++        indexes = [
++            models.Index(
++                fields=("round", "player"),
++                name="games_guess_round_player",
++            ),
++        ]
++
++    def save(self, *args, **kwargs):
++        self.normalized_text = " ".join(self.text.strip().split()).casefold()
++        super().save(*args, **kwargs)
+ 
+     def __str__(self):
+         return self.text
+diff --git a/games/services.py b/games/services.py
+index ae0d02f..beeb21a 100644
+--- a/games/services.py
++++ b/games/services.py
+@@ -23,6 +23,13 @@ class GuessEvaluationError(Exception):
+     pass
+ 
+ 
++class GuessOutcome:
++    CORRECT = "correct"
++    INCORRECT = "incorrect"
++    NEAR_MATCH = "near_match"
++    DUPLICATE = "duplicate"
++
++
+ @dataclass(frozen=True)
+ class StartedGame:
+     game: Game
+@@ -38,6 +45,7 @@ class PlayerScoreUpdate:
+ @dataclass(frozen=True)
+ class GuessEvaluationResult:
+     guess: Guess
++    outcome: str
+     is_correct: bool
+     round_completed: bool
+     round_completed_now: bool
+@@ -117,7 +125,80 @@ def _dedupe_snapshot_words_case_insensitive(word_texts: list[str]) -> list[str]:
+ 
+ 
+ def _normalize_guess_text(value: str) -> str:
+-    return value.strip().casefold()
++    return " ".join(value.strip().split()).casefold()
++
++
++def _is_same_player_duplicate_guess(
++    *,
++    round_id: int,
++    player_id: int,
++    normalized_guess_text: str,
++    excluded_guess_id: int,
++) -> bool:
++    return (
++        Guess.objects.filter(
++            round_id=round_id,
++            player_id=player_id,
++        )
++        .exclude(pk=excluded_guess_id)
++        .filter(normalized_text=normalized_guess_text)
++        .exists()
++    )
++
++
++def _is_player_already_correct_for_round(*, round_id: int, player_id: int) -> bool:
++    return Guess.objects.filter(
++        round_id=round_id,
++        player_id=player_id,
++        is_correct=True,
++    ).exists()
++
++
++def _already_correct_outcome_for_guess(
++    *,
++    round_id: int,
++    player_id: int,
++    normalized_guess_text: str,
++    excluded_guess_id: int,
++) -> str:
++    # Already-correct guesses remain ignored for scoring/round progression.
++    # If the guess text itself is a repeat, label it as duplicate so clients
++    # can present accurate feedback.
++    if _is_same_player_duplicate_guess(
++        round_id=round_id,
++        player_id=player_id,
++        normalized_guess_text=normalized_guess_text,
++        excluded_guess_id=excluded_guess_id,
++    ):
++        return GuessOutcome.DUPLICATE
++    return GuessOutcome.INCORRECT
++
++
++def _is_near_match_guess(
++    *,
++    normalized_guess_text: str,
++    normalized_target_text: str,
++) -> bool:
++    """Return near-match for non-correct guesses only.
++
++    Callers must evaluate exact equality first and only call this function for
++    guesses that are already known not to be an exact correct match.
++    """
++    if not normalized_guess_text or not normalized_target_text:
++        return False
++
++    target_tokens = normalized_target_text.split(" ")
++    if len(target_tokens) > 1:
++        return (
++            normalized_guess_text != normalized_target_text
++            and normalized_guess_text in set(target_tokens)
++        )
++
++    return (
++        len(normalized_guess_text) >= 3
++        and len(normalized_guess_text) < len(normalized_target_text)
++        and normalized_target_text.startswith(normalized_guess_text)
++    )
+ 
+ 
+ def _round_duration_seconds() -> float:
+@@ -219,6 +300,7 @@ def _build_guess_evaluation_result(
+     *,
+     guess: Guess,
+     locked_round: Round,
++    outcome: str,
+     is_correct: bool,
+     round_completed_now: bool,
+     winning_player_id: int | None,
+@@ -227,6 +309,7 @@ def _build_guess_evaluation_result(
+     round_completed = bool(locked_round.status or locked_round.ended_at)
+     return GuessEvaluationResult(
+         guess=guess,
++        outcome=outcome,
+         is_correct=is_correct,
+         round_completed=round_completed,
+         round_completed_now=round_completed_now,
+@@ -606,6 +689,7 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
+         return _build_guess_evaluation_result(
+             guess=guess,
+             locked_round=locked_round,
++            outcome=GuessOutcome.INCORRECT,
+             is_correct=False,
+             round_completed_now=False,
+             winning_player_id=_get_round_winning_player_id(locked_round.id),
+@@ -616,83 +700,124 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
+         return _build_guess_evaluation_result(
+             guess=guess,
+             locked_round=locked_round,
++            outcome=GuessOutcome.INCORRECT,
+             is_correct=False,
+             round_completed_now=False,
+             winning_player_id=None,
+             score_updates=(),
+         )
+ 
+-    if Guess.objects.filter(
++    normalized_guess_text = guess.normalized_text
++    normalized_target_text = _normalize_guess_text(locked_round.selected_game_word.text)
++
++    if _is_player_already_correct_for_round(
+         round_id=locked_round.id,
+         player_id=guessing_player.id,
+-        is_correct=True,
+-    ).exists():
++    ):
+         return _build_guess_evaluation_result(
+             guess=guess,
+             locked_round=locked_round,
++            outcome=_already_correct_outcome_for_guess(
++                round_id=locked_round.id,
++                player_id=guessing_player.id,
++                normalized_guess_text=normalized_guess_text,
++                excluded_guess_id=guess.id,
++            ),
+             is_correct=False,
+             round_completed_now=False,
+             winning_player_id=None,
+             score_updates=(),
+         )
+ 
+-    if _normalize_guess_text(guess.text) != _normalize_guess_text(locked_round.selected_game_word.text):
++    if normalized_guess_text == normalized_target_text:
++        guess.is_correct = True
++        guess.save(update_fields=["is_correct", "updated_at"])
++
++        accepted_at = timezone.now()
++        guesser_points, drawer_bonus = _time_based_scores_for_correct_guess(
++            locked_round=locked_round,
++            accepted_at=accepted_at,
++        )
++        score_deltas_by_participant_id = {
++            guessing_player.id: guesser_points,
++        }
++        drawer_participant_id = locked_round.drawer_participant_id
++        if drawer_participant_id is not None and drawer_participant_id != guessing_player.id:
++            score_deltas_by_participant_id[drawer_participant_id] = drawer_bonus
++
++        for participant_id, score_delta in score_deltas_by_participant_id.items():
++            Player.objects.filter(pk=participant_id).update(
++                current_score=F("current_score") + score_delta
++            )
++
++        updated_scores = tuple(
++            PlayerScoreUpdate(player_id=row["id"], current_score=row["current_score"])
++            for row in Player.objects.filter(pk__in=score_deltas_by_participant_id)
++            .order_by("id")
++            .values("id", "current_score")
++        )
++        all_eligible_guessers_correct = _all_eligible_non_drawer_guessers_are_correct(
++            locked_round=locked_round,
++            newest_correct_guesser_id=guessing_player.id,
++        )
++        round_completed_now = False
++        if all_eligible_guessers_correct:
++            locked_round.status = RoundStatus.COMPLETED
++            locked_round.ended_at = accepted_at
++            locked_round.save(update_fields=["status", "ended_at", "updated_at"])
++            round_completed_now = True
++            _handle_round_completed(locked_round, completion_reason="all_guessers_correct")
++
++        return _build_guess_evaluation_result(
++            guess=guess,
++            locked_round=locked_round,
++            outcome=GuessOutcome.CORRECT,
++            is_correct=True,
++            round_completed_now=round_completed_now,
++            winning_player_id=(
++                _get_round_winning_player_id(locked_round.id)
++                if round_completed_now
++                else None
++            ),
++            score_updates=updated_scores,
++        )
++
++    if _is_same_player_duplicate_guess(
++        round_id=locked_round.id,
++        player_id=guessing_player.id,
++        normalized_guess_text=normalized_guess_text,
++        excluded_guess_id=guess.id,
++    ):
+         return _build_guess_evaluation_result(
+             guess=guess,
+             locked_round=locked_round,
++            outcome=GuessOutcome.DUPLICATE,
+             is_correct=False,
+             round_completed_now=False,
+             winning_player_id=None,
+             score_updates=(),
+         )
+ 
+-    guess.is_correct = True
+-    guess.save(update_fields=["is_correct", "updated_at"])
+-
+-    accepted_at = timezone.now()
+-    guesser_points, drawer_bonus = _time_based_scores_for_correct_guess(
+-        locked_round=locked_round,
+-        accepted_at=accepted_at,
+-    )
+-    score_deltas_by_participant_id = {
+-        guessing_player.id: guesser_points,
+-    }
+-    drawer_participant_id = locked_round.drawer_participant_id
+-    if drawer_participant_id is not None and drawer_participant_id != guessing_player.id:
+-        score_deltas_by_participant_id[drawer_participant_id] = drawer_bonus
+-
+-    for participant_id, score_delta in score_deltas_by_participant_id.items():
+-        Player.objects.filter(pk=participant_id).update(
+-            current_score=F("current_score") + score_delta
++    if _is_near_match_guess(
++        normalized_guess_text=normalized_guess_text,
++        normalized_target_text=normalized_target_text,
++    ):
++        return _build_guess_evaluation_result(
++            guess=guess,
++            locked_round=locked_round,
++            outcome=GuessOutcome.NEAR_MATCH,
++            is_correct=False,
++            round_completed_now=False,
++            winning_player_id=None,
++            score_updates=(),
+         )
+ 
+-    updated_scores = tuple(
+-        PlayerScoreUpdate(player_id=row["id"], current_score=row["current_score"])
+-        for row in Player.objects.filter(pk__in=score_deltas_by_participant_id)
+-        .order_by("id")
+-        .values("id", "current_score")
+-    )
+-    all_eligible_guessers_correct = _all_eligible_non_drawer_guessers_are_correct(
+-        locked_round=locked_round,
+-        newest_correct_guesser_id=guessing_player.id,
+-    )
+-    round_completed_now = False
+-    if all_eligible_guessers_correct:
+-        locked_round.status = RoundStatus.COMPLETED
+-        locked_round.ended_at = accepted_at
+-        locked_round.save(update_fields=["status", "ended_at", "updated_at"])
+-        round_completed_now = True
+-        _handle_round_completed(locked_round, completion_reason="all_guessers_correct")
+-
+     return _build_guess_evaluation_result(
+         guess=guess,
+         locked_round=locked_round,
+-        is_correct=True,
+-        round_completed_now=round_completed_now,
+-        winning_player_id=(
+-            _get_round_winning_player_id(locked_round.id)
+-            if round_completed_now
+-            else None
+-        ),
+-        score_updates=updated_scores,
++        outcome=GuessOutcome.INCORRECT,
++        is_correct=False,
++        round_completed_now=False,
++        winning_player_id=None,
++        score_updates=(),
+     )
+diff --git a/games/tests.py b/games/tests.py
+index a411db3..4a747fd 100644
+--- a/games/tests.py
++++ b/games/tests.py
+@@ -2014,6 +2014,7 @@ class GuessServiceIntegrationTests(TestCase):
+         persisted_guess = Guess.objects.get(round=self.round, player=self.guesser)
+ 
+         self.assertEqual(persisted_guess.text, " rocket ")
++        self.assertEqual(persisted_guess.normalized_text, "rocket")
+         self.assertTrue(persisted_guess.is_correct)
+         self.assertEqual(result.guess.id, persisted_guess.id)
+         self.assertEqual(result.guess.round_id, self.round.id)
+@@ -2028,6 +2029,7 @@ class GuessServiceIntegrationTests(TestCase):
+ 
+         # Verify N-05 broadcast payload requirements
+         self.assertTrue(result.is_correct)
++        self.assertEqual(result.outcome, game_services.GuessOutcome.CORRECT)
+         self.assertTrue(result.round_completed)
+         self.assertEqual(len(result.score_updates), 2)
+ 
+@@ -2223,8 +2225,175 @@ class GuessServiceIntegrationTests(TestCase):
+         result = evaluate_guess_for_round(self.round, self.guesser, "wrong")
+ 
+         self.assertFalse(result.is_correct)
++        self.assertEqual(result.outcome, game_services.GuessOutcome.INCORRECT)
+         self.assertFalse(result.round_completed)
+ 
++    def test_duplicate_guess_is_same_player_only(self):
++        session_expires_at = timezone.now() + timedelta(hours=1)
++        other_guesser = Player.objects.create(
++            room=self.room,
++            session_key="other-guesser-session",
++            display_name="Other Guesser",
++            connection_status=Player.ConnectionStatus.CONNECTED,
++            participation_status=Player.ParticipationStatus.PLAYING,
++            session_expires_at=session_expires_at,
++        )
++
++        first_result = evaluate_guess_for_round(self.round, self.guesser, "planet")
++        duplicate_result = evaluate_guess_for_round(self.round, self.guesser, "  PLANET  ")
++        other_player_result = evaluate_guess_for_round(self.round, other_guesser, "planet")
++
++        self.assertEqual(first_result.outcome, game_services.GuessOutcome.INCORRECT)
++        self.assertEqual(duplicate_result.outcome, game_services.GuessOutcome.DUPLICATE)
++        self.assertFalse(duplicate_result.is_correct)
++        self.assertEqual(other_player_result.outcome, game_services.GuessOutcome.INCORRECT)
++
++    def test_multi_word_target_single_token_guess_is_near_match(self):
++        self.game_word.text = "new york city"
++        self.game_word.save(update_fields=("text", "updated_at"))
++
++        result = evaluate_guess_for_round(self.round, self.guesser, "york")
++
++        self.assertFalse(result.is_correct)
++        self.assertEqual(result.outcome, game_services.GuessOutcome.NEAR_MATCH)
++        self.assertEqual(result.score_updates, ())
++
++    def test_multi_word_exact_match_with_collapsed_whitespace_is_correct(self):
++        self.game_word.text = "new york city"
++        self.game_word.save(update_fields=("text", "updated_at"))
++
++        result = evaluate_guess_for_round(self.round, self.guesser, "  NEW   york   city ")
++
++        self.assertTrue(result.is_correct)
++        self.assertEqual(result.outcome, game_services.GuessOutcome.CORRECT)
++
++    def test_single_word_near_match_requires_strict_prefix_rule(self):
++        near_match_result = evaluate_guess_for_round(self.round, self.guesser, "roc")
++        short_prefix_result = evaluate_guess_for_round(self.round, self.guesser, "ro")
++
++        self.assertEqual(near_match_result.outcome, game_services.GuessOutcome.NEAR_MATCH)
++        self.assertEqual(short_prefix_result.outcome, game_services.GuessOutcome.INCORRECT)
++
++    def test_single_word_near_match_does_not_use_loose_fuzzy_matching(self):
++        result = evaluate_guess_for_round(self.round, self.guesser, "rcket")
++
++        self.assertFalse(result.is_correct)
++        self.assertEqual(result.outcome, game_services.GuessOutcome.INCORRECT)
++
++    def test_casefold_handles_unicode_accents_for_correct_match(self):
++        self.game_word.text = "café"
++        self.game_word.save(update_fields=("text", "updated_at"))
++
++        result = evaluate_guess_for_round(self.round, self.guesser, "CAFÉ")
++
++        self.assertTrue(result.is_correct)
++        self.assertEqual(result.outcome, game_services.GuessOutcome.CORRECT)
++
++    def test_casefold_expansion_keeps_full_normalized_text_and_duplicate_detection(self):
++        expanding_guess_text = "ß" * 255
++
++        first_result = evaluate_guess_for_round(self.round, self.guesser, expanding_guess_text)
++        second_result = evaluate_guess_for_round(self.round, self.guesser, expanding_guess_text)
++        first_guess = Guess.objects.filter(round=self.round, player=self.guesser).earliest("id")
++
++        self.assertEqual(first_result.outcome, game_services.GuessOutcome.INCORRECT)
++        self.assertEqual(second_result.outcome, game_services.GuessOutcome.DUPLICATE)
++        self.assertEqual(len(first_guess.normalized_text), 510)
++        self.assertEqual(first_guess.normalized_text, "ss" * 255)
++
++    def test_second_near_match_with_same_text_is_duplicate(self):
++        self.game_word.text = "new york city"
++        self.game_word.save(update_fields=("text", "updated_at"))
++
++        first_result = evaluate_guess_for_round(self.round, self.guesser, "york")
++        second_result = evaluate_guess_for_round(self.round, self.guesser, "  YORK ")
++
++        self.assertEqual(first_result.outcome, game_services.GuessOutcome.NEAR_MATCH)
++        self.assertEqual(second_result.outcome, game_services.GuessOutcome.DUPLICATE)
++
++    def test_already_correct_repeat_same_text_is_duplicate_and_ignored(self):
++        session_expires_at = timezone.now() + timedelta(hours=1)
++        second_guesser = Player.objects.create(
++            room=self.room,
++            session_key="second-guesser-session",
++            display_name="Second Guesser",
++            connection_status=Player.ConnectionStatus.CONNECTED,
++            participation_status=Player.ParticipationStatus.PLAYING,
++            session_expires_at=session_expires_at,
++        )
++        round_start = timezone.now()
++        self._set_round_start(round_start)
++
++        with patch("games.services.timezone.now", return_value=round_start + timedelta(seconds=10)):
++            first_result = evaluate_guess_for_round(self.round, self.guesser, "rocket")
++        self.round.refresh_from_db()
++        self.guesser.refresh_from_db()
++        self.drawer.refresh_from_db()
++        guesser_score_after_first_correct = self.guesser.current_score
++        drawer_score_after_first_correct = self.drawer.current_score
++
++        with patch("games.services.timezone.now", return_value=round_start + timedelta(seconds=20)):
++            repeat_result = evaluate_guess_for_round(self.round, self.guesser, "  ROCKET ")
++        self.round.refresh_from_db()
++        self.guesser.refresh_from_db()
++        self.drawer.refresh_from_db()
++
++        self.assertEqual(first_result.outcome, game_services.GuessOutcome.CORRECT)
++        self.assertFalse(first_result.round_completed_now)
++        self.assertEqual(repeat_result.outcome, game_services.GuessOutcome.DUPLICATE)
++        self.assertFalse(repeat_result.is_correct)
++        self.assertFalse(repeat_result.round_completed)
++        self.assertFalse(repeat_result.round_completed_now)
++        self.assertIsNone(self.round.status)
++        self.assertEqual(self.guesser.current_score, guesser_score_after_first_correct)
++        self.assertEqual(self.drawer.current_score, drawer_score_after_first_correct)
++        self.assertEqual(
++            Guess.objects.filter(round=self.round, player=self.guesser, is_correct=True).count(),
++            1,
++        )
++
++        with patch("games.services.timezone.now", return_value=round_start + timedelta(seconds=30)):
++            second_result = evaluate_guess_for_round(self.round, second_guesser, "rocket")
++        self.round.refresh_from_db()
++
++        self.assertEqual(second_result.outcome, game_services.GuessOutcome.CORRECT)
++        self.assertTrue(second_result.round_completed_now)
++        self.assertEqual(self.round.status, RoundStatus.COMPLETED)
++
++    def test_already_correct_then_near_match_is_incorrect_and_ignored(self):
++        session_expires_at = timezone.now() + timedelta(hours=1)
++        Player.objects.create(
++            room=self.room,
++            session_key="near-match-remaining-guesser-session",
++            display_name="Remaining Guesser",
++            connection_status=Player.ConnectionStatus.CONNECTED,
++            participation_status=Player.ParticipationStatus.PLAYING,
++            session_expires_at=session_expires_at,
++        )
++        round_start = timezone.now()
++        self._set_round_start(round_start)
++
++        with patch("games.services.timezone.now", return_value=round_start + timedelta(seconds=10)):
++            first_result = evaluate_guess_for_round(self.round, self.guesser, "rocket")
++        self.round.refresh_from_db()
++        self.guesser.refresh_from_db()
++        self.drawer.refresh_from_db()
++        guesser_score_after_first_correct = self.guesser.current_score
++        drawer_score_after_first_correct = self.drawer.current_score
++
++        repeat_result = evaluate_guess_for_round(self.round, self.guesser, "roc")
++
++        self.guesser.refresh_from_db()
++        self.drawer.refresh_from_db()
++
++        self.assertEqual(first_result.outcome, game_services.GuessOutcome.CORRECT)
++        self.assertFalse(first_result.round_completed_now)
++        self.assertEqual(repeat_result.outcome, game_services.GuessOutcome.INCORRECT)
++        self.assertFalse(repeat_result.is_correct)
++        self.assertFalse(repeat_result.round_completed_now)
++        self.assertEqual(self.guesser.current_score, guesser_score_after_first_correct)
++        self.assertEqual(self.drawer.current_score, drawer_score_after_first_correct)
++
+ 
+ @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
+ class MidGameSpectatorRoundTransitionTests(TestCase):
+diff --git a/rooms/consumers.py b/rooms/consumers.py
+index 6792e3c..315572d 100644
+--- a/rooms/consumers.py
++++ b/rooms/consumers.py
+@@ -56,6 +56,12 @@ def get_redis_client() -> redis.Redis:
+     return _redis_client
+ 
+ 
++def reset_redis_client() -> None:
++    """Reset the cached Redis client. Used for test isolation."""
++    global _redis_client
++    _redis_client = None
++
++
+ @database_sync_to_async
+ def _mark_participant_connected(
+     player_id: int,
+@@ -479,6 +485,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
+                     "player_id": self.player.id,
+                     "player_nickname": self.player.display_name,
+                     "text": guess_text,
++                    "outcome": evaluation_result.outcome,
+                     "is_correct": evaluation_result.is_correct,
+                     "round_completed": evaluation_result.round_completed,
+                     "score_updates": [
+@@ -513,6 +520,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
+                 "player_id": event["player_id"],
+                 "player_nickname": event["player_nickname"],
+                 "text": event["text"],
++                "outcome": event["outcome"],
+                 "is_correct": event["is_correct"],
+                 "round_completed": event["round_completed"],
+                 "score_updates": event["score_updates"]
+diff --git a/rooms/services.py b/rooms/services.py
+index 954b8f0..7997f06 100644
+--- a/rooms/services.py
++++ b/rooms/services.py
+@@ -576,6 +576,47 @@ def purge_expired_participants(
+     return purged_count
+ 
+ 
++def purge_expired_participants_for_session(
++    *,
++    redis_client,
++    session_key: str,
++    now: datetime | None = None,
++) -> int:
++    """Remove expired participants that belong to one guest session.
++
++    The room-entry flow only needs to clean up stale ownership rows for the
++    browser session making the current request. Keeping this helper
++    session-scoped avoids doing unrelated expiry cleanup for other guests on
++    the critical path of create/join requests.
++    """
++
++    current_time = now or timezone.now()
++    expired_player_ids = list(
++        Player.objects.filter(
++            session_key=session_key,
++            session_expires_at__lte=current_time,
++        )
++        .order_by("session_expires_at", "id")
++        .values_list("id", flat=True)
++    )
++
++    purged_count = 0
++    for player_id in expired_player_ids:
++        try:
++            # Route the delete through the normal leave path so host handoff,
++            # empty-room grace, and runtime cleanup stay consistent.
++            leave_participant(
++                redis_client=redis_client,
++                player_id=player_id,
++            )
++        except Player.DoesNotExist:
++            # A concurrent request may have already removed this stale row.
++            continue
++        purged_count += 1
++
++    return purged_count
++
++
+ def cleanup_expired_empty_rooms(
+     *,
+     redis_client,
+diff --git a/rooms/static/rooms/room_entry.js b/rooms/static/rooms/room_entry.js
+index 78d0de1..5b61dec 100644
+--- a/rooms/static/rooms/room_entry.js
++++ b/rooms/static/rooms/room_entry.js
+@@ -20,6 +20,14 @@ function parseErrorMessage(data) {
+         .join(" ");
+ }
+ 
++function buildRequestError(data) {
++    // Preserve the parsed response body on thrown errors so the entry flow can
++    // distinguish a recoverable conflict from a plain validation failure.
++    const error = new Error(parseErrorMessage(data));
++    error.responseData = data;
++    return error;
++}
++
+ async function postJson(url, payload) {
+     const response = await fetch(url, {
+         method: "POST",
+@@ -38,7 +46,7 @@ async function postJson(url, payload) {
+     }
+ 
+     if (!response.ok) {
+-        throw new Error(parseErrorMessage(data));
++        throw buildRequestError(data);
+     }
+ 
+     return data;
+@@ -72,6 +80,23 @@ function showStatus(message) {
+     entryStatus.hidden = false;
+ }
+ 
++function handleEntryRequestFailure(error) {
++    // The backend returns a recoverable 409 with room_url when this session
++    // already owns another valid room. Redirecting immediately avoids leaving
++    // the guest stuck on the entry page with an error they cannot fix there.
++    if (
++        error &&
++        typeof error.responseData === "object" &&
++        typeof error.responseData.room_url === "string"
++    ) {
++        redirectToRoom(error.responseData);
++        return;
++    }
++
++    showError(error instanceof Error ? error.message : "Something went wrong. Please try again.");
++    setIdleState();
++}
++
+ function setIdleState() {
+     playButton.disabled = false;
+     createButton.disabled = false;
+@@ -149,8 +174,7 @@ document.getElementById("entry-form").addEventListener("submit", async function
+ 
+         await createPrivateRoom(displayName);
+     } catch (error) {
+-        showError(error.message);
+-        setIdleState();
++        handleEntryRequestFailure(error);
+     }
+ });
+ 
+@@ -167,8 +191,7 @@ createButton.addEventListener("click", async function () {
+     try {
+         await createPrivateRoom(displayName);
+     } catch (error) {
+-        showError(error.message);
+-        setIdleState();
++        handleEntryRequestFailure(error);
+     }
+ });
+ 
+@@ -192,8 +215,7 @@ publicJoinButtons.forEach((button) => {
+         try {
+             await joinRoomByCode(joinCode, displayName);
+         } catch (error) {
+-            showError(error.message);
+-            setIdleState();
++            handleEntryRequestFailure(error);
+         }
+     });
+ });
+diff --git a/rooms/tests/test_consumers.py b/rooms/tests/test_consumers.py
+index 80578ad..fb80b32 100644
+--- a/rooms/tests/test_consumers.py
++++ b/rooms/tests/test_consumers.py
+@@ -18,6 +18,7 @@ which WebsocketCommunicator omits by default).
+ import asyncio
+ from datetime import timedelta
+ import json
++import asyncio
+ 
+ import fakeredis
+ from asgiref.sync import async_to_sync
+@@ -149,6 +150,159 @@ def _join_room_via_http(*, join_code: str, display_name: str) -> tuple[int, byte
+     return response.status_code, response.content
+ 
+ 
++async def _receive_until_type(communicator, event_type: str, attempts: int = 50):
++    """Wait for and return a specific JSON event type, ignoring others (safe version)."""
++    import asyncio, json
++    for _ in range(attempts):
++        try:
++            raw = await asyncio.wait_for(communicator.output_queue.get(), timeout=2.0)
++            if raw.get("type") == "websocket.send":
++                event = json.loads(raw["text"])
++                if event.get("type") == event_type:
++                    return event
++        except asyncio.TimeoutError:
++            continue
++    raise AssertionError(f"Did not receive expected event type '{event_type}'.")
++
++
++async def _receive_output_json(communicator, *, timeout: float) -> dict:
++    """Read one JSON websocket.send frame directly from the output queue."""
++    raw = await asyncio.wait_for(communicator.output_queue.get(), timeout=timeout)
++    if raw.get("type") != "websocket.send":
++        raise AssertionError(f"Expected websocket.send frame, got {raw.get('type')!r}.")
++
++    payload = raw.get("text")
++    if not isinstance(payload, str):
++        raise AssertionError(f"Expected text websocket payload, got {type(payload)!r}.")
++
++    return json.loads(payload)
++
++
++async def _drain_output_queue_safe(communicator, timeout: float = 0.2) -> list[dict]:
++    """Timed drain of the communicator output queue without calling receive_output."""
++    messages = []
++    while True:
++        try:
++            messages.append(await _receive_output_json(communicator, timeout=timeout))
++            timeout = 0.2
++        except asyncio.TimeoutError:
++            break
++    return messages
++
++
++async def _connect_and_receive_initial_room_state(
++    communicator,
++    join_code: str,
++):
++    """Connect and consume exactly the mandatory initial room.state event."""
++    connected, _ = await communicator.connect()
++    if not connected:
++        raise AssertionError("WebSocket failed to connect.")
++
++    room_state = await _receive_output_json(communicator, timeout=2.0)
++    if room_state.get("type") != "room.state":
++        raise AssertionError(
++            f"Expected initial event 'room.state', got {room_state.get('type')!r}."
++        )
++
++    actual_join_code = room_state["payload"]["room"]["join_code"]
++    if actual_join_code != join_code.upper():
++        raise AssertionError(
++            f"Expected room.state for {join_code.upper()}, got {actual_join_code}."
++        )
++
++    return room_state
++
++
++async def _connect_and_drain_initial_sync(
++    communicator: WebsocketCommunicator,
++    join_code: str,
++    expects_game_active: bool = False,
++    timeout: float = 5.0,
++) -> list[dict]:
++    """Connect to a room and collect only the allowed initial handshake events."""
++    connected, _ = await communicator.connect(timeout=timeout)
++    if not connected:
++        raise ConnectionError(f"Failed to connect to room {join_code}")
++
++    first_msg = await _receive_output_json(communicator, timeout=4.0)
++    if first_msg.get("type") != "room.state":
++        raise AssertionError(
++            f"Expected initial event 'room.state', got {first_msg.get('type')!r}."
++        )
++
++    actual_join_code = first_msg["payload"]["room"]["join_code"]
++    if actual_join_code != join_code.upper():
++        raise AssertionError(
++            f"Expected room.state for {join_code.upper()}, got {actual_join_code}."
++        )
++
++    messages = [first_msg]
++    allowed_followup_types = {
++        "drawing.stroke",
++        "drawing.end_stroke",
++        "drawing.clear",
++        "round.state",
++        "round.timer",
++        "round.intermission_timer",
++        "round.started",
++        "round.drawer_word",
++    }
++
++    def _append_and_validate(message: dict) -> None:
++        message_type = message.get("type")
++        if message_type not in allowed_followup_types:
++            raise AssertionError(
++                f"Unexpected connect-time event {message_type!r} after room.state."
++            )
++        messages.append(message)
++
++    if expects_game_active:
++        loop = asyncio.get_running_loop()
++        deadline = loop.time() + max(4.0, timeout)
++
++        while loop.time() < deadline:
++            has_round_state = any(
++                message.get("type") == "round.state" for message in messages
++            )
++            has_timer = any(
++                message.get("type") in {"round.timer", "round.intermission_timer"}
++                for message in messages
++            )
++            if has_round_state and has_timer:
++                break
++
++            try:
++                remaining = deadline - loop.time()
++                message = await _receive_output_json(
++                    communicator,
++                    timeout=min(1.0, remaining),
++                )
++            except asyncio.TimeoutError:
++                continue
++
++            _append_and_validate(message)
++
++        if not any(message.get("type") == "round.state" for message in messages):
++            raise AssertionError("Expected connect-time round.state sync event.")
++        if not any(
++            message.get("type") in {"round.timer", "round.intermission_timer"}
++            for message in messages
++        ):
++            raise AssertionError(
++                "Expected connect-time round timer or intermission timer sync event."
++            )
++
++        for message in await _drain_output_queue_safe(communicator, timeout=0.2):
++            _append_and_validate(message)
++    else:
++        for message in await _drain_output_queue_safe(communicator, timeout=0.2):
++            _append_and_validate(message)
++
++    return messages
++
++
++
+ # ---------------------------------------------------------------------------
+ # Test cases
+ # ---------------------------------------------------------------------------
+@@ -163,6 +317,7 @@ class RoomConsumerConnectTests(TransactionTestCase):
+ 
+         from rooms import consumers as room_consumers
+         game_runtime.reset_runtime_state_for_tests()
++        room_consumers.reset_redis_client()
+         self.fake_redis = fakeredis.FakeRedis()
+         room_consumers._redis_client = self.fake_redis
+         game_runtime._redis_client = self.fake_redis
+@@ -195,9 +350,11 @@ class RoomConsumerConnectTests(TransactionTestCase):
+     def tearDown(self):
+         async_to_sync(self.channel_layer.flush)()
+         game_runtime.reset_runtime_state_for_tests()
+-        super().tearDown()
+         from rooms import consumers as room_consumers
+         room_consumers._redis_client = None
++        from games import services as game_services
++        game_services._get_redis_client = self._orig_services_redis
++        super().tearDown()
+ 
+     def _group_members(self, group_name: str) -> dict[str, float]:
+         return self.channel_layer.groups.get(group_name, {})
+@@ -230,9 +387,9 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.session_key),
+         )
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             communicator,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+         await communicator.disconnect()
+ 
+@@ -242,9 +399,9 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.session_key),
+         )
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             communicator,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+         self.assertEqual(
+             len(self._group_members(_room_group_name(self.room.join_code))),
+@@ -292,9 +449,9 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             _ws_url(lower_code),
+             headers=_session_headers(self.session_key),
+         )
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             communicator,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+         await communicator.disconnect()
+ 
+@@ -312,13 +469,13 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             headers=_session_headers(second_session_key),
+         )
+ 
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             first,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             second,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+         self.assertEqual(
+             len(self._group_members(_room_group_name(self.room.join_code))),
+@@ -334,9 +491,9 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.session_key),
+         )
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             communicator,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+         self.assertEqual(
+             len(self._group_members(_room_group_name(self.room.join_code))),
+@@ -360,9 +517,9 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.session_key),
+         )
+-        room_state = await self._connect_and_receive_initial_room_state(
++        room_state = await _connect_and_receive_initial_room_state(
+             communicator,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+         self.assertEqual(
+             room_state["payload"]["participants"][0]["connection_status"],
+@@ -408,13 +565,13 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             headers=_session_headers(second_session_key),
+         )
+ 
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             host_socket,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             member_socket,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+ 
+         await host_socket.disconnect()
+@@ -431,9 +588,9 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.session_key),
+         )
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             first_socket,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+ 
+         original_player_id = self.player.id
+@@ -450,9 +607,9 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.session_key),
+         )
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             second_socket,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+ 
+         refreshed_player = await database_sync_to_async(Player.objects.get)(
+@@ -481,13 +638,13 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             headers=_session_headers(self.session_key),
+         )
+ 
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             first,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             second,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+ 
+         await first.disconnect()
+@@ -527,13 +684,13 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.session_key),
+         )
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             communicator,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+ 
+         await communicator.send_json_to({"type": "echo", "message": "hello world"})
+-        response = await self._receive_until_type(communicator, "echo_reply")
++        response = await _receive_until_type(communicator, "echo_reply")
+         
+         self.assertEqual(response["type"], "echo_reply")
+         self.assertEqual(response["message"], "Echo: hello world")
+@@ -546,9 +703,9 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.session_key),
+         )
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             communicator,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+ 
+         event_payload = {
+@@ -566,7 +723,7 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             },
+         )
+ 
+-        forwarded = await self._receive_until_type(communicator, "round.timer")
++        forwarded = await _receive_until_type(communicator, "round.timer")
+         self.assertEqual(forwarded, event_payload)
+ 
+         await communicator.disconnect()
+@@ -584,7 +741,7 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.session_key),
+         )
+-        await self._connect_and_receive_initial_room_state(communicator)
++        await _connect_and_receive_initial_room_state(communicator, self.room.join_code)
+ 
+         await _start_game(self.room.id)
+ 
+@@ -620,12 +777,12 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.session_key),
+         )
+-        await self._connect_and_receive_initial_room_state(initial_socket)
++        await _connect_and_receive_initial_room_state(initial_socket, self.room.join_code)
+ 
+         first_round_id = await _start_game(self.room.id)
+-        await self._receive_until_type(initial_socket, "round.started")
++        await _receive_until_type(initial_socket, "round.started")
+         await _end_round_by_correct_guess(first_round_id)
+-        await self._receive_until_type(initial_socket, "round.intermission_started")
++        await _receive_until_type(initial_socket, "round.intermission_started")
+         await initial_socket.disconnect()
+ 
+         reconnect_socket = WebsocketCommunicator(
+@@ -633,9 +790,9 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.session_key),
+         )
+-        await self._connect_and_receive_initial_room_state(reconnect_socket)
++        await _connect_and_receive_initial_room_state(reconnect_socket, self.room.join_code)
+ 
+-        round_state = await self._receive_until_type(reconnect_socket, "round.state")
++        round_state = await _receive_until_type(reconnect_socket, "round.state")
+         self.assertEqual(round_state["payload"]["phase"], "intermission")
+         self.assertIn("tick_sequence", round_state["payload"])
+         self.assertIn("server_timestamp", round_state["payload"])
+@@ -649,9 +806,9 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             headers=_session_headers(self.session_key),
+         )
+ 
+-        room_state = await self._connect_and_receive_initial_room_state(
++        room_state = await _connect_and_receive_initial_room_state(
+             communicator,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+ 
+         self.assertEqual(room_state["type"], "room.state")
+@@ -691,9 +848,9 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.session_key),
+         )
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             communicator,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+ 
+         status_code, response_content = await _join_room_via_http(
+@@ -702,7 +859,7 @@ class RoomConsumerConnectTests(TransactionTestCase):
+         )
+         self.assertEqual(status_code, 201, response_content)
+ 
+-        room_state = await self._receive_until_type(communicator, "room.state")
++        room_state = await _receive_until_type(communicator, "room.state")
+         participant_names = [
+             participant["display_name"]
+             for participant in room_state["payload"]["participants"]
+@@ -728,19 +885,19 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             headers=_session_headers(second_session_key),
+         )
+ 
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             first_socket,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             second_socket,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+-        await self._receive_until_type(first_socket, "room.state")
++        await _receive_until_type(first_socket, "room.state")
+ 
+         await second_socket.disconnect()
+ 
+-        room_state = await self._receive_until_type(first_socket, "room.state")
++        room_state = await _receive_until_type(first_socket, "room.state")
+         bob_participant = next(
+             participant
+             for participant in room_state["payload"]["participants"]
+@@ -766,30 +923,30 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             headers=_session_headers(second_session_key),
+         )
+ 
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             first_socket,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             second_socket,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+-        await self._receive_until_type(first_socket, "room.state")
++        await _receive_until_type(first_socket, "room.state")
+ 
+         await second_socket.disconnect()
+-        await self._receive_until_type(first_socket, "room.state")
++        await _receive_until_type(first_socket, "room.state")
+ 
+         reconnect_socket = WebsocketCommunicator(
+             _TEST_APP,
+             _ws_url(self.room.join_code),
+             headers=_session_headers(second_session_key),
+         )
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             reconnect_socket,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+ 
+-        room_state = await self._receive_until_type(first_socket, "room.state")
++        room_state = await _receive_until_type(first_socket, "room.state")
+         bob_participant = next(
+             participant
+             for participant in room_state["payload"]["participants"]
+@@ -927,24 +1084,24 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             headers=_session_headers(second_session_key),
+         )
+ 
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             alice_primary_socket,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             bob_socket,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+-        await self._receive_until_type(alice_primary_socket, "room.state")
++        await _receive_until_type(alice_primary_socket, "room.state")
+ 
+         alice_second_socket = WebsocketCommunicator(
+             _TEST_APP,
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.session_key),
+         )
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             alice_second_socket,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+ 
+         self.assertTrue(await bob_socket.receive_nothing(timeout=0.2))
+@@ -965,9 +1122,9 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             headers=_session_headers(second_session_key),
+         )
+ 
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             bob_socket,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+ 
+         await _leave_room_member(
+@@ -1035,9 +1192,9 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.session_key),
+         )
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             first_socket,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+ 
+         await first_socket.disconnect()
+@@ -1055,9 +1212,9 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.session_key),
+         )
+-        await self._connect_and_receive_initial_room_state(
++        await _connect_and_receive_initial_room_state(
+             reconnect_socket,
+-            drain_duplicate_room_states=True,
++            self.room.join_code,
+         )
+ 
+         refreshed_player = await database_sync_to_async(Player.objects.get)(
+@@ -1103,6 +1260,17 @@ class RoomConsumerConnectTests(TransactionTestCase):
+ 
+         spectator_session_key, _, spectator = await _create_spectator_session_and_player()
+ 
++        from games.models import Game, GameStatus, Round, GameWord
++        game = await database_sync_to_async(Game.objects.create)(room=self.room, status=GameStatus.IN_PROGRESS)
++        game_word = await database_sync_to_async(GameWord.objects.create)(game=game, text="rocket")
++        round_obj = await database_sync_to_async(Round.objects.create)(
++            game=game,
++            drawer_participant=self.player,
++            drawer_nickname=self.player.display_name,
++            selected_game_word=game_word,
++            sequence_number=1,
++        )
++
+         # Simulate an active round in Redis turn state so the no-active-round
+         # guard doesn't fire before the spectator guard does.
+         deadline_at = (timezone.now() + timedelta(seconds=60)).isoformat()
+@@ -1113,8 +1281,8 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             {
+                 "phase": "round",
+                 "status": "drawing",
+-                "game_id": "1",
+-                "round_id": "1",
++                "game_id": str(game.id),
++                "round_id": str(round_obj.id),
+                 "drawer_participant_id": str(self.player.id),
+                 "deadline_at": deadline_at,
+                 "eligible_guesser_ids": "[]",
+@@ -1125,19 +1293,24 @@ class RoomConsumerConnectTests(TransactionTestCase):
+             },
+         )
+ 
+-        communicator = WebsocketCommunicator(
+-            _TEST_APP,
+-            _ws_url(self.room.join_code),
+-            headers=_session_headers(spectator_session_key),
+-        )
+-        await self._connect_and_receive_initial_room_state(communicator)
++        with override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True):
++            communicator = WebsocketCommunicator(
++                _TEST_APP,
++                _ws_url(self.room.join_code),
++                headers=_session_headers(spectator_session_key),
++            )
++            await _connect_and_drain_initial_sync(
++                communicator,
++                self.room.join_code,
++                expects_game_active=True,
++            )
+ 
+-        await communicator.send_json_to({
+-            "type": "guess.submit",
+-            "payload": {"text": "rocket"},
+-        })
++            await communicator.send_json_to({
++                "type": "guess.submit",
++                "payload": {"text": "rocket"},
++            })
+ 
+-        response = await communicator.receive_json_from(timeout=1)
++            response = await communicator.receive_json_from(timeout=1)
+ 
+         self.assertEqual(response["type"], "guess.error")
+         self.assertEqual(
+diff --git a/rooms/tests/test_drawing.py b/rooms/tests/test_drawing.py
+index 6fe07cd..0071a31 100644
+--- a/rooms/tests/test_drawing.py
++++ b/rooms/tests/test_drawing.py
+@@ -8,13 +8,17 @@ reconnect recovery.
+ 
+ import json
+ import fakeredis
++from channels.db import database_sync_to_async
+ from channels.testing import WebsocketCommunicator
+-from django.test import TransactionTestCase
++from django.test import TransactionTestCase, override_settings
+ 
+ from asgiref.sync import async_to_sync
+ from rooms.models import Player, Room
+-from games.models import Game, GameWord, Round
+-from rooms.tests.test_consumers import _ws_url, _session_headers, _create_room_member, _TEST_APP
++from games.models import Game, GameStatus, GameWord, Round
++from rooms.tests.test_consumers import (
++    _ws_url, _session_headers, _create_room_member, _TEST_APP,
++    _receive_until_type, _connect_and_drain_initial_sync,
++)
+ from rooms import consumers as room_consumers
+ from rooms import redis as room_redis
+ from games import redis as game_redis
+@@ -22,24 +26,71 @@ from games import services as game_services
+ from words.models import Word, WordPack, WordPackEntry
+ 
+ 
++def _drawing_replay_events(messages: list[dict]) -> list[dict]:
++    return [
++        message
++        for message in messages
++        if message.get("type", "").startswith("drawing.")
++    ]
++
++
++def _assert_active_connect_messages(
++    testcase: TransactionTestCase,
++    messages: list[dict],
++    *,
++    replayed_drawing: list[dict] | None = None,
++) -> None:
++    testcase.assertEqual(messages[0].get("type"), "room.state")
++    testcase.assertTrue(
++        any(message.get("type") == "round.state" for message in messages),
++        "Expected connect-time round.state sync event.",
++    )
++    testcase.assertTrue(
++        any(
++            message.get("type") in {"round.timer", "round.intermission_timer"}
++            for message in messages
++        ),
++        "Expected connect-time round timer or intermission timer sync event.",
++    )
++    expected_replay = [] if replayed_drawing is None else replayed_drawing
++    testcase.assertEqual(_drawing_replay_events(messages), expected_replay)
++
++
++async def _connect_and_assert_active_handshake(
++    testcase: TransactionTestCase,
++    communicator: WebsocketCommunicator,
++    join_code: str,
++    *,
++    replayed_drawing: list[dict] | None = None,
++) -> list[dict]:
++    messages = await _connect_and_drain_initial_sync(
++        communicator,
++        join_code,
++        expects_game_active=True,
++    )
++    _assert_active_connect_messages(
++        testcase,
++        messages,
++        replayed_drawing=replayed_drawing,
++    )
++    return messages
++
++
++@override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)
+ class DrawingEventTests(TransactionTestCase):
+     """Tests for drawer authorization and event broadcasting."""
+ 
+     def setUp(self):
++        from games import runtime as game_runtime
++        game_runtime.reset_runtime_state_for_tests()
++        room_consumers.reset_redis_client()
++
+         self.fake_redis = fakeredis.FakeRedis()
+         room_consumers._redis_client = self.fake_redis
+-        from games import services as game_services
+-        from games import runtime as game_runtime
+-        self._orig_services_redis = game_services._get_redis_client
+-        self._orig_runtime_redis = game_runtime._redis_client
+-        game_services._get_redis_client = lambda: self.fake_redis
+         game_runtime._redis_client = self.fake_redis
+-        from games import services as game_services
+-        from games import runtime as game_runtime
+-        self._orig_services_redis = game_services._get_redis_client
+-        self._orig_runtime_redis = game_runtime._redis_client
++
++        self._orig_game_services_redis = game_services._get_redis_client
+         game_services._get_redis_client = lambda: self.fake_redis
+-        game_runtime._redis_client = self.fake_redis
+ 
+         # Set up a word pack for the room
+         self.word_pack = WordPack.objects.create(name="Test Pack")
+@@ -60,18 +111,37 @@ class DrawingEventTests(TransactionTestCase):
+         self.viewer_session_key = async_to_sync(_create_room_member)(self.room.id, "Viewer")
+         self.viewer_player = Player.objects.get(room=self.room, session_key=self.viewer_session_key)
+ 
+-        # Set the active drawer in Redis turn state using the new runtime field name
+-        game_redis.set_turn_state(self.fake_redis, self.room.join_code, {"drawer_participant_id": self.drawer_player.id})
++        # Create mandatory Game and Round objects for runtime sync
++        self.game = Game.objects.create(room=self.room, status=GameStatus.IN_PROGRESS)
++        self.game_word = GameWord.objects.create(game=self.game, text="testword")
++        self.round = Round.objects.create(
++            game=self.game,
++            drawer_participant=self.drawer_player,
++            drawer_nickname=self.drawer_player.display_name,
++            selected_game_word=self.game_word,
++            sequence_number=1,
++        )
++
++    def _seed_active_round_state(self):
++        from games import redis as game_redis
++        from django.utils import timezone
++        from datetime import timedelta
++        state = {
++            "phase": "round",
++            "round_id": str(self.round.id),
++            "game_id": str(self.game.id),
++            "drawer_participant_id": str(self.drawer_player.id),
++            "deadline_at": (timezone.now() + timedelta(seconds=60)).isoformat(),
++        }
++        game_redis.set_turn_state(self.fake_redis, self.room.join_code, state)
+ 
+     def tearDown(self):
+-        room_consumers._redis_client = None
+-        from games import services as game_services
+-        from games import runtime as game_runtime
+-        game_services._get_redis_client = self._orig_services_redis
+-        game_runtime._redis_client = self._orig_runtime_redis
++        room_consumers.reset_redis_client()
++        game_services._get_redis_client = self._orig_game_services_redis
+         super().tearDown()
+ 
+     async def test_drawer_can_broadcast_stroke(self):
++        self._seed_active_round_state()
+         drawer_socket = WebsocketCommunicator(
+             _TEST_APP,
+             _ws_url(self.room.join_code),
+@@ -82,11 +152,55 @@ class DrawingEventTests(TransactionTestCase):
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.viewer_session_key),
+         )
++        await _connect_and_assert_active_handshake(
++            self,
++            drawer_socket,
++            self.room.join_code,
++        )
++        await _connect_and_assert_active_handshake(
++            self,
++            viewer_socket,
++            self.room.join_code,
++        )
++        await _receive_until_type(drawer_socket, "room.state")
++
++        stroke_data = {"lines": [[0,0], [10,10]], "color": "blue"}
++        await drawer_socket.send_json_to({
++            "type": "drawing.stroke",
++            "payload": stroke_data
++        })
+         
+-        await drawer_socket.connect()
+-        await viewer_socket.connect()
++        # Viewer should receive the broadcast
++        response = await _receive_until_type(viewer_socket, "drawing.stroke")
++        self.assertEqual(response["payload"], stroke_data)
++
++        await drawer_socket.disconnect()
++        await viewer_socket.disconnect()
++
++    async def test_viewer_receives_stroke(self):
++        self._seed_active_round_state()
++        drawer_socket = WebsocketCommunicator(
++            _TEST_APP,
++            _ws_url(self.room.join_code),
++            headers=_session_headers(self.drawer_session_key),
++        )
++        viewer_socket = WebsocketCommunicator(
++            _TEST_APP,
++            _ws_url(self.room.join_code),
++            headers=_session_headers(self.viewer_session_key),
++        )
++        await _connect_and_assert_active_handshake(
++            self,
++            drawer_socket,
++            self.room.join_code,
++        )
++        await _connect_and_assert_active_handshake(
++            self,
++            viewer_socket,
++            self.room.join_code,
++        )
++        await _receive_until_type(drawer_socket, "room.state")
+ 
+-        # Drawer sends a stroke
+         stroke_data = {"lines": [[0,0], [10,10]], "color": "red"}
+         await drawer_socket.send_json_to({
+             "type": "drawing.stroke",
+@@ -94,17 +208,17 @@ class DrawingEventTests(TransactionTestCase):
+         })
+ 
+         # Viewer should receive the broadcast
+-        response = await viewer_socket.receive_json_from()
+-        self.assertEqual(response["type"], "drawing.stroke")
++        response = await _receive_until_type(viewer_socket, "drawing.stroke")
+         self.assertEqual(response["payload"], stroke_data)
+ 
+-        # Drawer should NOT receive their own broadcast
++        # Drawer should NOT receive their own broadcast.
+         self.assertTrue(await drawer_socket.receive_nothing())
+ 
+         await drawer_socket.disconnect()
+         await viewer_socket.disconnect()
+ 
+     async def test_drawing_end_stroke_broadcast(self):
++        self._seed_active_round_state()
+         drawer_socket = WebsocketCommunicator(
+             _TEST_APP,
+             _ws_url(self.room.join_code),
+@@ -116,9 +230,17 @@ class DrawingEventTests(TransactionTestCase):
+             headers=_session_headers(self.viewer_session_key),
+         )
+         
+-        await drawer_socket.connect()
+-        await viewer_socket.connect()
+-
++        await _connect_and_assert_active_handshake(
++            self,
++            drawer_socket,
++            self.room.join_code,
++        )
++        await _connect_and_assert_active_handshake(
++            self,
++            viewer_socket,
++            self.room.join_code,
++        )
++        await _receive_until_type(drawer_socket, "room.state")
+         # Drawer sends an end stroke
+         await drawer_socket.send_json_to({
+             "type": "drawing.end_stroke",
+@@ -126,13 +248,13 @@ class DrawingEventTests(TransactionTestCase):
+         })
+ 
+         # Viewer should receive the broadcast
+-        response = await viewer_socket.receive_json_from()
+-        self.assertEqual(response["type"], "drawing.end_stroke")
++        response = await _receive_until_type(viewer_socket, "drawing.end_stroke")
+ 
+         await drawer_socket.disconnect()
+         await viewer_socket.disconnect()
+ 
+     async def test_multiple_viewers_receive_broadcast(self):
++        self._seed_active_round_state()
+         # Create a second viewer
+         second_viewer_key = await _create_room_member(self.room.id, "Viewer 2")
+         
+@@ -152,9 +274,23 @@ class DrawingEventTests(TransactionTestCase):
+             headers=_session_headers(second_viewer_key),
+         )
+         
+-        await drawer_socket.connect()
+-        await viewer1_socket.connect()
+-        await viewer2_socket.connect()
++        await _connect_and_assert_active_handshake(
++            self,
++            drawer_socket,
++            self.room.join_code,
++        )
++        await _connect_and_assert_active_handshake(
++            self,
++            viewer1_socket,
++            self.room.join_code,
++        )
++        await _connect_and_assert_active_handshake(
++            self,
++            viewer2_socket,
++            self.room.join_code,
++        )
++        await _receive_until_type(drawer_socket, "room.state")
++        await _receive_until_type(drawer_socket, "room.state")
+ 
+         stroke_data = {"lines": [[0,0], [10,10]]}
+         await drawer_socket.send_json_to({
+@@ -163,8 +299,8 @@ class DrawingEventTests(TransactionTestCase):
+         })
+ 
+         # Both viewers should receive the broadcast
+-        resp1 = await viewer1_socket.receive_json_from()
+-        resp2 = await viewer2_socket.receive_json_from()
++        resp1 = await _receive_until_type(viewer1_socket, "drawing.stroke")
++        resp2 = await _receive_until_type(viewer2_socket, "drawing.stroke")
+         
+         self.assertEqual(resp1["payload"], stroke_data)
+         self.assertEqual(resp2["payload"], stroke_data)
+@@ -174,6 +310,7 @@ class DrawingEventTests(TransactionTestCase):
+         await viewer2_socket.disconnect()
+ 
+     async def test_non_drawer_cannot_broadcast_stroke(self):
++        self._seed_active_round_state()
+         drawer_socket = WebsocketCommunicator(
+             _TEST_APP,
+             _ws_url(self.room.join_code),
+@@ -185,8 +322,17 @@ class DrawingEventTests(TransactionTestCase):
+             headers=_session_headers(self.viewer_session_key),
+         )
+         
+-        await drawer_socket.connect()
+-        await viewer_socket.connect()
++        await _connect_and_assert_active_handshake(
++            self,
++            drawer_socket,
++            self.room.join_code,
++        )
++        await _connect_and_assert_active_handshake(
++            self,
++            viewer_socket,
++            self.room.join_code,
++        )
++        await _receive_until_type(drawer_socket, "room.state")
+ 
+         # Viewer (non-drawer) tries to send a stroke
+         await viewer_socket.send_json_to({
+@@ -194,41 +340,46 @@ class DrawingEventTests(TransactionTestCase):
+             "payload": {"naughty": "secret"}
+         })
+ 
+-        # Drawer should receive nothing
++        # Drawer should receive nothing from the unauthorized viewer stroke.
+         self.assertTrue(await drawer_socket.receive_nothing())
+ 
+         await drawer_socket.disconnect()
+         await viewer_socket.disconnect()
+ 
+     async def test_drawing_clear_deletes_redis_snapshot(self):
++        self._seed_active_round_state()
+         drawer_socket = WebsocketCommunicator(
+             _TEST_APP,
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.drawer_session_key),
+         )
++        await _connect_and_assert_active_handshake(
++            self,
++            drawer_socket,
++            self.room.join_code,
++        )
++
++        # Pre-seed a snapshot in Redis (list of JSON strings)
++        stroke_data = {"type": "drawing.stroke", "payload": {"data": "seeded"}}
++        room_redis.append_canvas_stroke(self.fake_redis, self.room.join_code, json.dumps(stroke_data).encode())
++
+         viewer_socket = WebsocketCommunicator(
+             _TEST_APP,
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.viewer_session_key),
+         )
+-        await drawer_socket.connect()
+-        await viewer_socket.connect()
+-
+-        # First, ensure there is a snapshot (it's now a list of JSON strings)
+-        stroke_data = b'{"type":"drawing.stroke", "payload":{}}'
+-        room_redis.append_canvas_stroke(self.fake_redis, self.room.join_code, stroke_data)
+-        self.assertEqual(len(room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code)), 1)
+-
+-        # Viewer should receive the replayed stroke first
+-        replay = await viewer_socket.receive_json_from()
+-        self.assertEqual(replay["type"], "drawing.stroke")
++        await _connect_and_assert_active_handshake(
++            self,
++            viewer_socket,
++            self.room.join_code,
++            replayed_drawing=[stroke_data],
++        )
+ 
+         # Drawer clears the canvas
+         await drawer_socket.send_json_to({"type": "drawing.clear"})
+         
+-        # Viewer should receive the clear event broadcast
+-        response = await viewer_socket.receive_json_from()
+-        self.assertEqual(response["type"], "drawing.clear")
++        # Viewer should receive the clear event broadcast after handshake sync.
++        response = await _receive_until_type(viewer_socket, "drawing.clear")
+ 
+         # Snapshot should be gone from Redis
+         self.assertEqual(len(room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code)), 0)
+@@ -256,8 +407,8 @@ class DrawingEventTests(TransactionTestCase):
+             headers=_session_headers(self.viewer_session_key),
+         )
+         
+-        await drawer_socket.connect()
+-        await viewer_socket.connect()
++        await _connect_and_drain_initial_sync(drawer_socket, self.room.join_code, expects_game_active=False)
++        await _connect_and_drain_initial_sync(viewer_socket, self.room.join_code, expects_game_active=False)
+ 
+         # "Drawer" tries to draw in lobby
+         await drawer_socket.send_json_to({
+@@ -265,27 +416,30 @@ class DrawingEventTests(TransactionTestCase):
+             "payload": {"wont": "work"}
+         })
+ 
+-        # Viewer should receive nothing
+-                # Viewer should receive nothing
++        # Viewer should receive nothing.
+         self.assertTrue(await viewer_socket.receive_nothing())
+ 
+         await drawer_socket.disconnect()
+         await viewer_socket.disconnect()
+ 
+ 
++@override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)
+ class SnapshotSyncTests(TransactionTestCase):
+     """Tests for canvas snapshot recovery on connection."""
+ 
+     def setUp(self):
++        from games import runtime as game_runtime
++
++        game_runtime.reset_runtime_state_for_tests()
++        room_consumers.reset_redis_client()
++
+         self.fake_redis = fakeredis.FakeRedis()
+         room_consumers._redis_client = self.fake_redis
+-        from games import services as game_services
+-        from games import runtime as game_runtime
+-        self._orig_services_redis = game_services._get_redis_client
+-        self._orig_runtime_redis = game_runtime._redis_client
+-        game_services._get_redis_client = lambda: self.fake_redis
+         game_runtime._redis_client = self.fake_redis
+ 
++        self._orig_game_services_redis = game_services._get_redis_client
++        game_services._get_redis_client = lambda: self.fake_redis
++
+         # Set up a word pack for the room
+         self.word_pack = WordPack.objects.create(name="Snapshot Pack")
+         test_word = Word.objects.create(text="rocket")
+@@ -304,24 +458,37 @@ class SnapshotSyncTests(TransactionTestCase):
+         
+         self.viewer_session_key = async_to_sync(_create_room_member)(self.room.id, "Viewer")
+         self.viewer_player = Player.objects.get(room=self.room, session_key=self.viewer_session_key)
++        
++        self.game = Game.objects.create(room=self.room, status=GameStatus.IN_PROGRESS)
++        self.game_word = GameWord.objects.create(game=self.game, text="testword")
++        self.round = Round.objects.create(
++            game=self.game,
++            drawer_participant=self.drawer_player,
++            drawer_nickname=self.drawer_player.display_name,
++            selected_game_word=self.game_word,
++            sequence_number=1,
++        )
+ 
+-        # Seed turn state so consumer sees an active round
+-        game_redis.set_turn_state(self.fake_redis, self.room.join_code, {
++    def _seed_active_round_state(self):
++        from games import redis as game_redis
++        from django.utils import timezone
++        from datetime import timedelta
++        state = {
+             "phase": "round",
+-            "round_id": "1",
+-            "drawer_participant_id": str(self.drawer_player.id)
+-        })
+-        self.game = Game.objects.create(room=self.room)
++            "round_id": str(self.round.id),
++            "game_id": str(self.game.id),
++            "drawer_participant_id": str(self.drawer_player.id),
++            "deadline_at": (timezone.now() + timedelta(seconds=60)).isoformat(),
++        }
++        game_redis.set_turn_state(self.fake_redis, self.room.join_code, state)
+ 
+     def tearDown(self):
+-        room_consumers._redis_client = None
+-        from games import services as game_services
+-        from games import runtime as game_runtime
+-        game_services._get_redis_client = self._orig_services_redis
+-        game_runtime._redis_client = self._orig_runtime_redis
++        room_consumers.reset_redis_client()
++        game_services._get_redis_client = self._orig_game_services_redis
+         super().tearDown()
+ 
+     async def test_client_receives_snapshot_on_connect(self):
++        self._seed_active_round_state()
+         # Pre-seed a snapshot in Redis (list of JSON strings)
+         snapshot_payload = {"type": "drawing.stroke", "payload": {"data": "test"}}
+         room_redis.append_canvas_stroke(
+@@ -336,121 +503,80 @@ class SnapshotSyncTests(TransactionTestCase):
+             headers=_session_headers(self.viewer_session_key),
+         )
+         
+-        connected, _ = await communicator.connect()
+-        self.assertTrue(connected)
+-
+-        # Client should receive the replayed event
+-        response = await communicator.receive_json_from()
+-        self.assertEqual(response, snapshot_payload)
++        await _connect_and_assert_active_handshake(
++            self,
++            communicator,
++            self.room.join_code,
++            replayed_drawing=[snapshot_payload],
++        )
+ 
+         await communicator.disconnect()
+ 
+     async def test_snapshot_accumulation(self):
+-        drawer_socket = WebsocketCommunicator(
+-            _TEST_APP,
+-            _ws_url(self.room.join_code),
+-            headers=_session_headers(self.drawer_session_key),
++        self._seed_active_round_state()
++        drawer_socket = WebsocketCommunicator(_TEST_APP, _ws_url(self.room.join_code), headers=_session_headers(self.drawer_session_key))
++        sync_viewer = WebsocketCommunicator(_TEST_APP, _ws_url(self.room.join_code), headers=_session_headers(self.viewer_session_key))
++        await _connect_and_assert_active_handshake(
++            self,
++            drawer_socket,
++            self.room.join_code,
+         )
+-        # Viewer to synchronize processing
+-        sync_viewer = WebsocketCommunicator(
+-            _TEST_APP,
+-            _ws_url(self.room.join_code),
+-            headers=_session_headers(self.viewer_session_key),
++        await _connect_and_assert_active_handshake(
++            self,
++            sync_viewer,
++            self.room.join_code,
+         )
+-        await drawer_socket.connect()
+-        await sync_viewer.connect()
+-
+-        # Send 2 strokes and an end_stroke
+-        strokes = [
+-            {"type": "drawing.stroke", "payload": {"id": 1}},
+-            {"type": "drawing.stroke", "payload": {"id": 2}},
+-            {"type": "drawing.end_stroke", "payload": {}},
+-        ]
++        strokes = [{"type": "drawing.stroke", "payload": {"id": 1}}, {"type": "drawing.stroke", "payload": {"id": 2}}, {"type": "drawing.end_stroke", "payload": {}}]
+         for s in strokes:
+             await drawer_socket.send_json_to(s)
+-            # Wait for broadcast to ensure Redis is updated
+-            await sync_viewer.receive_json_from()
+-        await sync_viewer.disconnect()
+-
+-        # Connect a new viewer
++            await _receive_until_type(sync_viewer, s["type"])
+         new_viewer_key = await _create_room_member(self.room.id, "Late Bob")
+-        viewer_socket = WebsocketCommunicator(
+-            _TEST_APP,
+-            _ws_url(self.room.join_code),
+-            headers=_session_headers(new_viewer_key),
++        viewer_socket = WebsocketCommunicator(_TEST_APP, _ws_url(self.room.join_code), headers=_session_headers(new_viewer_key))
++        await _connect_and_assert_active_handshake(
++            self,
++            viewer_socket,
++            self.room.join_code,
++            replayed_drawing=strokes,
+         )
+-        
+-        connected, _ = await viewer_socket.connect()
+-        self.assertTrue(connected)
+-
+-        # Should receive all 3 messages in order
+-        for expected in strokes:
+-            response = await viewer_socket.receive_json_from()
+-            self.assertEqual(response, expected)
+-
+         await drawer_socket.disconnect()
+         await viewer_socket.disconnect()
++        await sync_viewer.disconnect()
+ 
+     async def test_snapshot_isolation_between_rounds(self):
+-        # 1. Start round, send drawing
+-        drawer_socket = WebsocketCommunicator(
+-            _TEST_APP,
+-            _ws_url(self.room.join_code),
+-            headers=_session_headers(self.drawer_session_key),
++        self._seed_active_round_state()
++        drawer_socket = WebsocketCommunicator(_TEST_APP, _ws_url(self.room.join_code), headers=_session_headers(self.drawer_session_key))
++        await _connect_and_assert_active_handshake(
++            self,
++            drawer_socket,
++            self.room.join_code,
+         )
+-        await drawer_socket.connect()
+-        # Viewer to synchronize processing
+-        sync_viewer = WebsocketCommunicator(
+-            _TEST_APP,
+-            _ws_url(self.room.join_code),
+-            headers=_session_headers(self.viewer_session_key),
++        sync_viewer = WebsocketCommunicator(_TEST_APP, _ws_url(self.room.join_code), headers=_session_headers(self.viewer_session_key))
++        await _connect_and_assert_active_handshake(
++            self,
++            sync_viewer,
++            self.room.join_code,
+         )
+-        await sync_viewer.connect()
+-
+         await drawer_socket.send_json_to({"type": "drawing.stroke", "payload": {"test": 1}})
+-        # Wait for broadcast
+-        await sync_viewer.receive_json_from()
+-        await sync_viewer.disconnect()
+-        
+-        # Verify snapshot exists
++        await _receive_until_type(sync_viewer, "drawing.stroke")
+         self.assertEqual(len(room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code)), 1)
+-        
+-        # 2. Simulate round end using the actual service path
+-        # We need a Round object for the service call
+-        from channels.db import database_sync_to_async
+-        game_word = await database_sync_to_async(GameWord.objects.create)(
+-            game=self.game, text="rocket"
++        # Completing a round progresses the game to the next round, so the test
++        # must provide one unused snapshot word for the transition to stay valid.
++        await database_sync_to_async(GameWord.objects.create)(game=self.game, text="planet")
++        await database_sync_to_async(game_services.complete_round_due_to_timer)(self.round.id)
++        self.assertEqual(
++            room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code),
++            [],
+         )
+-        round_obj = await database_sync_to_async(Round.objects.create)(
+-            game=self.game,
+-            sequence_number=1,
+-            drawer_participant=self.drawer_player,
+-            drawer_nickname=self.drawer_player.display_name,
+-            selected_game_word=game_word,
+-)
+-        # Wait, let's just use the service logic properly
+-        await database_sync_to_async(game_services.complete_round_due_to_timer)(round_obj.id)
+-        
+-        # 3. New viewer connects during intermission (no active round)
+-        # We manually seed an intermission turn state to ensure _send_initial_canvas_snapshot
+-        # doesn't just return early due to missing turn_state (which would mask a leak).
+-        game_redis.set_turn_state(self.fake_redis, self.room.join_code, {
+-            "phase": "intermission",
+-            "round_id": str(round_obj.id)
+-        })
+-
+-        viewer_socket = WebsocketCommunicator(
+-            _TEST_APP,
+-            _ws_url(self.room.join_code),
+-            headers=_session_headers(self.viewer_session_key),
++        new_viewer_key = await _create_room_member(self.room.id, "Intermission Bob")
++        v_socket = WebsocketCommunicator(_TEST_APP, _ws_url(self.room.join_code), headers=_session_headers(new_viewer_key))
++        await _connect_and_assert_active_handshake(
++            self,
++            v_socket,
++            self.room.join_code,
+         )
+-        await viewer_socket.connect()
+-        
+-        # Viewer should receive NOTHING (no snapshot from old round) because the service cleared it
+-        self.assertTrue(await viewer_socket.receive_nothing())
+-
+         await drawer_socket.disconnect()
+-        await viewer_socket.disconnect()
++        await sync_viewer.disconnect()
++        await v_socket.disconnect()
+ 
+     async def test_no_snapshot_sent_if_redis_empty(self):
+         # Redis is empty
+@@ -460,10 +586,9 @@ class SnapshotSyncTests(TransactionTestCase):
+             headers=_session_headers(self.viewer_session_key),
+         )
+         
+-        connected, _ = await communicator.connect()
+-        self.assertTrue(connected)
++        await _connect_and_drain_initial_sync(communicator, self.room.join_code, expects_game_active=False)
+ 
+-        # Should receive nothing because there's no snapshot
++        # Should receive nothing after the initial handshake
+         self.assertTrue(await communicator.receive_nothing())
+ 
+         await communicator.disconnect()
+diff --git a/rooms/tests/test_guesses.py b/rooms/tests/test_guesses.py
+index 00b0977..8e85b8a 100644
+--- a/rooms/tests/test_guesses.py
++++ b/rooms/tests/test_guesses.py
+@@ -6,12 +6,16 @@ import fakeredis
+ from asgiref.sync import async_to_sync
+ from channels.db import database_sync_to_async
+ from channels.testing import WebsocketCommunicator
+-from django.test import TransactionTestCase
++from django.test import TransactionTestCase, override_settings
+ from django.utils import timezone
+ 
+ from games import services as game_services
+ from rooms.models import Player, Room
+-from rooms.tests.test_consumers import _ws_url, _session_headers, _create_room_member, _TEST_APP
++from rooms.tests.test_consumers import (
++    _ws_url, _session_headers, _create_room_member, _TEST_APP,
++    _receive_until_type,
++    _connect_and_drain_initial_sync,
++)
+ from rooms import consumers as room_consumers
+ from games import redis as game_redis
+ from games.models import Game, GameStatus, GameWord, Guess, Round
+@@ -30,10 +34,64 @@ def _set_round_started_at(round_id: int, started_at) -> None:
+     round.save(update_fields=("started_at", "updated_at"))
+ 
+ 
++@database_sync_to_async
++def _set_round_target_word(round_id: int, target_word: str) -> None:
++    round = Round.objects.select_related("selected_game_word").get(pk=round_id)
++    round.selected_game_word.text = target_word
++    round.selected_game_word.save(update_fields=("text", "updated_at"))
++
++
++def _assert_active_connect_messages(
++    testcase: TransactionTestCase,
++    messages: list[dict],
++) -> None:
++    testcase.assertEqual(messages[0].get("type"), "room.state")
++    testcase.assertTrue(
++        any(message.get("type") == "round.state" for message in messages),
++        "Expected connect-time round.state sync event.",
++    )
++    testcase.assertTrue(
++        any(
++            message.get("type") in {"round.timer", "round.intermission_timer"}
++            for message in messages
++        ),
++        "Expected connect-time round timer or intermission timer sync event.",
++    )
++    testcase.assertEqual(
++        [
++            message
++            for message in messages
++            if message.get("type", "").startswith("drawing.")
++        ],
++        [],
++    )
++
++
++async def _connect_and_assert_active_handshake(
++    testcase: TransactionTestCase,
++    communicator: WebsocketCommunicator,
++    join_code: str,
++) -> list[dict]:
++    messages = await _connect_and_drain_initial_sync(
++        communicator,
++        join_code,
++        expects_game_active=True,
++    )
++    _assert_active_connect_messages(testcase, messages)
++    return messages
++
++
++@override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)
+ class GuessPipelineTests(TransactionTestCase):
+     def setUp(self):
++        from games import runtime as game_runtime
++        game_runtime.reset_runtime_state_for_tests()
++        room_consumers.reset_redis_client()
+         self.fake_redis = fakeredis.FakeRedis()
+         room_consumers._redis_client = self.fake_redis
++        game_runtime._redis_client = self.fake_redis
++        self._orig_game_services_redis = game_services._get_redis_client
++        game_services._get_redis_client = lambda: self.fake_redis
+ 
+         # Set up a word pack for the room
+         self.word_pack = WordPack.objects.create(name="Test Pack")
+@@ -66,29 +124,43 @@ class GuessPipelineTests(TransactionTestCase):
+             drawer_participant=self.drawer_player,
+             drawer_nickname=self.drawer_player.display_name,
+             selected_game_word=self.game_word,
+-            sequence_number=1,
++            sequence_number=100,
+         )
+ 
+-        # Set the active round in Redis turn state
+-        game_redis.set_turn_state(self.fake_redis, self.room.join_code, {
+-            "drawer_participant_id": self.drawer_player.id,
+-            "round_id": self.round.id,
+-            "game_id": self.game.id,
+-            "phase": "round"
+-        })
++        # Tests that need an active round should call _seed_active_round_state.
++
++    def _seed_active_round_state(self, *, deadline_at=None):
++        state = {
++            "phase": "round",
++            "round_id": str(self.round.id),
++            "game_id": str(self.game.id),
++            "drawer_participant_id": str(self.drawer_player.id),
++            "deadline_at": (
++                deadline_at or (timezone.now() + timedelta(seconds=60))
++            ).isoformat(),
++        }
++        game_redis.set_turn_state(self.fake_redis, self.room.join_code, state)
+ 
+     def tearDown(self):
+-        room_consumers._redis_client = None
++        room_consumers.reset_redis_client()
++        game_services._get_redis_client = self._orig_game_services_redis
++        super().tearDown()
+ 
+     async def test_correct_guess_broadcast(self):
+         round_start = timezone.now()
++        # Fix both round start and runtime deadline so the score math is deterministic.
++        self._seed_active_round_state(deadline_at=round_start + timedelta(seconds=60))
+         await _set_round_started_at(self.round.id, round_start)
+         guesser_socket = WebsocketCommunicator(
+             _TEST_APP,
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.guesser_key),
+         )
+-        await guesser_socket.connect()
++        await _connect_and_assert_active_handshake(
++            self,
++            guesser_socket,
++            self.room.join_code,
++        )
+ 
+         # Submit correct guess
+         accepted_at = round_start + timedelta(seconds=45)
+@@ -99,34 +171,40 @@ class GuessPipelineTests(TransactionTestCase):
+             })
+ 
+             # Guesser should receive the result broadcast
+-            response = await guesser_socket.receive_json_from()
++            response = await _receive_until_type(guesser_socket, "guess.result")
+         self.assertEqual(response["type"], "guess.result")
+         self.assertTrue(response["payload"]["is_correct"])
++        self.assertEqual(response["payload"]["outcome"], game_services.GuessOutcome.CORRECT)
+         self.assertEqual(response["payload"]["player_id"], self.guesser_player.id)
+         
+         # Check exact time-based score updates
+         score_updates = response["payload"]["score_updates"]
+         guesser_update = next(s for s in score_updates if s["player_id"] == self.guesser_player.id)
+         drawer_update = next(s for s in score_updates if s["player_id"] == self.drawer_player.id)
+-        self.assertEqual(guesser_update["current_score"], 60)
+-        self.assertEqual(drawer_update["current_score"], 30)
++        self.assertEqual(guesser_update["current_score"], 33)
++        self.assertEqual(drawer_update["current_score"], 17)
+ 
+         await guesser_socket.disconnect()
+ 
+     async def test_valid_guess_is_persisted_on_active_round(self):
++        self._seed_active_round_state()
+         guesser_socket = WebsocketCommunicator(
+             _TEST_APP,
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.guesser_key),
+         )
+-        await guesser_socket.connect()
++        await _connect_and_assert_active_handshake(
++            self,
++            guesser_socket,
++            self.room.join_code,
++        )
+ 
+         await guesser_socket.send_json_to({
+             "type": "guess.submit",
+             "payload": {"text": f"  {self.secret_word_text}  "}
+         })
+ 
+-        response = await guesser_socket.receive_json_from()
++        response = await _receive_until_type(guesser_socket, "guess.result")
+         self.assertEqual(response["type"], "guess.result")
+ 
+         persisted_guess = await _get_guess(self.round.id, self.guesser_player.id)
+@@ -138,12 +216,17 @@ class GuessPipelineTests(TransactionTestCase):
+         await guesser_socket.disconnect()
+ 
+     async def test_incorrect_guess_broadcast(self):
++        self._seed_active_round_state()
+         guesser_socket = WebsocketCommunicator(
+             _TEST_APP,
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.guesser_key),
+         )
+-        await guesser_socket.connect()
++        await _connect_and_assert_active_handshake(
++            self,
++            guesser_socket,
++            self.room.join_code,
++        )
+ 
+         # Submit incorrect guess
+         await guesser_socket.send_json_to({
+@@ -152,22 +235,86 @@ class GuessPipelineTests(TransactionTestCase):
+         })
+ 
+         # Guesser should receive a failure result broadcast
+-        response = await guesser_socket.receive_json_from()
++        response = await _receive_until_type(guesser_socket, "guess.result")
+         self.assertEqual(response["type"], "guess.result")
+         self.assertFalse(response["payload"]["is_correct"])
++        self.assertEqual(response["payload"]["outcome"], game_services.GuessOutcome.INCORRECT)
+         self.assertEqual(response["payload"]["text"], "wrongword")
+ 
+         await guesser_socket.disconnect()
+ 
++    async def test_near_match_outcome_broadcast(self):
++        self._seed_active_round_state()
++        await _set_round_target_word(self.round.id, "new york city")
++        guesser_socket = WebsocketCommunicator(
++            _TEST_APP,
++            _ws_url(self.room.join_code),
++            headers=_session_headers(self.guesser_key),
++        )
++        await _connect_and_assert_active_handshake(
++            self,
++            guesser_socket,
++            self.room.join_code,
++        )
++
++        await guesser_socket.send_json_to({
++            "type": "guess.submit",
++            "payload": {"text": "york"}
++        })
++
++        response = await _receive_until_type(guesser_socket, "guess.result")
++        self.assertEqual(response["type"], "guess.result")
++        self.assertFalse(response["payload"]["is_correct"])
++        self.assertEqual(response["payload"]["outcome"], game_services.GuessOutcome.NEAR_MATCH)
++
++        await guesser_socket.disconnect()
++
++    async def test_duplicate_outcome_broadcast(self):
++        self._seed_active_round_state()
++        guesser_socket = WebsocketCommunicator(
++            _TEST_APP,
++            _ws_url(self.room.join_code),
++            headers=_session_headers(self.guesser_key),
++        )
++        await _connect_and_assert_active_handshake(
++            self,
++            guesser_socket,
++            self.room.join_code,
++        )
++
++        await guesser_socket.send_json_to({
++            "type": "guess.submit",
++            "payload": {"text": "planet"}
++        })
++        first_response = await _receive_until_type(guesser_socket, "guess.result")
++
++        await guesser_socket.send_json_to({
++            "type": "guess.submit",
++            "payload": {"text": "  PLANET "}
++        })
++        second_response = await _receive_until_type(guesser_socket, "guess.result")
++
++        self.assertEqual(first_response["payload"]["outcome"], game_services.GuessOutcome.INCORRECT)
++        self.assertEqual(second_response["payload"]["outcome"], game_services.GuessOutcome.DUPLICATE)
++        self.assertFalse(second_response["payload"]["is_correct"])
++
++        await guesser_socket.disconnect()
++
+     async def test_guess_submission_delegates_to_game_service(self):
++        self._seed_active_round_state()
+         guesser_socket = WebsocketCommunicator(
+             _TEST_APP,
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.guesser_key),
+         )
+-        await guesser_socket.connect()
++        await _connect_and_assert_active_handshake(
++            self,
++            guesser_socket,
++            self.room.join_code,
++        )
+ 
+         stub_result = SimpleNamespace(
++            outcome=game_services.GuessOutcome.INCORRECT,
+             is_correct=False,
+             round_completed=False,
+             score_updates=(),
+@@ -181,7 +328,7 @@ class GuessPipelineTests(TransactionTestCase):
+                 "payload": {"text": "  trimmed guess  "}
+             })
+ 
+-            response = await guesser_socket.receive_json_from()
++            response = await _receive_until_type(guesser_socket, "guess.result")
+ 
+         self.assertEqual(response["type"], "guess.result")
+         called_round, called_player, called_text = mocked_evaluate_guess.call_args.args
+@@ -192,12 +339,17 @@ class GuessPipelineTests(TransactionTestCase):
+         await guesser_socket.disconnect()
+ 
+     async def test_drawer_cannot_guess(self):
++        self._seed_active_round_state()
+         drawer_socket = WebsocketCommunicator(
+             _TEST_APP,
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.drawer_key),
+         )
+-        await drawer_socket.connect()
++        await _connect_and_assert_active_handshake(
++            self,
++            drawer_socket,
++            self.room.join_code,
++        )
+ 
+         # Drawer tries to guess their own word
+         await drawer_socket.send_json_to({
+@@ -206,19 +358,24 @@ class GuessPipelineTests(TransactionTestCase):
+         })
+ 
+         # Drawer should receive a guess.error (rejected by consumer before hitting service/DB)
+-        response = await drawer_socket.receive_json_from()
++        response = await _receive_until_type(drawer_socket, "guess.error")
+         self.assertEqual(response["type"], "guess.error")
+         self.assertIn("Drawers cannot submit guesses", response["payload"]["message"])
+ 
+         await drawer_socket.disconnect()
+ 
+     async def test_service_validation_error_becomes_guess_error(self):
++        self._seed_active_round_state()
+         guesser_socket = WebsocketCommunicator(
+             _TEST_APP,
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.guesser_key),
+         )
+-        await guesser_socket.connect()
++        await _connect_and_assert_active_handshake(
++            self,
++            guesser_socket,
++            self.room.join_code,
++        )
+ 
+         with patch(
+             "rooms.consumers.game_services.evaluate_guess_for_round",
+@@ -229,7 +386,7 @@ class GuessPipelineTests(TransactionTestCase):
+                 "payload": {"text": "guess"}
+             })
+ 
+-            response = await guesser_socket.receive_json_from()
++            response = await _receive_until_type(guesser_socket, "guess.error")
+ 
+         self.assertEqual(response["type"], "guess.error")
+         self.assertEqual(response["payload"]["message"], "Service rejected guess.")
+@@ -237,6 +394,7 @@ class GuessPipelineTests(TransactionTestCase):
+         await guesser_socket.disconnect()
+ 
+     async def test_guess_broadcast_visibility(self):
++        self._seed_active_round_state()
+         # Third player joins as a viewer
+         viewer_key = await _create_room_member(self.room.id, "Viewer")
+         
+@@ -251,8 +409,16 @@ class GuessPipelineTests(TransactionTestCase):
+             headers=_session_headers(viewer_key),
+         )
+         
+-        await guesser_socket.connect()
+-        await viewer_socket.connect()
++        await _connect_and_assert_active_handshake(
++            self,
++            guesser_socket,
++            self.room.join_code,
++        )
++        await _connect_and_assert_active_handshake(
++            self,
++            viewer_socket,
++            self.room.join_code,
++        )
+ 
+         # Guesser submits a guess
+         await guesser_socket.send_json_to({
+@@ -261,8 +427,8 @@ class GuessPipelineTests(TransactionTestCase):
+         })
+ 
+         # Both should receive the broadcast
+-        resp_g = await guesser_socket.receive_json_from()
+-        resp_v = await viewer_socket.receive_json_from()
++        resp_g = await _receive_until_type(guesser_socket, "guess.result")
++        resp_v = await _receive_until_type(viewer_socket, "guess.result")
+         
+         self.assertEqual(resp_g["type"], "guess.result")
+         self.assertEqual(resp_v["type"], "guess.result")
+@@ -281,7 +447,7 @@ class GuessPipelineTests(TransactionTestCase):
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.guesser_key),
+         )
+-        await guesser_socket.connect()
++        await _connect_and_drain_initial_sync(guesser_socket, self.room.join_code, expects_game_active=False)
+ 
+         await guesser_socket.send_json_to({
+             "type": "guess.submit",
+@@ -289,19 +455,24 @@ class GuessPipelineTests(TransactionTestCase):
+         })
+ 
+         # Should receive a guess.error instead of silent return
+-        response = await guesser_socket.receive_json_from()
++        response = await _receive_until_type(guesser_socket, "guess.error")
+         self.assertEqual(response["type"], "guess.error")
+         self.assertEqual(response["payload"]["message"], "No active round in progress.")
+ 
+         await guesser_socket.disconnect()
+ 
+     async def test_guess_empty_text(self):
++        self._seed_active_round_state()
+         guesser_socket = WebsocketCommunicator(
+             _TEST_APP,
+             _ws_url(self.room.join_code),
+             headers=_session_headers(self.guesser_key),
+         )
+-        await guesser_socket.connect()
++        await _connect_and_assert_active_handshake(
++            self,
++            guesser_socket,
++            self.room.join_code,
++        )
+ 
+         # Submit whitespace-only guess
+         await guesser_socket.send_json_to({
+@@ -310,7 +481,7 @@ class GuessPipelineTests(TransactionTestCase):
+         })
+ 
+         # Should receive a guess.error instead of silent return
+-        response = await guesser_socket.receive_json_from()
++        response = await _receive_until_type(guesser_socket, "guess.error")
+         self.assertEqual(response["type"], "guess.error")
+         self.assertEqual(response["payload"]["message"], "Guess text cannot be empty.")
+ 
+diff --git a/rooms/tests/test_room_entry_js.mjs b/rooms/tests/test_room_entry_js.mjs
+new file mode 100644
+index 0000000..f07155e
+--- /dev/null
++++ b/rooms/tests/test_room_entry_js.mjs
+@@ -0,0 +1,188 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { readFile } from "node:fs/promises";
++import path from "node:path";
++import vm from "node:vm";
++
++
++const ROOM_ENTRY_JS_PATH = path.resolve(
++    process.cwd(),
++    "rooms/static/rooms/room_entry.js",
++);
++
++
++function makeElement({ value = "", dataset = {} } = {}) {
++    return {
++        value,
++        dataset,
++        hidden: true,
++        textContent: "",
++        disabled: false,
++        listeners: new Map(),
++        addEventListener(eventName, listener) {
++            this.listeners.set(eventName, listener);
++        },
++        getListener(eventName) {
++            return this.listeners.get(eventName);
++        },
++    };
++}
++
++
++async function loadRoomEntryScript({
++    fetchResponse,
++    displayName = "Alex",
++    roomCode = "",
++    roomName = "",
++    publicJoinCodes = [],
++} = {}) {
++    const source = await readFile(ROOM_ENTRY_JS_PATH, "utf8");
++    const csrfInput = makeElement({ value: "csrf-token" });
++    const elementsById = new Map([
++        ["entry-form", makeElement()],
++        ["display_name", makeElement({ value: displayName })],
++        ["room_code", makeElement({ value: roomCode })],
++        ["room_name", makeElement({ value: roomName })],
++        ["play-button", makeElement()],
++        ["create-button", makeElement()],
++        ["entry-error", makeElement()],
++        ["entry-status", makeElement()],
++    ]);
++    const publicJoinButtons = publicJoinCodes.map((joinCode) =>
++        makeElement({ dataset: { joinCode } })
++    );
++    const redirects = [];
++    const fetchCalls = [];
++    const context = {
++        console,
++        Error,
++        Array,
++        Object,
++        String,
++        Map,
++        JSON,
++        Promise,
++        URL,
++        document: {
++            querySelector(selector) {
++                if (selector === '[name="csrfmiddlewaretoken"]') {
++                    return csrfInput;
++                }
++                return null;
++            },
++            querySelectorAll(selector) {
++                if (selector === ".join-public-button") {
++                    return publicJoinButtons;
++                }
++                return [];
++            },
++            getElementById(id) {
++                return elementsById.get(id) ?? null;
++            },
++        },
++        window: {
++            location: {
++                assign(url) {
++                    redirects.push(url);
++                },
++            },
++        },
++        fetch: async (url, options) => {
++            fetchCalls.push({ url, options });
++            return fetchResponse(url, options);
++        },
++    };
++    context.globalThis = context;
++
++    vm.runInNewContext(source, context, { filename: ROOM_ENTRY_JS_PATH });
++
++    return {
++        redirects,
++        fetchCalls,
++        elementsById,
++        publicJoinButtons,
++    };
++}
++
++
++test("create button redirects into the existing room on recoverable conflict", async () => {
++    const payload = {
++        detail: "This guest session is already assigned to a room.",
++        join_code: "ABC12345",
++        room_url: "/rooms/ABC12345/",
++    };
++    const harness = await loadRoomEntryScript({
++        fetchResponse: async () => ({
++            ok: false,
++            async json() {
++                return payload;
++            },
++        }),
++    });
++
++    const createButton = harness.elementsById.get("create-button");
++    await createButton.getListener("click")();
++
++    assert.deepEqual(harness.redirects, [payload.room_url]);
++    assert.equal(harness.elementsById.get("entry-error").hidden, true);
++    assert.equal(harness.elementsById.get("entry-status").hidden, false);
++    assert.equal(
++        harness.elementsById.get("entry-status").textContent,
++        "Creating private room...",
++    );
++});
++
++
++test("join-by-code submit redirects into the existing room on recoverable conflict", async () => {
++    const payload = {
++        detail: "This guest session is already assigned to a room.",
++        join_code: "ZXCV5678",
++        room_url: "/rooms/ZXCV5678/",
++    };
++    const harness = await loadRoomEntryScript({
++        roomCode: "zxcv5678",
++        fetchResponse: async () => ({
++            ok: false,
++            async json() {
++                return payload;
++            },
++        }),
++    });
++
++    const entryForm = harness.elementsById.get("entry-form");
++    await entryForm.getListener("submit")({
++        preventDefault() {},
++    });
++
++    assert.deepEqual(harness.redirects, [payload.room_url]);
++    assert.equal(harness.fetchCalls.length, 1);
++    assert.equal(harness.fetchCalls[0].url, "/rooms/zxcv5678/join/");
++});
++
++
++test("room-full conflicts stay on the entry page and show the error", async () => {
++    const payload = {
++        detail: "This room is full.",
++    };
++    const harness = await loadRoomEntryScript({
++        publicJoinCodes: ["FULL1234"],
++        fetchResponse: async () => ({
++            ok: false,
++            async json() {
++                return payload;
++            },
++        }),
++    });
++
++    const joinButton = harness.publicJoinButtons[0];
++    await joinButton.getListener("click")();
++
++    assert.deepEqual(harness.redirects, []);
++    assert.equal(harness.elementsById.get("entry-error").hidden, false);
++    assert.equal(
++        harness.elementsById.get("entry-error").textContent,
++        "This room is full.",
++    );
++    assert.equal(harness.elementsById.get("play-button").disabled, false);
++    assert.equal(harness.elementsById.get("create-button").disabled, false);
++});
+diff --git a/rooms/tests/test_services.py b/rooms/tests/test_services.py
+index 06f231a..0038a0a 100644
+--- a/rooms/tests/test_services.py
++++ b/rooms/tests/test_services.py
+@@ -23,6 +23,7 @@ from rooms.services import (
+     leave_participant,
+     promote_mid_game_spectators_to_players,
+     purge_expired_participants,
++    purge_expired_participants_for_session,
+     restore_room_from_empty_grace,
+ )
+ 
+@@ -835,6 +836,53 @@ class EmptyRoomGraceServiceTests(TestCase):
+         self.assertTrue(Player.objects.filter(pk=active_player.id).exists())
+         self.assertEqual(self.room.status, Room.Status.LOBBY)
+ 
++    def test_purge_expired_participants_for_session_only_removes_matching_session(self):
++        expired_at = timezone.now() - timedelta(minutes=1)
++        target_player = Player.objects.create(
++            room=self.room,
++            session_key="target-session",
++            display_name="Expired Alex",
++            connection_status=Player.ConnectionStatus.DISCONNECTED,
++            session_expires_at=expired_at,
++        )
++        self.room.host = target_player
++        self.room.save(update_fields=["host", "updated_at"])
++        other_room = Room.objects.create(
++            name="Other Room",
++            join_code="OTHER123",
++            visibility=Room.Visibility.PRIVATE,
++        )
++        other_player = Player.objects.create(
++            room=other_room,
++            session_key="other-session",
++            display_name="Expired Jamie",
++            connection_status=Player.ConnectionStatus.DISCONNECTED,
++            session_expires_at=expired_at,
++        )
++        other_room.host = other_player
++        other_room.save(update_fields=["host", "updated_at"])
++
++        purged_counts: list[int] = []
++        self._execute_on_commit(
++            lambda: purged_counts.append(
++                purge_expired_participants_for_session(
++                    redis_client=self.redis_client,
++                    session_key="target-session",
++                    now=timezone.now(),
++                )
++            )
++        )
++        purged_count = purged_counts[0]
++
++        self.room.refresh_from_db()
++        other_room.refresh_from_db()
++        self.assertEqual(purged_count, 1)
++        self.assertFalse(Player.objects.filter(pk=target_player.id).exists())
++        self.assertTrue(Player.objects.filter(pk=other_player.id).exists())
++        self.assertEqual(self.room.status, Room.Status.EMPTY_GRACE)
++        self.assertEqual(other_room.status, Room.Status.LOBBY)
++        self.assertEqual(other_room.host_id, other_player.id)
++
+ 
+ class PromoteMidGameSpectatorsServiceTests(TestCase):
+     """Service-level coverage for the mid-game spectator promotion function."""
+diff --git a/rooms/tests/test_views.py b/rooms/tests/test_views.py
+index 2a90c10..1cab246 100644
+--- a/rooms/tests/test_views.py
++++ b/rooms/tests/test_views.py
+@@ -1,11 +1,13 @@
+ import json
++from threading import Event, Thread
+ from datetime import timedelta
+ from unittest.mock import patch
+ 
+ import fakeredis
+ from django.contrib import admin
+ from django.conf import settings
+-from django.test import SimpleTestCase, TestCase
++from django.contrib.sessions.backends.db import SessionStore
++from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase
+ from django.utils import timezone
+ 
+ from games import redis as game_redis
+@@ -167,17 +169,65 @@ class CreateRoomViewTests(TestCase):
+         self.assertEqual(Player.objects.count(), 0)
+         self.assertIn("display_name", response.json()["errors"])
+ 
+-    def test_create_room_rejects_session_that_is_already_in_a_room(self):
++    def test_create_room_returns_recoverable_conflict_when_session_already_owns_room(self):
+         first_response = self.post_create_room()
+ 
+         self.assertEqual(first_response.status_code, 201)
+ 
+         response = self.post_create_room(name="Second Room")
++        response_data = response.json()
++        existing_room = Room.objects.get()
+ 
+         self.assertEqual(response.status_code, 409)
+         self.assertEqual(Room.objects.count(), 1)
+         self.assertEqual(Player.objects.count(), 1)
+-        self.assertIn("detail", response.json())
++        self.assertEqual(
++            response_data["detail"],
++            "This guest session is already assigned to a room.",
++        )
++        self.assertEqual(response_data["join_code"], existing_room.join_code)
++        self.assertEqual(response_data["room_url"], f"/rooms/{existing_room.join_code}/")
++
++    @patch("rooms.views._get_room_runtime_redis_client")
++    def test_create_room_ignores_expired_same_session_membership(
++        self,
++        get_redis_client,
++    ):
++        fake_redis = fakeredis.FakeRedis()
++        get_redis_client.return_value = fake_redis
++        session = self.client.session
++        session.save()
++        expired_at = timezone.now() - timedelta(minutes=1)
++        stale_room = Room.objects.create(
++            name="Stale Room",
++            join_code="STALE123",
++            visibility=Room.Visibility.PRIVATE,
++        )
++        stale_player = Player.objects.create(
++            room=stale_room,
++            session_key=session.session_key,
++            display_name="Alex",
++            connection_status=Player.ConnectionStatus.DISCONNECTED,
++            session_expires_at=expired_at,
++        )
++        stale_room.host = stale_player
++        stale_room.save(update_fields=["host", "updated_at"])
++
++        with self.captureOnCommitCallbacks(execute=True):
++            response = self.post_create_room(name="Fresh Room")
++
++        response_data = response.json()
++        stale_room.refresh_from_db()
++
++        self.assertEqual(response.status_code, 201)
++        self.assertEqual(Room.objects.count(), 2)
++        self.assertEqual(Player.objects.count(), 1)
++        self.assertFalse(Player.objects.filter(pk=stale_player.id).exists())
++        self.assertEqual(stale_room.status, Room.Status.EMPTY_GRACE)
++        self.assertEqual(stale_room.host_id, None)
++        self.assertEqual(Room.objects.filter(status=Room.Status.LOBBY).count(), 1)
++        self.assertEqual(Player.objects.get().room.join_code, response_data["join_code"])
++        self.assertEqual(response_data["room_url"], f"/rooms/{response_data['join_code']}/")
+ 
+     @patch(
+         "rooms.views.generate_join_code",
+@@ -223,6 +273,103 @@ class RoomWordPackModelTests(TestCase):
+         self.assertEqual(room.word_pack_id, expected_default_word_pack.id)
+ 
+ 
++class ConcurrentRoomOwnershipTests(TransactionTestCase):
++    def _create_session_key(self):
++        session = SessionStore()
++        session.save()
++        return session.session_key
++
++    def _build_client_for_session(self, session_key):
++        client = Client()
++        client.cookies[settings.SESSION_COOKIE_NAME] = session_key
++        return client
++
++    def _post_create_room(self, *, client, room_name):
++        return client.post(
++            "/rooms/create/",
++            data=json.dumps(
++                {
++                    "name": room_name,
++                    "visibility": Room.Visibility.PRIVATE,
++                    "display_name": "Alex",
++                }
++            ),
++            content_type="application/json",
++        )
++
++    def test_concurrent_create_requests_for_same_session_create_only_one_membership(self):
++        session_key = self._create_session_key()
++        first_client = self._build_client_for_session(session_key)
++        second_client = self._build_client_for_session(session_key)
++        first_request_reached_create = Event()
++        second_request_attempted_session_lock = Event()
++        allow_first_request_to_continue = Event()
++        original_create_room = Room.objects.create
++
++        from rooms import views as room_views
++
++        original_lock_guest_session = room_views._lock_guest_session
++        lock_call_count = {"count": 0}
++        results = []
++        errors = []
++
++        def instrumented_lock_guest_session(request, session_key):
++            lock_call_count["count"] += 1
++            if lock_call_count["count"] == 2:
++                second_request_attempted_session_lock.set()
++            return original_lock_guest_session(request, session_key)
++
++        def blocking_room_create(*args, **kwargs):
++            if not first_request_reached_create.is_set():
++                first_request_reached_create.set()
++                if not allow_first_request_to_continue.wait(timeout=5):
++                    raise AssertionError("Timed out waiting to release the first request.")
++            return original_create_room(*args, **kwargs)
++
++        def issue_create_request(client, room_name):
++            try:
++                response = self._post_create_room(client=client, room_name=room_name)
++                results.append((response.status_code, response.json()))
++            except Exception as exc:  # pragma: no cover - test helper failure path
++                errors.append(exc)
++
++        with patch("rooms.views._lock_guest_session", side_effect=instrumented_lock_guest_session):
++            with patch("rooms.views.Room.objects.create", side_effect=blocking_room_create):
++                first_thread = Thread(
++                    target=issue_create_request,
++                    args=(first_client, "First Room"),
++                )
++                second_thread = Thread(
++                    target=issue_create_request,
++                    args=(second_client, "Second Room"),
++                )
++
++                first_thread.start()
++                self.assertTrue(first_request_reached_create.wait(timeout=5))
++                second_thread.start()
++                self.assertTrue(second_request_attempted_session_lock.wait(timeout=5))
++                allow_first_request_to_continue.set()
++                first_thread.join(timeout=5)
++                second_thread.join(timeout=5)
++
++        if errors:
++            raise errors[0]
++
++        self.assertEqual(Room.objects.count(), 1)
++        self.assertEqual(Player.objects.count(), 1)
++        self.assertCountEqual(
++            [status for status, _payload in results],
++            [201, 409],
++        )
++        created_room = Room.objects.get()
++        conflict_payload = next(
++            payload for status, payload in results if status == 409
++        )
++        self.assertEqual(conflict_payload["join_code"], created_room.join_code)
++        self.assertEqual(conflict_payload["room_url"], f"/rooms/{created_room.join_code}/")
++        self.assertEqual(Player.objects.get().room_id, created_room.id)
++
++
+ class JoinRoomViewTests(TestCase):
+     def setUp(self):
+         self.room = Room.objects.create(
+@@ -332,7 +479,7 @@ class JoinRoomViewTests(TestCase):
+         self.assertEqual(Player.objects.count(), 1)
+         self.assertEqual(response.json()["detail"], "This room is full.")
+ 
+-    def test_join_room_rejects_session_already_assigned_to_another_room(self):
++    def test_join_room_returns_recoverable_conflict_for_valid_other_room_assignment(self):
+         other_room = Room.objects.create(
+             name="Other Room",
+             join_code="ZXCV5678",
+@@ -353,13 +500,53 @@ class JoinRoomViewTests(TestCase):
+         Player.objects.filter(room=other_room).update(session_key=session.session_key)
+ 
+         response = self.post_join_room()
++        response_data = response.json()
+ 
+         self.assertEqual(response.status_code, 409)
+         self.assertEqual(Player.objects.count(), 1)
+         self.assertEqual(
+-            response.json()["detail"],
++            response_data["detail"],
+             "This guest session is already assigned to a room.",
+         )
++        self.assertEqual(response_data["join_code"], other_room.join_code)
++        self.assertEqual(response_data["room_url"], f"/rooms/{other_room.join_code}/")
++
++    @patch("rooms.views._get_room_runtime_redis_client")
++    def test_join_room_ignores_expired_same_session_membership_in_another_room(
++        self,
++        get_redis_client,
++    ):
++        fake_redis = fakeredis.FakeRedis()
++        get_redis_client.return_value = fake_redis
++        session = self.client.session
++        session.save()
++        expired_at = timezone.now() - timedelta(minutes=1)
++        stale_room = Room.objects.create(
++            name="Old Room",
++            join_code="OLDROOM1",
++            visibility=Room.Visibility.PUBLIC,
++        )
++        stale_player = Player.objects.create(
++            room=stale_room,
++            session_key=session.session_key,
++            display_name="Alex",
++            connection_status=Player.ConnectionStatus.DISCONNECTED,
++            session_expires_at=expired_at,
++        )
++        stale_room.host = stale_player
++        stale_room.save(update_fields=["host", "updated_at"])
++
++        response = self._post_join_room_and_execute_on_commit()
++
++        stale_room.refresh_from_db()
++
++        self.assertEqual(response.status_code, 201)
++        self.assertEqual(Player.objects.count(), 1)
++        self.assertFalse(Player.objects.filter(pk=stale_player.id).exists())
++        self.assertEqual(stale_room.status, Room.Status.EMPTY_GRACE)
++        joined_player = Player.objects.get()
++        self.assertEqual(joined_player.room_id, self.room.id)
++        self.assertEqual(response.json()["room_url"], f"/rooms/{self.room.join_code}/")
+ 
+     def test_join_room_returns_404_for_unknown_join_code(self):
+         response = self.post_join_room(join_code="missing1")
+diff --git a/rooms/views.py b/rooms/views.py
+index 3e43b12..99f2d22 100644
+--- a/rooms/views.py
++++ b/rooms/views.py
+@@ -4,6 +4,7 @@ import string
+ 
+ from django import forms
+ from django.conf import settings
++from django.contrib.sessions.models import Session
+ from django.db import transaction
+ from django.db.models import Count
+ from django.db.utils import IntegrityError
+@@ -18,6 +19,7 @@ from rooms.models import Player, Room
+ from rooms.services import (
+     delete_room_if_empty_grace_expired,
+     get_empty_room_cleanup_deadline,
++    purge_expired_participants_for_session,
+     restore_room_from_empty_grace,
+     schedule_host_changed_broadcast_after_commit,
+     schedule_room_state_broadcast_after_commit,
+@@ -94,6 +96,26 @@ def _get_or_create_session_key(request):
+     return request.session.session_key
+ 
+ 
++def _lock_guest_session(request, session_key):
++    """Lock the durable Django session row for the current guest identity.
++
++    The MVP uses the Django session as the guest identity anchor. Locking the
++    session row serializes concurrent create/join requests from the same
++    browser so two requests cannot both conclude that no active room ownership
++    exists and then create conflicting participant rows.
++    """
++
++    if not Session.objects.filter(session_key=session_key).exists():
++        # A stale cookie can point at a missing DB session row after expiry
++        # cleanup. Saving recreates durable session state so there is a real row
++        # to lock for the remainder of this request.
++        request.session.save()
++        session_key = request.session.session_key
++
++    Session.objects.select_for_update().get(session_key=session_key)
++    return session_key
++
++
+ def _build_room_response(room, *, status):
+     # Both create and join return the same small payload so clients can treat
+     # the success responses consistently.
+@@ -106,6 +128,25 @@ def _build_room_response(room, *, status):
+     )
+ 
+ 
++def _build_room_assignment_conflict_response(room):
++    """Return a recoverable conflict payload for an already-owned valid room.
++
++    The create/join entry flow still treats this as a conflict because the
++    guest cannot own two rooms at once. Including ``room_url`` lets the browser
++    recover by navigating back into the authoritative existing room instead of
++    leaving the guest stuck on the entry page.
++    """
++
++    return JsonResponse(
++        {
++            "detail": "This guest session is already assigned to a room.",
++            "join_code": room.join_code,
++            "room_url": f"/rooms/{room.join_code}/",
++        },
++        status=409,
++    )
++
++
+ def _serialize_host(player):
+     if player is None:
+         return None
+@@ -202,16 +243,27 @@ def create_room(request):
+         return JsonResponse({"errors": form.errors}, status=400)
+ 
+     session_key = _get_or_create_session_key(request)
+-    # A guest session can only belong to one room at a time.
+-    if Player.objects.filter(session_key=session_key).exists():
+-        return JsonResponse(
+-            {"detail": "This guest session is already assigned to a room."},
+-            status=409,
+-        )
+-
+     cleaned_data = form.cleaned_data
++    room_runtime_redis_client = _get_room_runtime_redis_client()
+ 
+     with transaction.atomic():
++        session_key = _lock_guest_session(request, session_key)
++        # Clean up stale ownership for this browser session before enforcing the
++        # one-room-at-a-time rule. Persistent MySQL rows can survive app
++        # restarts after the underlying Django session has already expired.
++        purge_expired_participants_for_session(
++            redis_client=room_runtime_redis_client,
++            session_key=session_key,
++        )
++        existing_player = (
++            Player.objects.select_related("room")
++            .filter(session_key=session_key)
++            .order_by("created_at", "id")
++            .first()
++        )
++        if existing_player is not None:
++            return _build_room_assignment_conflict_response(existing_player.room)
++
+         room = _create_room_with_unique_join_code(
+             name=cleaned_data["name"],
+             visibility=cleaned_data["visibility"],
+@@ -248,8 +300,18 @@ def join_room(request, join_code):
+ 
+     # The Django session is our guest identity for the MVP.
+     session_key = _get_or_create_session_key(request)
++    room_runtime_redis_client = _get_room_runtime_redis_client()
+ 
+     with transaction.atomic():
++        session_key = _lock_guest_session(request, session_key)
++        # Entry flow cleanup is session-scoped on purpose: remove stale rows
++        # that no longer belong to a live Django session before deciding
++        # whether this request is a valid rejoin or a real cross-room conflict.
++        purge_expired_participants_for_session(
++            redis_client=room_runtime_redis_client,
++            session_key=session_key,
++        )
++
+         try:
+             # Generated join codes are uppercase, so we normalize user input
+             # before querying to allow lowercase requests like "abc12345".
+@@ -272,27 +334,32 @@ def join_room(request, join_code):
+                 # A join that arrives after the grace window should not revive a
+                 # zombie room just because the async cleanup path has not run yet.
+                 delete_room_if_empty_grace_expired(
+-                    redis_client=_get_room_runtime_redis_client(),
++                    redis_client=room_runtime_redis_client,
+                     room_id=room.id,
+                     now=current_time,
+                 )
+                 return JsonResponse({"detail": "Room not found."}, status=404)
+ 
+             restore_room_from_empty_grace(
+-                redis_client=_get_room_runtime_redis_client(),
++                redis_client=room_runtime_redis_client,
+                 room_id=room.id,
+             )
+             room.refresh_from_db()
+ 
+         # If the session already has a Player, we either reuse it for the same room
+         # or reject the request if it belongs to a different room.
+-        player = Player.objects.filter(session_key=session_key).first()
++        player = (
++            Player.objects.select_related("room")
++            .filter(session_key=session_key)
++            .order_by("created_at", "id")
++            .first()
++        )
+         if player is not None:
+             if player.room_id != room.id:
+-                return JsonResponse(
+-                    {"detail": "This guest session is already assigned to a room."},
+-                    status=409,
+-                )
++                # Keep the conflict semantics, but include a recovery target so
++                # the entry page can send the guest back to the room they still
++                # validly own instead of leaving them stuck at a dead end.
++                return _build_room_assignment_conflict_response(player.room)
+ 
+             # Rejoining the same room should not create a duplicate participant or
+             # change the original display name, but it should refresh the session

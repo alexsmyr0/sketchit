@@ -4,24 +4,96 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sketchit Room {{ room.join_code }}</title>
+    <title>Sketchit - Lobby {{ room.join_code }}</title>
     <link rel="stylesheet" href="{% static 'rooms/room_lobby.css' %}">
 </head>
 <body>
-    <main class="card">
-        <h1>{{ room.name }}</h1>
-        <p class="meta">Room code: <strong>{{ room.join_code }}</strong></p>
-        <p class="meta">Status: {{ room.status }}</p>
-        <p class="meta">You are: {{ participant.display_name }}</p>
-        {% if host %}
-            <p class="meta">Host: {{ host.display_name }}</p>
-        {% endif %}
+    <div class="lobby-container">
+        {% csrf_token %}
+        <header class="lobby-header">
+            <h1 class="logo" aria-label="sketchit">
+                <span class="s">s</span><span class="k">k</span><span class="e">e</span><span class="t">t</span><span class="c">c</span><span class="h">h</span><span class="i">i</span><span class="t2">t</span>
+            </h1>
+            <div class="room-info">
+                <h2 id="room-name-display">{{ room.name }}</h2>
+                <span id="room-status-badge" class="badge {{ room.status|lower }}">{{ room.status }}</span>
+            </div>
+        </header>
 
-        <ul class="participants">
-            {% for room_participant in participants %}
-                <li>{{ room_participant.display_name }}</li>
-            {% endfor %}
-        </ul>
-    </main>
+        <main class="lobby-main">
+            <section class="lobby-card participants-card">
+                <h3>Participants</h3>
+                <ul id="participant-list" class="participant-list">
+                    {% for p in participants %}
+                        <li class="participant-item {% if p.id == participant.id %}is-self{% endif %}" data-player-id="{{ p.id }}">
+                            <span class="status-indicator {{ p.connection_status|lower }}" title="{{ p.connection_status }}"></span>
+                            <span class="display-name">{{ p.display_name }}</span>
+                            {% if p.id == host.id %}
+                                <span class="host-badge" title="Room Host">👑</span>
+                            {% endif %}
+                            {% if p.id == participant.id %}
+                                <span class="self-label">(You)</span>
+                            {% endif %}
+                        </li>
+                    {% endfor %}
+                </ul>
+            </section>
+
+            <section class="lobby-card details-card">
+                <div class="join-link-section">
+                    <label for="join-url">Invite Friends</label>
+                    <div class="copy-input-group">
+                        <input id="join-url" type="text" readonly value="{{ request.scheme }}://{{ request.get_host }}{% url 'join-room' room.join_code %}">
+                        <button id="copy-url-button" type="button" class="icon-button" title="Copy Link">📋</button>
+                    </div>
+                </div>
+
+                <hr class="divider">
+
+                <div id="host-controls" class="host-controls"{% if participant.id != host.id %} hidden{% endif %}>
+                    <h3>Lobby Settings</h3>
+                    <p id="host-controls-note" class="hint status-note" hidden></p>
+                    <form id="settings-form" class="settings-form">
+                        {% csrf_token %}
+                        <div class="field">
+                            <label for="edit-room-name">Room Name</label>
+                            <input id="edit-room-name" type="text" value="{{ room.name }}" maxlength="255">
+                        </div>
+                        <div class="field">
+                            <label for="edit-visibility">Visibility</label>
+                            <select id="edit-visibility">
+                                <option value="public" {% if room.visibility == "public" %}selected{% endif %}>Public</option>
+                                <option value="private" {% if room.visibility == "private" %}selected{% endif %}>Private</option>
+                            </select>
+                        </div>
+                        <button id="save-settings-button" type="submit" class="action-button secondary">Save Settings</button>
+                    </form>
+
+                    <div class="start-game-section">
+                        <button id="start-game-button" type="button" class="action-button primary" {% if not can_start_game %}disabled{% endif %}>
+                            Start Game
+                        </button>
+                        <p id="min-players-hint" class="hint" {% if not initial_start_hint %}hidden{% endif %}>
+                            {{ initial_start_hint }}
+                        </p>
+                    </div>
+                </div>
+
+                <div id="guest-view" class="guest-view"{% if participant.id == host.id %} hidden{% endif %}>
+                    <p id="guest-view-message">Waiting for the host to start the game...</p>
+                    <div id="guest-view-loader" class="loader"></div>
+                </div>
+                
+                <p id="lobby-error" class="message error" hidden></p>
+                <p id="lobby-status" class="message status" hidden></p>
+            </section>
+        </main>
+    </div>
+
+    {% comment %} Initial state for the JS client {% endcomment %}
+    {{ room.join_code|json_script:"room-join-code" }}
+    {{ participant.id|json_script:"current-player-id" }}
+
+    <script src="{% static 'rooms/room_lobby.js' %}"></script>
 </body>
 </html>
