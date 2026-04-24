@@ -36,6 +36,9 @@
 
 - Added Time-Based Scoring & Multi-Guesser Round Resolution.
 
+## Apr 21
+
+- Added Drawer Disconnect Grace & Turn Outcome Handling.
 ## Apr 20
 
 - Added near-match, duplicate, and correct-once guess rules.

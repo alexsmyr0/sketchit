@@ -23,7 +23,7 @@ from channels.layers import get_channel_layer
 from core.realtime_groups import player_group_name, room_group_name
 from django.conf import settings
 from django.utils import timezone
-from redis.exceptions import WatchError
+from redis.exceptions import RedisError, WatchError
 
 from games import redis as game_redis
 from games.models import Round
@@ -42,6 +42,9 @@ class _RoomTimerHandles:
     round_thread: threading.Thread | None = None
     intermission_stop_event: threading.Event | None = None
     intermission_thread: threading.Thread | None = None
+    drawer_disconnect_stop_event: threading.Event | None = None
+    drawer_disconnect_thread: threading.Thread | None = None
+    drawer_disconnect_round_id: int | None = None
 
 
 _room_timer_handles_by_join_code: dict[str, _RoomTimerHandles] = {}
@@ -61,6 +64,10 @@ def _intermission_duration_seconds() -> float:
 
 def _timer_tick_interval_seconds() -> float:
     return float(getattr(settings, "SKETCHIT_TIMER_TICK_INTERVAL_SECONDS", 1))
+
+
+def _drawer_disconnect_grace_seconds() -> float:
+    return float(getattr(settings, "SKETCHIT_DRAWER_DISCONNECT_GRACE_SECONDS", 15))
 
 
 def get_redis_client() -> redis.Redis:
@@ -164,6 +171,23 @@ def _cancel_intermission_timer(join_code: str) -> None:
     )
 
 
+def _cancel_drawer_disconnect_timer(join_code: str) -> None:
+    with _room_timer_lock:
+        handles = _room_timer_handles_by_join_code.get(join_code)
+        if handles is None:
+            return
+        stop_event = handles.drawer_disconnect_stop_event
+        thread = handles.drawer_disconnect_thread
+        handles.drawer_disconnect_stop_event = None
+        handles.drawer_disconnect_thread = None
+        handles.drawer_disconnect_round_id = None
+
+    _stop_thread(
+        stop_event=stop_event,
+        thread=thread,
+    )
+
+
 def reset_runtime_state_for_tests() -> None:
     join_codes = []
     with _room_timer_lock:
@@ -172,6 +196,7 @@ def reset_runtime_state_for_tests() -> None:
     for join_code in join_codes:
         _cancel_round_timer(join_code)
         _cancel_intermission_timer(join_code)
+        _cancel_drawer_disconnect_timer(join_code)
 
     with _room_timer_lock:
         _room_timer_handles_by_join_code.clear()
@@ -207,6 +232,7 @@ def teardown_room_runtime(
 
     _cancel_round_timer(join_code)
     _cancel_intermission_timer(join_code)
+    _cancel_drawer_disconnect_timer(join_code)
 
     client = redis_client or get_redis_client()
     _clear_guess_state_keys_for_room(client, join_code)
@@ -226,6 +252,7 @@ def get_timer_status_for_tests(join_code: str) -> dict[str, bool]:
             return {
                 "round_timer_running": False,
                 "intermission_timer_running": False,
+                "drawer_disconnect_timer_running": False,
             }
 
         return {
@@ -235,6 +262,10 @@ def get_timer_status_for_tests(join_code: str) -> dict[str, bool]:
             "intermission_timer_running": bool(
                 handles.intermission_thread is not None
                 and handles.intermission_thread.is_alive()
+            ),
+            "drawer_disconnect_timer_running": bool(
+                handles.drawer_disconnect_thread is not None
+                and handles.drawer_disconnect_thread.is_alive()
             ),
         }
 
@@ -417,6 +448,7 @@ def _intermission_timer_worker(
 
     if result.game_finished:
         client = get_redis_client()
+        _cancel_drawer_disconnect_timer(join_code)
         game_redis.clear_turn_state(client, join_code)
         game_redis.clear_round_payloads(client, join_code)
         game_redis.clear_drawer_pool(client, join_code)
@@ -503,6 +535,92 @@ def _start_intermission_timer(
         handles = _get_or_create_room_timer_handles(join_code)
         handles.intermission_stop_event = stop_event
         handles.intermission_thread = thread
+
+    thread.start()
+
+
+def _drawer_disconnect_timer_worker(
+    *,
+    join_code: str,
+    round_id: int,
+    stop_event: threading.Event,
+) -> None:
+    client = get_redis_client()
+    turn_state = game_redis.get_turn_state(client, join_code)
+    if not turn_state:
+        return
+    if turn_state.get("phase") != "round":
+        return
+    if turn_state.get("round_id") != str(round_id):
+        return
+
+    disconnect_deadline = _parse_iso_datetime(
+        turn_state.get("drawer_disconnect_deadline_at")
+    )
+    if disconnect_deadline is None:
+        return
+
+    wait_seconds = max(0.0, (disconnect_deadline - timezone.now()).total_seconds())
+    if wait_seconds > 0 and stop_event.wait(wait_seconds):
+        return
+
+    if stop_event.is_set():
+        return
+
+    latest_turn_state = game_redis.get_turn_state(client, join_code)
+    if not latest_turn_state:
+        return
+    if latest_turn_state.get("phase") != "round":
+        return
+    if latest_turn_state.get("round_id") != str(round_id):
+        return
+
+    latest_disconnect_deadline = _parse_iso_datetime(
+        latest_turn_state.get("drawer_disconnect_deadline_at")
+    )
+    if latest_disconnect_deadline is None:
+        return
+    if latest_disconnect_deadline > timezone.now():
+        # Deadline moved forward unexpectedly; caller should own any re-arm.
+        return
+
+    from games.services import complete_round_due_to_drawer_disconnect
+
+    complete_round_due_to_drawer_disconnect(round_id)
+
+
+def _start_drawer_disconnect_timer(
+    *,
+    join_code: str,
+    round_id: int,
+) -> None:
+    with _room_timer_lock:
+        handles = _get_or_create_room_timer_handles(join_code)
+        old_stop_event = handles.drawer_disconnect_stop_event
+        old_thread = handles.drawer_disconnect_thread
+        handles.drawer_disconnect_stop_event = None
+        handles.drawer_disconnect_thread = None
+        handles.drawer_disconnect_round_id = None
+
+    _stop_thread(stop_event=old_stop_event, thread=old_thread)
+
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_drawer_disconnect_timer_worker,
+        kwargs={
+            "join_code": join_code,
+            "round_id": round_id,
+            "stop_event": stop_event,
+        },
+        daemon=True,
+        name=f"drawer-disconnect-timer-{join_code}-{round_id}",
+    )
+
+    with _room_timer_lock:
+        handles = _get_or_create_room_timer_handles(join_code)
+        handles.drawer_disconnect_stop_event = stop_event
+        handles.drawer_disconnect_thread = thread
+        handles.drawer_disconnect_round_id = round_id
 
     thread.start()
 
@@ -620,11 +738,37 @@ def _build_round_state_payload(turn_state: dict[str, str]) -> dict | None:
     if completed_round_sequence is not None:
         payload["completed_round_sequence"] = completed_round_sequence
 
+    drawer_disconnect_deadline_at = _parse_iso_datetime(
+        turn_state.get("drawer_disconnect_deadline_at")
+    )
+    if drawer_disconnect_deadline_at is not None:
+        payload["drawer_disconnect_deadline_at"] = (
+            drawer_disconnect_deadline_at.isoformat()
+        )
+        payload["drawer_disconnect_remaining_seconds"] = _remaining_seconds(
+            drawer_disconnect_deadline_at
+        )
+
     ended_at_raw = turn_state.get("ended_at")
     if ended_at_raw:
         payload["ended_at"] = ended_at_raw
 
     return payload
+
+
+def _broadcast_round_state_from_turn_state(join_code: str) -> None:
+    client = get_redis_client()
+    turn_state = game_redis.get_turn_state(client, join_code)
+    if not turn_state:
+        return
+    round_state_payload = _build_round_state_payload(turn_state)
+    if round_state_payload is None:
+        return
+    broadcast_room_event(
+        join_code,
+        "round.state",
+        round_state_payload,
+    )
 
 
 def get_sync_events_for_player(join_code: str, player_id: int) -> list[dict]:
@@ -739,6 +883,77 @@ def get_sync_events_for_player(join_code: str, player_id: int) -> list[dict]:
     return events
 
 
+def handle_participant_disconnected(*, join_code: str, participant_id: int) -> None:
+    """Start drawer-disconnect grace when the active drawer disconnects."""
+    if not _runtime_enabled():
+        return
+
+    try:
+        client = get_redis_client()
+        turn_state = game_redis.get_turn_state(client, join_code)
+    except (RedisError, OSError):
+        return
+
+    if turn_state.get("phase") != "round":
+        return
+
+    round_id = _parse_int(turn_state.get("round_id"))
+    drawer_participant_id = _parse_int(turn_state.get("drawer_participant_id"))
+    if round_id is None or drawer_participant_id is None:
+        return
+    if drawer_participant_id != participant_id:
+        return
+    if turn_state.get("drawer_disconnect_deadline_at"):
+        return
+
+    grace_deadline = timezone.now() + timedelta(seconds=_drawer_disconnect_grace_seconds())
+    game_redis.update_turn_state_fields(
+        client,
+        join_code,
+        {
+            "status": "drawer_disconnected_grace",
+            "drawer_disconnect_deadline_at": grace_deadline.isoformat(),
+        },
+    )
+    _start_drawer_disconnect_timer(
+        join_code=join_code,
+        round_id=round_id,
+    )
+    _broadcast_round_state_from_turn_state(join_code)
+
+
+def handle_participant_reconnected(*, join_code: str, participant_id: int) -> None:
+    """Resume an active round if the disconnected drawer reconnects in time."""
+    if not _runtime_enabled():
+        return
+
+    try:
+        client = get_redis_client()
+        turn_state = game_redis.get_turn_state(client, join_code)
+    except (RedisError, OSError):
+        return
+
+    if turn_state.get("phase") != "round":
+        return
+
+    drawer_participant_id = _parse_int(turn_state.get("drawer_participant_id"))
+    if drawer_participant_id is None or drawer_participant_id != participant_id:
+        return
+    if not turn_state.get("drawer_disconnect_deadline_at"):
+        return
+
+    game_redis.update_turn_state_fields(
+        client,
+        join_code,
+        {
+            "status": "drawing",
+            "drawer_disconnect_deadline_at": "",
+        },
+    )
+    _cancel_drawer_disconnect_timer(join_code)
+    _broadcast_round_state_from_turn_state(join_code)
+
+
 def start_round_runtime(round_id: int) -> None:
     if not _runtime_enabled():
         return
@@ -783,6 +998,7 @@ def start_round_runtime(round_id: int) -> None:
             "correct_guesser_ids": json.dumps([]),
             "round_timer_sequence": "0",
             "intermission_timer_sequence": "0",
+            "drawer_disconnect_deadline_at": "",
             "last_timer_server_timestamp": now_iso,
         },
     )
@@ -796,6 +1012,7 @@ def start_round_runtime(round_id: int) -> None:
     game_redis.clear_deadline(client, join_code, "intermission_end")
 
     _cancel_intermission_timer(join_code)
+    _cancel_drawer_disconnect_timer(join_code)
     _start_round_timer(join_code=join_code, round_id=round.id, deadline_at=deadline_at)
 
     broadcast_room_event(
@@ -900,11 +1117,13 @@ def start_intermission(
     completed_round_sequence: int,
     ended_at_iso: str,
     completion_reason: str,
+    completion_status: str,
 ) -> None:
     if not _runtime_enabled():
         return
 
     _cancel_round_timer(join_code)
+    _cancel_drawer_disconnect_timer(join_code)
     deadline_at = timezone.now() + timedelta(seconds=_intermission_duration_seconds())
     now_iso = timezone.now().isoformat()
 
@@ -932,6 +1151,7 @@ def start_intermission(
             "correct_guesser_ids": correct_guesser_ids,
             "round_timer_sequence": round_timer_sequence,
             "intermission_timer_sequence": "0",
+            "drawer_disconnect_deadline_at": "",
             "last_timer_server_timestamp": now_iso,
         },
     )
@@ -944,7 +1164,7 @@ def start_intermission(
         "round.ended",
         {
             "round_id": completed_round_id,
-            "status": "completed",
+            "status": completion_status,
             "reason": completion_reason,
             "ended_at": ended_at_iso,
             "server_timestamp": timezone.now().isoformat(),

@@ -24,6 +24,7 @@ from games.services import (
     start_game_for_room,
 )
 from rooms.models import Player, Room
+from rooms.services import leave_participant
 from words.models import Word, WordPack, WordPackEntry
 
 
@@ -176,6 +177,7 @@ class RoomRuntimeTeardownTests(SimpleTestCase):
             {
                 "round_timer_running": False,
                 "intermission_timer_running": False,
+                "drawer_disconnect_timer_running": False,
             },
         )
         self.assertEqual(game_redis.get_turn_state(self.redis_client, join_code), {})
@@ -1522,6 +1524,275 @@ class RoundTimerCoordinatorTests(TransactionTestCase):
         ]
         self.assertTrue(ended_events)
         self.assertEqual(ended_events[-1]["reason"], "all_guessers_correct")
+
+    @override_settings(
+        SKETCHIT_ROUND_DURATION_SECONDS=5,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=1,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.05,
+        SKETCHIT_DRAWER_DISCONNECT_GRACE_SECONDS=0.25,
+    )
+    def test_drawer_disconnect_grace_expiry_ends_round_with_drawer_disconnected_status(self):
+        started_game = start_game_for_room(self.room)
+        first_round = started_game.first_round
+        drawer_id = first_round.drawer_participant_id
+        self.assertIsNotNone(drawer_id)
+
+        game_runtime.handle_participant_disconnected(
+            join_code=self.room.join_code,
+            participant_id=drawer_id,
+        )
+
+        def _grace_state_published() -> bool:
+            return any(
+                payload.get("round_id") == first_round.id
+                and payload.get("status") == "drawer_disconnected_grace"
+                for payload in self._event_payloads("round.state")
+            )
+
+        self._wait_for(_grace_state_published, timeout_seconds=2)
+
+        def _round_ended_with_drawer_disconnected() -> bool:
+            first_round.refresh_from_db()
+            return first_round.status == RoundStatus.DRAWER_DISCONNECTED
+
+        self._wait_for(_round_ended_with_drawer_disconnected, timeout_seconds=3)
+
+        ended_payloads = [
+            payload
+            for payload in self._event_payloads("round.ended")
+            if payload.get("round_id") == first_round.id
+        ]
+        self.assertTrue(ended_payloads)
+        self.assertEqual(ended_payloads[-1]["reason"], "drawer_disconnected")
+        self.assertEqual(
+            ended_payloads[-1]["status"],
+            RoundStatus.DRAWER_DISCONNECTED,
+        )
+
+        turn_state = game_redis.get_turn_state(self.fake_redis, self.room.join_code)
+        self.assertEqual(turn_state.get("phase"), "intermission")
+        self.assertEqual(turn_state.get("round_id"), str(first_round.id))
+
+    @override_settings(
+        SKETCHIT_ROUND_DURATION_SECONDS=3,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=1,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.05,
+        SKETCHIT_DRAWER_DISCONNECT_GRACE_SECONDS=0.4,
+    )
+    def test_drawer_reconnect_before_grace_deadline_keeps_round_active(self):
+        started_game = start_game_for_room(self.room)
+        first_round = started_game.first_round
+        drawer_id = first_round.drawer_participant_id
+        self.assertIsNotNone(drawer_id)
+
+        game_runtime.handle_participant_disconnected(
+            join_code=self.room.join_code,
+            participant_id=drawer_id,
+        )
+
+        def _grace_started() -> bool:
+            turn_state = game_redis.get_turn_state(self.fake_redis, self.room.join_code)
+            return (
+                turn_state.get("status") == "drawer_disconnected_grace"
+                and bool(turn_state.get("drawer_disconnect_deadline_at"))
+            )
+
+        self._wait_for(_grace_started, timeout_seconds=2)
+
+        game_runtime.handle_participant_reconnected(
+            join_code=self.room.join_code,
+            participant_id=drawer_id,
+        )
+
+        def _grace_cleared() -> bool:
+            turn_state = game_redis.get_turn_state(self.fake_redis, self.room.join_code)
+            return (
+                turn_state.get("status") == "drawing"
+                and not turn_state.get("drawer_disconnect_deadline_at")
+            )
+
+        self._wait_for(_grace_cleared, timeout_seconds=2)
+
+        first_round.refresh_from_db()
+        self.assertIsNone(first_round.status)
+        self.assertIsNone(first_round.ended_at)
+
+        ended_reasons = [
+            payload["reason"]
+            for payload in self._event_payloads("round.ended")
+            if payload["round_id"] == first_round.id
+        ]
+        self.assertNotIn("drawer_disconnected", ended_reasons)
+
+    @override_settings(
+        SKETCHIT_ROUND_DURATION_SECONDS=5,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=1,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.05,
+        SKETCHIT_DRAWER_DISCONNECT_GRACE_SECONDS=0.5,
+    )
+    def test_drawer_second_disconnect_in_same_round_starts_new_grace_window(self):
+        started_game = start_game_for_room(self.room)
+        first_round = started_game.first_round
+        drawer_id = first_round.drawer_participant_id
+        self.assertIsNotNone(drawer_id)
+
+        game_runtime.handle_participant_disconnected(
+            join_code=self.room.join_code,
+            participant_id=drawer_id,
+        )
+
+        def _first_grace_started() -> bool:
+            turn_state = game_redis.get_turn_state(self.fake_redis, self.room.join_code)
+            return (
+                turn_state.get("status") == "drawer_disconnected_grace"
+                and bool(turn_state.get("drawer_disconnect_deadline_at"))
+            )
+
+        self._wait_for(_first_grace_started, timeout_seconds=2)
+        first_deadline = game_redis.get_turn_state(
+            self.fake_redis,
+            self.room.join_code,
+        ).get("drawer_disconnect_deadline_at")
+        self.assertTrue(first_deadline)
+
+        game_runtime.handle_participant_reconnected(
+            join_code=self.room.join_code,
+            participant_id=drawer_id,
+        )
+
+        def _first_grace_cleared() -> bool:
+            turn_state = game_redis.get_turn_state(self.fake_redis, self.room.join_code)
+            return (
+                turn_state.get("status") == "drawing"
+                and not turn_state.get("drawer_disconnect_deadline_at")
+            )
+
+        self._wait_for(_first_grace_cleared, timeout_seconds=2)
+
+        game_runtime.handle_participant_disconnected(
+            join_code=self.room.join_code,
+            participant_id=drawer_id,
+        )
+
+        def _second_grace_started() -> bool:
+            turn_state = game_redis.get_turn_state(self.fake_redis, self.room.join_code)
+            return (
+                turn_state.get("status") == "drawer_disconnected_grace"
+                and bool(turn_state.get("drawer_disconnect_deadline_at"))
+            )
+
+        self._wait_for(_second_grace_started, timeout_seconds=2)
+        second_deadline = game_redis.get_turn_state(
+            self.fake_redis,
+            self.room.join_code,
+        ).get("drawer_disconnect_deadline_at")
+        self.assertTrue(second_deadline)
+        self.assertNotEqual(second_deadline, first_deadline)
+
+        game_runtime.handle_participant_reconnected(
+            join_code=self.room.join_code,
+            participant_id=drawer_id,
+        )
+        self._wait_for(_first_grace_cleared, timeout_seconds=2)
+
+        first_round.refresh_from_db()
+        self.assertIsNone(first_round.status)
+        self.assertIsNone(first_round.ended_at)
+
+    @override_settings(
+        SKETCHIT_ROUND_DURATION_SECONDS=5,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=1,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.05,
+        SKETCHIT_DRAWER_DISCONNECT_GRACE_SECONDS=0.5,
+    )
+    def test_non_drawer_disconnect_during_drawer_grace_does_not_reset_or_end_round(self):
+        started_game = start_game_for_room(self.room)
+        first_round = started_game.first_round
+        drawer_id = first_round.drawer_participant_id
+        self.assertIsNotNone(drawer_id)
+        non_drawer_id = self.member.id if drawer_id == self.host.id else self.host.id
+
+        game_runtime.handle_participant_disconnected(
+            join_code=self.room.join_code,
+            participant_id=drawer_id,
+        )
+
+        def _grace_started() -> bool:
+            turn_state = game_redis.get_turn_state(self.fake_redis, self.room.join_code)
+            return (
+                turn_state.get("status") == "drawer_disconnected_grace"
+                and bool(turn_state.get("drawer_disconnect_deadline_at"))
+            )
+
+        self._wait_for(_grace_started, timeout_seconds=2)
+        turn_state_before = game_redis.get_turn_state(self.fake_redis, self.room.join_code)
+        grace_deadline_before = turn_state_before.get("drawer_disconnect_deadline_at")
+        self.assertTrue(grace_deadline_before)
+
+        game_runtime.handle_participant_disconnected(
+            join_code=self.room.join_code,
+            participant_id=non_drawer_id,
+        )
+
+        turn_state_after = game_redis.get_turn_state(self.fake_redis, self.room.join_code)
+        self.assertEqual(turn_state_after.get("status"), "drawer_disconnected_grace")
+        self.assertEqual(
+            turn_state_after.get("drawer_disconnect_deadline_at"),
+            grace_deadline_before,
+        )
+
+        game_runtime.handle_participant_reconnected(
+            join_code=self.room.join_code,
+            participant_id=drawer_id,
+        )
+
+        def _grace_cleared() -> bool:
+            turn_state = game_redis.get_turn_state(self.fake_redis, self.room.join_code)
+            return (
+                turn_state.get("status") == "drawing"
+                and not turn_state.get("drawer_disconnect_deadline_at")
+            )
+
+        self._wait_for(_grace_cleared, timeout_seconds=2)
+
+        first_round.refresh_from_db()
+        self.assertIsNone(first_round.status)
+        self.assertIsNone(first_round.ended_at)
+
+    @override_settings(
+        SKETCHIT_ROUND_DURATION_SECONDS=5,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=1,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.05,
+        SKETCHIT_DRAWER_DISCONNECT_GRACE_SECONDS=0.25,
+    )
+    def test_drawer_leaving_room_triggers_disconnect_grace_and_drawer_disconnected_outcome(self):
+        started_game = start_game_for_room(self.room)
+        first_round = started_game.first_round
+        drawer_id = first_round.drawer_participant_id
+        self.assertIsNotNone(drawer_id)
+
+        leave_participant(
+            redis_client=self.fake_redis,
+            player_id=drawer_id,
+        )
+
+        def _round_ended_with_drawer_disconnected() -> bool:
+            first_round.refresh_from_db()
+            return first_round.status == RoundStatus.DRAWER_DISCONNECTED
+
+        self._wait_for(_round_ended_with_drawer_disconnected, timeout_seconds=3)
+
+        ended_payloads = [
+            payload
+            for payload in self._event_payloads("round.ended")
+            if payload.get("round_id") == first_round.id
+        ]
+        self.assertTrue(ended_payloads)
+        self.assertEqual(ended_payloads[-1]["reason"], "drawer_disconnected")
+        self.assertEqual(
+            ended_payloads[-1]["status"],
+            RoundStatus.DRAWER_DISCONNECTED,
+        )
 
     @override_settings(SKETCHIT_ROUND_DURATION_SECONDS=3)
     def test_redis_eligible_guesser_set_stays_stable_after_guesser_disconnect(self):

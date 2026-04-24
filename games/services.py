@@ -413,6 +413,7 @@ def _schedule_round_intermission_start(
     completed_round_sequence: int,
     ended_at_iso: str,
     completion_reason: str,
+    completion_status: str,
 ) -> None:
     from games import runtime as game_runtime
 
@@ -422,6 +423,7 @@ def _schedule_round_intermission_start(
         completed_round_sequence=completed_round_sequence,
         ended_at_iso=ended_at_iso,
         completion_reason=completion_reason,
+        completion_status=completion_status,
     )
 
 
@@ -431,6 +433,7 @@ def _handle_round_completed(locked_round: Round, *, completion_reason: str) -> N
     room_redis.clear_canvas_snapshot(client, locked_round.game.room.join_code)
 
     if _runtime_coordinator_enabled():
+        completion_status = locked_round.status or RoundStatus.COMPLETED
         transaction.on_commit(
             lambda: _schedule_round_intermission_start(
                 join_code=locked_round.game.room.join_code,
@@ -438,6 +441,7 @@ def _handle_round_completed(locked_round: Round, *, completion_reason: str) -> N
                 completed_round_sequence=locked_round.sequence_number,
                 ended_at_iso=locked_round.ended_at.isoformat(),
                 completion_reason=completion_reason,
+                completion_status=completion_status,
             )
         )
         return
@@ -626,6 +630,23 @@ def complete_round_due_to_timer(round_id: int) -> bool:
     locked_round.ended_at = timezone.now()
     locked_round.save(update_fields=["status", "ended_at", "updated_at"])
     _handle_round_completed(locked_round, completion_reason="timer_expired")
+    return True
+
+
+@transaction.atomic
+def complete_round_due_to_drawer_disconnect(round_id: int) -> bool:
+    locked_round = (
+        Round.objects.select_for_update()
+        .select_related("game__room")
+        .get(pk=round_id)
+    )
+    if locked_round.status is not None or locked_round.ended_at is not None:
+        return False
+
+    locked_round.status = RoundStatus.DRAWER_DISCONNECTED
+    locked_round.ended_at = timezone.now()
+    locked_round.save(update_fields=["status", "ended_at", "updated_at"])
+    _handle_round_completed(locked_round, completion_reason="drawer_disconnected")
     return True
 
 
