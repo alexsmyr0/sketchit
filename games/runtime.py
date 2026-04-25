@@ -42,6 +42,9 @@ class _RoomTimerHandles:
     round_thread: threading.Thread | None = None
     intermission_stop_event: threading.Event | None = None
     intermission_thread: threading.Thread | None = None
+    leaderboard_stop_event: threading.Event | None = None
+    leaderboard_thread: threading.Thread | None = None
+    leaderboard_game_id: int | None = None
     drawer_disconnect_stop_event: threading.Event | None = None
     drawer_disconnect_thread: threading.Thread | None = None
     drawer_disconnect_round_id: int | None = None
@@ -60,6 +63,12 @@ def _round_duration_seconds() -> float:
 
 def _intermission_duration_seconds() -> float:
     return float(getattr(settings, "SKETCHIT_INTERMISSION_DURATION_SECONDS", 10))
+
+
+def _leaderboard_duration_seconds() -> float:
+    """Return the A8 leaderboard cooldown duration in seconds."""
+
+    return float(getattr(settings, "SKETCHIT_LEADERBOARD_DURATION_SECONDS", 20))
 
 
 def _timer_tick_interval_seconds() -> float:
@@ -171,6 +180,25 @@ def _cancel_intermission_timer(join_code: str) -> None:
     )
 
 
+def _cancel_leaderboard_timer(join_code: str) -> None:
+    """Stop the leaderboard cooldown worker for one room, if present."""
+
+    with _room_timer_lock:
+        handles = _room_timer_handles_by_join_code.get(join_code)
+        if handles is None:
+            return
+        stop_event = handles.leaderboard_stop_event
+        thread = handles.leaderboard_thread
+        handles.leaderboard_stop_event = None
+        handles.leaderboard_thread = None
+        handles.leaderboard_game_id = None
+
+    _stop_thread(
+        stop_event=stop_event,
+        thread=thread,
+    )
+
+
 def _cancel_drawer_disconnect_timer(join_code: str) -> None:
     with _room_timer_lock:
         handles = _room_timer_handles_by_join_code.get(join_code)
@@ -196,6 +224,7 @@ def reset_runtime_state_for_tests() -> None:
     for join_code in join_codes:
         _cancel_round_timer(join_code)
         _cancel_intermission_timer(join_code)
+        _cancel_leaderboard_timer(join_code)
         _cancel_drawer_disconnect_timer(join_code)
 
     with _room_timer_lock:
@@ -232,6 +261,7 @@ def teardown_room_runtime(
 
     _cancel_round_timer(join_code)
     _cancel_intermission_timer(join_code)
+    _cancel_leaderboard_timer(join_code)
     _cancel_drawer_disconnect_timer(join_code)
 
     client = redis_client or get_redis_client()
@@ -241,6 +271,7 @@ def teardown_room_runtime(
     game_redis.clear_round_payloads(client, join_code)
     game_redis.clear_deadline(client, join_code, "round_end")
     game_redis.clear_deadline(client, join_code, "intermission_end")
+    game_redis.clear_deadline(client, join_code, "leaderboard_end")
     if include_cleanup_deadline:
         game_redis.clear_deadline(client, join_code, "cleanup")
 
@@ -252,6 +283,7 @@ def get_timer_status_for_tests(join_code: str) -> dict[str, bool]:
             return {
                 "round_timer_running": False,
                 "intermission_timer_running": False,
+                "leaderboard_timer_running": False,
                 "drawer_disconnect_timer_running": False,
             }
 
@@ -262,6 +294,10 @@ def get_timer_status_for_tests(join_code: str) -> dict[str, bool]:
             "intermission_timer_running": bool(
                 handles.intermission_thread is not None
                 and handles.intermission_thread.is_alive()
+            ),
+            "leaderboard_timer_running": bool(
+                handles.leaderboard_thread is not None
+                and handles.leaderboard_thread.is_alive()
             ),
             "drawer_disconnect_timer_running": bool(
                 handles.drawer_disconnect_thread is not None
@@ -447,21 +483,10 @@ def _intermission_timer_worker(
         return
 
     if result.game_finished:
-        client = get_redis_client()
-        _cancel_drawer_disconnect_timer(join_code)
-        game_redis.clear_turn_state(client, join_code)
-        game_redis.clear_round_payloads(client, join_code)
-        game_redis.clear_drawer_pool(client, join_code)
-        game_redis.clear_deadline(client, join_code, "round_end")
-        game_redis.clear_deadline(client, join_code, "intermission_end")
-        broadcast_room_event(
-            join_code,
-            "game.finished",
-            {
-                "game_id": result.game_id,
-                "status": "finished",
-                "server_timestamp": timezone.now().isoformat(),
-            },
+        start_leaderboard_cooldown(
+            join_code=join_code,
+            game_id=result.game_id,
+            completed_round_id=completed_round_id,
         )
 
 
@@ -535,6 +560,166 @@ def _start_intermission_timer(
         handles = _get_or_create_room_timer_handles(join_code)
         handles.intermission_stop_event = stop_event
         handles.intermission_thread = thread
+
+    thread.start()
+
+
+def _build_scoreboard_state_payload(
+    *,
+    game_id: int,
+    deadline_at: datetime,
+    tick_sequence: int,
+) -> dict:
+    """Build the authoritative A8 leaderboard payload from live DB state."""
+
+    from games.services import build_game_leaderboard_snapshot
+
+    leaderboard_snapshot = build_game_leaderboard_snapshot(game_id)
+    return {
+        **leaderboard_snapshot.as_payload(),
+        "phase": "leaderboard",
+        "deadline_at": deadline_at.isoformat(),
+        "remaining_seconds": _remaining_seconds(deadline_at),
+        "tick_sequence": tick_sequence,
+        "server_timestamp": timezone.now().isoformat(),
+    }
+
+
+def _broadcast_scoreboard_state_from_turn_state(join_code: str) -> None:
+    """Broadcast the current leaderboard snapshot for one room, if active."""
+
+    client = get_redis_client()
+    turn_state = game_redis.get_turn_state(client, join_code)
+    if turn_state.get("phase") != "leaderboard":
+        return
+
+    game_id = _parse_int(turn_state.get("game_id"))
+    deadline_at = _parse_iso_datetime(turn_state.get("deadline_at"))
+    if game_id is None or deadline_at is None:
+        return
+
+    broadcast_room_event(
+        join_code,
+        "scoreboard.state",
+        _build_scoreboard_state_payload(
+            game_id=game_id,
+            deadline_at=deadline_at,
+            tick_sequence=_parse_int(turn_state.get("leaderboard_timer_sequence")) or 0,
+        ),
+    )
+
+
+def _leaderboard_timer_worker(
+    *,
+    join_code: str,
+    game_id: int,
+    deadline_at: datetime,
+    stop_event: threading.Event,
+) -> None:
+    """Tick the A8 leaderboard cooldown and advance the room afterward."""
+
+    tick_interval_seconds = max(_timer_tick_interval_seconds(), 0.05)
+
+    while not stop_event.is_set():
+        remaining = _remaining_seconds(deadline_at)
+        tick_data = _next_timer_tick(
+            join_code=join_code,
+            expected_phase="leaderboard",
+            expected_round_id=game_id,
+            sequence_field="leaderboard_timer_sequence",
+        )
+        if tick_data is None:
+            return
+        tick_sequence, _server_timestamp = tick_data
+
+        broadcast_room_event(
+            join_code,
+            "scoreboard.state",
+            _build_scoreboard_state_payload(
+                game_id=game_id,
+                deadline_at=deadline_at,
+                tick_sequence=tick_sequence,
+            ),
+        )
+        if remaining <= 0:
+            break
+
+        seconds_until_deadline = max(
+            0.0, (deadline_at - timezone.now()).total_seconds()
+        )
+        wait_seconds = min(tick_interval_seconds, seconds_until_deadline)
+        if wait_seconds <= 0:
+            continue
+        if stop_event.wait(wait_seconds):
+            return
+
+    if stop_event.is_set():
+        return
+
+    from games.models import Game
+    from games.services import complete_leaderboard_cooldown_for_room
+    from rooms.services import schedule_room_state_broadcast_after_commit
+
+    game = Game.objects.select_related("room").filter(pk=game_id).first()
+    if game is None:
+        teardown_room_runtime(join_code)
+        return
+
+    result = complete_leaderboard_cooldown_for_room(game.room_id)
+    if result.restarted and result.next_round_id is not None:
+        # The cooldown transaction already created the next game/round. We
+        # re-emit room.state immediately so clients see any spectator->playing
+        # promotion before the next round payload arrives.
+        schedule_room_state_broadcast_after_commit(
+            join_code=join_code,
+            room_id=game.room_id,
+        )
+        start_round_runtime(result.next_round_id)
+        return
+
+    schedule_room_state_broadcast_after_commit(
+        join_code=join_code,
+        room_id=game.room_id,
+    )
+    teardown_room_runtime(join_code)
+
+
+def _start_leaderboard_timer(
+    *,
+    join_code: str,
+    game_id: int,
+    deadline_at: datetime,
+) -> None:
+    """Start or replace the leaderboard cooldown worker for one room."""
+
+    with _room_timer_lock:
+        handles = _get_or_create_room_timer_handles(join_code)
+        old_stop_event = handles.leaderboard_stop_event
+        old_thread = handles.leaderboard_thread
+        handles.leaderboard_stop_event = None
+        handles.leaderboard_thread = None
+        handles.leaderboard_game_id = None
+
+    _stop_thread(stop_event=old_stop_event, thread=old_thread)
+
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_leaderboard_timer_worker,
+        kwargs={
+            "join_code": join_code,
+            "game_id": game_id,
+            "deadline_at": deadline_at,
+            "stop_event": stop_event,
+        },
+        daemon=True,
+        name=f"leaderboard-timer-{join_code}-{game_id}",
+    )
+
+    with _room_timer_lock:
+        handles = _get_or_create_room_timer_handles(join_code)
+        handles.leaderboard_stop_event = stop_event
+        handles.leaderboard_thread = thread
+        handles.leaderboard_game_id = game_id
 
     thread.start()
 
@@ -780,6 +965,23 @@ def get_sync_events_for_player(join_code: str, player_id: int) -> list[dict]:
     if not turn_state:
         return []
 
+    if turn_state.get("phase") == "leaderboard":
+        game_id = _parse_int(turn_state.get("game_id"))
+        deadline_at = _parse_iso_datetime(turn_state.get("deadline_at"))
+        if game_id is None or deadline_at is None:
+            return []
+
+        return [
+            {
+                "type": "scoreboard.state",
+                "payload": _build_scoreboard_state_payload(
+                    game_id=game_id,
+                    deadline_at=deadline_at,
+                    tick_sequence=_parse_int(turn_state.get("leaderboard_timer_sequence")) or 0,
+                ),
+            }
+        ]
+
     round_state_payload = _build_round_state_payload(turn_state)
     if round_state_payload is None:
         return []
@@ -1010,8 +1212,10 @@ def start_round_runtime(round_id: int) -> None:
     )
     game_redis.set_deadline(client, join_code, "round_end", deadline_at.isoformat())
     game_redis.clear_deadline(client, join_code, "intermission_end")
+    game_redis.clear_deadline(client, join_code, "leaderboard_end")
 
     _cancel_intermission_timer(join_code)
+    _cancel_leaderboard_timer(join_code)
     _cancel_drawer_disconnect_timer(join_code)
     _start_round_timer(join_code=join_code, round_id=round.id, deadline_at=deadline_at)
 
@@ -1123,6 +1327,7 @@ def start_intermission(
         return
 
     _cancel_round_timer(join_code)
+    _cancel_leaderboard_timer(join_code)
     _cancel_drawer_disconnect_timer(join_code)
     deadline_at = timezone.now() + timedelta(seconds=_intermission_duration_seconds())
     now_iso = timezone.now().isoformat()
@@ -1151,6 +1356,7 @@ def start_intermission(
             "correct_guesser_ids": correct_guesser_ids,
             "round_timer_sequence": round_timer_sequence,
             "intermission_timer_sequence": "0",
+            "leaderboard_timer_sequence": "0",
             "drawer_disconnect_deadline_at": "",
             "last_timer_server_timestamp": now_iso,
         },
@@ -1158,6 +1364,7 @@ def start_intermission(
     game_redis.clear_round_payloads(client, join_code)
     game_redis.clear_deadline(client, join_code, "round_end")
     game_redis.set_deadline(client, join_code, "intermission_end", deadline_at.isoformat())
+    game_redis.clear_deadline(client, join_code, "leaderboard_end")
 
     broadcast_room_event(
         join_code,
@@ -1186,5 +1393,70 @@ def start_intermission(
     _start_intermission_timer(
         join_code=join_code,
         completed_round_id=completed_round_id,
+        deadline_at=deadline_at,
+    )
+
+
+def start_leaderboard_cooldown(
+    *,
+    join_code: str,
+    game_id: int,
+    completed_round_id: int,
+) -> None:
+    """Enter the A8 leaderboard phase for a finished game.
+
+    The room stays in runtime-managed state during this cooldown so reconnects
+    can still fetch the authoritative leaderboard snapshot and remaining time
+    before the room either auto-restarts or falls back to lobby.
+    """
+
+    if not _runtime_enabled():
+        return
+
+    _cancel_round_timer(join_code)
+    _cancel_intermission_timer(join_code)
+    _cancel_drawer_disconnect_timer(join_code)
+    deadline_at = timezone.now() + timedelta(seconds=_leaderboard_duration_seconds())
+    now_iso = timezone.now().isoformat()
+
+    client = get_redis_client()
+    current_turn_state = game_redis.get_turn_state(client, join_code)
+    completed_round_sequence = current_turn_state.get("completed_round_sequence", "")
+
+    game_redis.set_turn_state(
+        client,
+        join_code,
+        {
+            "phase": "leaderboard",
+            "status": "leaderboard",
+            "game_id": str(game_id),
+            "round_id": str(game_id),
+            "completed_round_id": str(completed_round_id),
+            "completed_round_sequence": completed_round_sequence,
+            "deadline_at": deadline_at.isoformat(),
+            "leaderboard_timer_sequence": "0",
+            "last_timer_server_timestamp": now_iso,
+        },
+    )
+    game_redis.clear_round_payloads(client, join_code)
+    game_redis.clear_drawer_pool(client, join_code)
+    _clear_guess_state_keys_for_room(client, join_code)
+    game_redis.clear_deadline(client, join_code, "round_end")
+    game_redis.clear_deadline(client, join_code, "intermission_end")
+    game_redis.set_deadline(client, join_code, "leaderboard_end", deadline_at.isoformat())
+
+    broadcast_room_event(
+        join_code,
+        "game.finished",
+        {
+            "game_id": game_id,
+            "status": "finished",
+            "server_timestamp": timezone.now().isoformat(),
+        },
+    )
+    _broadcast_scoreboard_state_from_turn_state(join_code)
+    _start_leaderboard_timer(
+        join_code=join_code,
+        game_id=game_id,
         deadline_at=deadline_at,
     )

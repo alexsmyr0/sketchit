@@ -2169,10 +2169,21 @@ class RoundTimerCoordinatorTests(TransactionTestCase):
     @override_settings(
         SKETCHIT_ROUND_DURATION_SECONDS=5,
         SKETCHIT_INTERMISSION_DURATION_SECONDS=0.4,
-        SKETCHIT_LEADERBOARD_DURATION_SECONDS=0.4,
+        SKETCHIT_LEADERBOARD_DURATION_SECONDS=0.8,
         SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.05,
     )
     def test_auto_restart_promotes_connected_spectators_before_next_game_starts(self):
+        # Create the spectator during the leaderboard cooldown, not before the
+        # first game finishes. If we inserted them earlier, A-07 would promote
+        # them at the round-1 transition and the "default two-player game"
+        # helper would no longer represent a two-drawer game.
+        self._finish_default_two_player_game()
+
+        def _scoreboard_state_emitted() -> bool:
+            return bool(self._event_payloads("scoreboard.state"))
+
+        self._wait_for(_scoreboard_state_emitted, timeout_seconds=6)
+
         late_joiner = Player.objects.create(
             room=self.room,
             session_key="timer-late-joiner",
@@ -2181,8 +2192,6 @@ class RoundTimerCoordinatorTests(TransactionTestCase):
             participation_status=Player.ParticipationStatus.SPECTATING,
             session_expires_at=timezone.now() + timedelta(hours=1),
         )
-
-        self._finish_default_two_player_game()
 
         def _second_game_started() -> bool:
             return Game.objects.filter(room=self.room).count() == 2
