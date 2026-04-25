@@ -1323,6 +1323,26 @@ class RoundTimerCoordinatorTests(TransactionTestCase):
 
         self.assertEqual(round.status, RoundStatus.COMPLETED)
 
+    def _finish_default_two_player_game(self) -> Game:
+        """Run the default two-player room through its full first game cycle.
+
+        The default fixture for this test class has exactly two PLAYING,
+        CONNECTED participants. That means the first game should always finish
+        after two completed rounds: one turn per eligible drawer.
+        """
+
+        started_game = start_game_for_room(self.room)
+        game = started_game.game
+        self._complete_round_with_all_guessers(started_game.first_round)
+
+        def _second_round_exists() -> bool:
+            return game.rounds.filter(sequence_number=2).exists()
+
+        self._wait_for(_second_round_exists, timeout_seconds=5)
+        second_round = game.rounds.get(sequence_number=2)
+        self._complete_round_with_all_guessers(second_round)
+        return game
+
     def test_server_timer_expires_round_and_starts_intermission(self):
         started_game = start_game_for_room(self.room)
         first_round = started_game.first_round
@@ -1883,46 +1903,158 @@ class RoundTimerCoordinatorTests(TransactionTestCase):
     @override_settings(
         SKETCHIT_ROUND_DURATION_SECONDS=5,
         SKETCHIT_INTERMISSION_DURATION_SECONDS=0.4,
+        SKETCHIT_LEADERBOARD_DURATION_SECONDS=0.4,
         SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.05,
     )
-    def test_last_round_intermission_broadcasts_game_finished_and_clears_runtime_state(self):
-        started_game = start_game_for_room(self.room)
-        game = started_game.game
-        first_round = started_game.first_round
+    def test_last_round_intermission_starts_leaderboard_cooldown_and_publishes_scoreboard_state(self):
+        game = self._finish_default_two_player_game()
 
-        self._complete_round_with_all_guessers(first_round)
+        def _scoreboard_state_emitted() -> bool:
+            return bool(self._event_payloads("scoreboard.state"))
 
-        def _second_round_exists() -> bool:
-            return game.rounds.filter(sequence_number=2).exists()
-
-        self._wait_for(_second_round_exists, timeout_seconds=5)
-        second_round = game.rounds.get(sequence_number=2)
-        self._complete_round_with_all_guessers(second_round)
+        self._wait_for(_scoreboard_state_emitted, timeout_seconds=6)
 
         def _game_finished() -> bool:
             game.refresh_from_db()
             return game.status == GameStatus.FINISHED
 
-        self._wait_for(_game_finished, timeout_seconds=6)
+        self._wait_for(_game_finished, timeout_seconds=2)
+
+        scoreboard_payload = self._event_payloads("scoreboard.state")[-1]
+        turn_state = game_redis.get_turn_state(self.fake_redis, self.room.join_code)
 
         self.assertIn("game.finished", self._event_types())
-        self.assertEqual(game_redis.get_turn_state(self.fake_redis, self.room.join_code), {})
-        self.assertEqual(game_redis.get_drawer_pool(self.fake_redis, self.room.join_code), set())
-        self.assertIsNone(
-            game_redis.get_round_payload(self.fake_redis, self.room.join_code, "drawer")
+        self.assertEqual(scoreboard_payload["game_id"], game.id)
+        self.assertEqual(scoreboard_payload["phase"], "leaderboard")
+        self.assertIn("deadline_at", scoreboard_payload)
+        self.assertIn("remaining_seconds", scoreboard_payload)
+        self.assertIn("entries", scoreboard_payload)
+        self.assertEqual(turn_state.get("phase"), "leaderboard")
+        self.assertEqual(turn_state.get("game_id"), str(game.id))
+        # A8 changes the post-finish behavior: runtime stays alive during the
+        # leaderboard cooldown instead of being torn down immediately.
+        self.assertNotEqual(turn_state, {})
+
+    @override_settings(
+        SKETCHIT_ROUND_DURATION_SECONDS=5,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=0.4,
+        SKETCHIT_LEADERBOARD_DURATION_SECONDS=0.8,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.05,
+    )
+    def test_leaderboard_sync_events_include_authoritative_scoreboard_snapshot(self):
+        game = self._finish_default_two_player_game()
+
+        def _scoreboard_state_emitted() -> bool:
+            return bool(self._event_payloads("scoreboard.state"))
+
+        self._wait_for(_scoreboard_state_emitted, timeout_seconds=6)
+
+        # During the cooldown a reconnecting participant should get the same
+        # authoritative leaderboard snapshot from runtime sync.
+        sync_events = game_runtime.get_sync_events_for_player(
+            self.room.join_code,
+            self.host.id,
         )
-        self.assertIsNone(
-            game_redis.get_round_payload(self.fake_redis, self.room.join_code, "guesser")
+        scoreboard_event = next(
+            event for event in sync_events if event["type"] == "scoreboard.state"
         )
-        self.assertIsNone(
-            game_redis.get_deadline(self.fake_redis, self.room.join_code, "round_end")
+
+        self.assertEqual(scoreboard_event["payload"]["game_id"], game.id)
+        self.assertEqual(scoreboard_event["payload"]["phase"], "leaderboard")
+        self.assertIn("deadline_at", scoreboard_event["payload"])
+        self.assertIn("remaining_seconds", scoreboard_event["payload"])
+        self.assertIn("entries", scoreboard_event["payload"])
+
+    @override_settings(
+        SKETCHIT_ROUND_DURATION_SECONDS=5,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=0.4,
+        SKETCHIT_LEADERBOARD_DURATION_SECONDS=0.4,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.05,
+    )
+    def test_leaderboard_cooldown_auto_starts_fresh_game_and_resets_scores(self):
+        game = self._finish_default_two_player_game()
+
+        def _scoreboard_state_emitted() -> bool:
+            return bool(self._event_payloads("scoreboard.state"))
+
+        self._wait_for(_scoreboard_state_emitted, timeout_seconds=6)
+
+        self.host.refresh_from_db()
+        self.member.refresh_from_db()
+        self.assertGreater(self.host.current_score, 0)
+        self.assertGreater(self.member.current_score, 0)
+
+        def _second_game_started() -> bool:
+            return Game.objects.filter(room=self.room).count() == 2
+
+        self._wait_for(_second_game_started, timeout_seconds=4)
+
+        second_game = Game.objects.filter(room=self.room).order_by("-id").first()
+        self.assertIsNotNone(second_game)
+        self.assertEqual(second_game.status, GameStatus.IN_PROGRESS)
+
+        self.host.refresh_from_db()
+        self.member.refresh_from_db()
+        self.assertEqual(self.host.current_score, 0)
+        self.assertEqual(self.member.current_score, 0)
+        self.assertNotEqual(second_game.id, game.id)
+
+    @override_settings(
+        SKETCHIT_ROUND_DURATION_SECONDS=5,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=0.4,
+        SKETCHIT_LEADERBOARD_DURATION_SECONDS=0.4,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.05,
+    )
+    def test_leaderboard_cooldown_returns_room_to_lobby_when_too_few_players_remain(self):
+        game = self._finish_default_two_player_game()
+
+        def _scoreboard_state_emitted() -> bool:
+            return bool(self._event_payloads("scoreboard.state"))
+
+        self._wait_for(_scoreboard_state_emitted, timeout_seconds=6)
+
+        # Only one eligible player remains once this participant is offline, so
+        # A8 should fall back to the lobby instead of auto-starting a new game.
+        self.member.connection_status = Player.ConnectionStatus.DISCONNECTED
+        self.member.save(update_fields=("connection_status", "updated_at"))
+
+        def _room_returned_to_lobby() -> bool:
+            self.room.refresh_from_db()
+            return self.room.status == Room.Status.LOBBY
+
+        self._wait_for(_room_returned_to_lobby, timeout_seconds=4)
+
+        game.refresh_from_db()
+        self.assertEqual(game.status, GameStatus.FINISHED)
+        self.assertEqual(Game.objects.filter(room=self.room).count(), 1)
+
+    @override_settings(
+        SKETCHIT_ROUND_DURATION_SECONDS=5,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=0.4,
+        SKETCHIT_LEADERBOARD_DURATION_SECONDS=0.4,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.05,
+    )
+    def test_auto_restart_promotes_connected_spectators_before_next_game_starts(self):
+        late_joiner = Player.objects.create(
+            room=self.room,
+            session_key="timer-late-joiner",
+            display_name="Late Joiner",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.SPECTATING,
+            session_expires_at=timezone.now() + timedelta(hours=1),
         )
-        self.assertIsNone(
-            game_redis.get_deadline(
-                self.fake_redis,
-                self.room.join_code,
-                "intermission_end",
-            )
+
+        self._finish_default_two_player_game()
+
+        def _second_game_started() -> bool:
+            return Game.objects.filter(room=self.room).count() == 2
+
+        self._wait_for(_second_game_started, timeout_seconds=6)
+
+        late_joiner.refresh_from_db()
+        self.assertEqual(
+            late_joiner.participation_status,
+            Player.ParticipationStatus.PLAYING,
         )
 
     @override_settings(
