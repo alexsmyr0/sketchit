@@ -422,12 +422,16 @@ def _intermission_timer_worker(
         game_redis.clear_drawer_pool(client, join_code)
         game_redis.clear_deadline(client, join_code, "round_end")
         game_redis.clear_deadline(client, join_code, "intermission_end")
+        leaderboard = _get_leaderboard(join_code)
+        winner = leaderboard[0] if leaderboard else None
         broadcast_room_event(
             join_code,
             "game.finished",
             {
                 "game_id": result.game_id,
                 "status": "finished",
+                "leaderboard": leaderboard,
+                "winner": winner,
                 "server_timestamp": timezone.now().isoformat(),
             },
         )
@@ -588,7 +592,22 @@ def get_round_correctness_state(
     )
 
 
-def _build_round_state_payload(turn_state: dict[str, str]) -> dict | None:
+def _get_leaderboard(join_code: str) -> list[dict]:
+    """Return a list of participants ordered by score."""
+    return [
+        {
+            "id": p.id,
+            "display_name": p.display_name,
+            "current_score": p.current_score,
+            "participation_status": p.participation_status,
+        }
+        for p in Player.objects.filter(room__join_code=join_code).order_by(
+            "-current_score", "created_at"
+        )
+    ]
+
+
+def _build_round_state_payload(join_code: str, turn_state: dict[str, str]) -> dict | None:
     phase = turn_state.get("phase")
     if phase not in {"round", "intermission"}:
         return None
@@ -620,9 +639,12 @@ def _build_round_state_payload(turn_state: dict[str, str]) -> dict | None:
     if completed_round_sequence is not None:
         payload["completed_round_sequence"] = completed_round_sequence
 
-    ended_at_raw = turn_state.get("ended_at")
-    if ended_at_raw:
-        payload["ended_at"] = ended_at_raw
+    ended_at = turn_state.get("ended_at")
+    if ended_at:
+        payload["ended_at"] = ended_at
+
+    # Include leaderboard for intermission rendering
+    payload["leaderboard"] = _get_leaderboard(join_code)
 
     return payload
 
@@ -636,7 +658,7 @@ def get_sync_events_for_player(join_code: str, player_id: int) -> list[dict]:
     if not turn_state:
         return []
 
-    round_state_payload = _build_round_state_payload(turn_state)
+    round_state_payload = _build_round_state_payload(join_code, turn_state)
     if round_state_payload is None:
         return []
 

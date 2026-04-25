@@ -212,6 +212,7 @@ def _serialize_participant_for_room_state(player: Player) -> dict:
         "display_name": player.display_name,
         "connection_status": player.connection_status,
         "participation_status": player.participation_status,
+        "current_score": player.current_score,
     }
 
 
