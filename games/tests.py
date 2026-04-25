@@ -19,6 +19,9 @@ from games.services import (
     GuessEvaluationError,
     StartGameError,
     advance_game_after_intermission,
+    build_game_leaderboard_snapshot,
+    cancel_active_game_for_room,
+    complete_leaderboard_cooldown_for_room,
     complete_round_due_to_timer,
     evaluate_guess_for_round,
     start_game_for_room,
@@ -382,6 +385,25 @@ class StartGameServiceTests(TestCase):
 
         self.assertEqual(round_to_resolve.status, RoundStatus.COMPLETED)
 
+    def _finish_two_player_game(self) -> Game:
+        """Finish a deterministic two-player game for A8 service tests.
+
+        The default spectator from setUp would be promoted after round 1 and
+        extend the game to a third round. These helper-driven A8 tests want the
+        minimal two-drawer case, so we remove that incidental spectator first.
+        """
+
+        if Player.objects.filter(pk=self.spectator.id).exists():
+            self.spectator.delete()
+
+        started_game = start_game_for_room(self.room)
+        game = started_game.game
+        self._resolve_round_with_correct_guess(started_game.first_round)
+        second_round = game.rounds.get(sequence_number=2)
+        self._resolve_round_with_correct_guess(second_round)
+        game.refresh_from_db()
+        return game
+
     def _runtime_redis_client(self):
         return self.fake_redis
 
@@ -554,6 +576,122 @@ class StartGameServiceTests(TestCase):
         self.assertLessEqual(self.host.current_score, 150)
         self.assertGreaterEqual(self.member.current_score, 30)
         self.assertLessEqual(self.member.current_score, 150)
+
+    def test_build_game_leaderboard_snapshot_orders_entries_by_score_then_join_order(self):
+        finished_game = Game.objects.create(
+            room=self.room,
+            status=GameStatus.FINISHED,
+            ended_at=timezone.now(),
+        )
+        self.host.current_score = 25
+        self.host.save(update_fields=("current_score", "updated_at"))
+        self.member.current_score = 60
+        self.member.save(update_fields=("current_score", "updated_at"))
+        self.spectator.current_score = 60
+        self.spectator.save(update_fields=("current_score", "updated_at"))
+
+        snapshot = build_game_leaderboard_snapshot(finished_game.id)
+
+        self.assertEqual(snapshot.game_id, finished_game.id)
+        self.assertEqual(
+            [entry.player_id for entry in snapshot.entries],
+            [self.member.id, self.spectator.id, self.host.id],
+        )
+        self.assertEqual(
+            snapshot.as_payload()["entries"][0],
+            {
+                "player_id": self.member.id,
+                "display_name": self.member.display_name,
+                "current_score": 60,
+            },
+        )
+
+    def test_cancel_active_game_for_room_marks_game_and_active_round_cancelled(self):
+        self.room.status = Room.Status.IN_PROGRESS
+        self.room.save(update_fields=("status", "updated_at"))
+        active_game = Game.objects.create(
+            room=self.room,
+            status=GameStatus.IN_PROGRESS,
+        )
+        game_word = GameWord.objects.create(game=active_game, text="rocket")
+        active_round = Round.objects.create(
+            game=active_game,
+            drawer_participant=self.host,
+            drawer_nickname=self.host.display_name,
+            selected_game_word=game_word,
+            sequence_number=1,
+        )
+
+        cancelled = cancel_active_game_for_room(self.room.id)
+
+        active_game.refresh_from_db()
+        active_round.refresh_from_db()
+        self.assertTrue(cancelled)
+        self.assertEqual(active_game.status, GameStatus.CANCELLED)
+        self.assertIsNotNone(active_game.ended_at)
+        self.assertEqual(active_round.status, RoundStatus.CANCELLED)
+        self.assertIsNotNone(active_round.ended_at)
+        self.assertFalse(cancel_active_game_for_room(self.room.id))
+
+    @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
+    def test_complete_leaderboard_cooldown_restarts_game_with_fresh_scores(self):
+        finished_game = self._finish_two_player_game()
+        self.assertEqual(finished_game.status, GameStatus.FINISHED)
+
+        result = complete_leaderboard_cooldown_for_room(self.room.id)
+
+        self.room.refresh_from_db()
+        self.host.refresh_from_db()
+        self.member.refresh_from_db()
+
+        self.assertTrue(result.restarted)
+        self.assertEqual(result.room_status, Room.Status.IN_PROGRESS)
+        self.assertIsNotNone(result.next_game_id)
+        self.assertIsNotNone(result.next_round_id)
+        self.assertEqual(self.room.status, Room.Status.IN_PROGRESS)
+        self.assertEqual(Game.objects.filter(room=self.room).count(), 2)
+        self.assertEqual(self.host.current_score, 0)
+        self.assertEqual(self.member.current_score, 0)
+
+    @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
+    def test_complete_leaderboard_cooldown_returns_room_to_lobby_when_too_few_players_remain(self):
+        finished_game = self._finish_two_player_game()
+        self.assertEqual(finished_game.status, GameStatus.FINISHED)
+        self.member.connection_status = Player.ConnectionStatus.DISCONNECTED
+        self.member.save(update_fields=("connection_status", "updated_at"))
+
+        result = complete_leaderboard_cooldown_for_room(self.room.id)
+
+        self.room.refresh_from_db()
+        self.assertFalse(result.restarted)
+        self.assertEqual(result.room_status, Room.Status.LOBBY)
+        self.assertIsNone(result.next_game_id)
+        self.assertIsNone(result.next_round_id)
+        self.assertEqual(self.room.status, Room.Status.LOBBY)
+        self.assertEqual(Game.objects.filter(room=self.room).count(), 1)
+
+    @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
+    def test_complete_leaderboard_cooldown_promotes_connected_spectator_before_restart(self):
+        finished_game = self._finish_two_player_game()
+        self.assertEqual(finished_game.status, GameStatus.FINISHED)
+        late_spectator = Player.objects.create(
+            room=self.room,
+            session_key="leaderboard-late-spectator",
+            display_name="Late Spectator",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.SPECTATING,
+            current_score=0,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+
+        result = complete_leaderboard_cooldown_for_room(self.room.id)
+
+        late_spectator.refresh_from_db()
+        self.assertTrue(result.restarted)
+        self.assertEqual(
+            late_spectator.participation_status,
+            Player.ParticipationStatus.PLAYING,
+        )
 
     def test_round_progression_never_repeats_drawers_or_words_within_game(self):
         # A-07: the SPECTATING participant from setUp would be promoted at the

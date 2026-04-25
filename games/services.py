@@ -78,6 +78,40 @@ class IntermissionAdvanceResult:
     next_round_id: int | None
 
 
+@dataclass(frozen=True)
+class LeaderboardEntry:
+    player_id: int
+    display_name: str
+    current_score: int
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "player_id": self.player_id,
+            "display_name": self.display_name,
+            "current_score": self.current_score,
+        }
+
+
+@dataclass(frozen=True)
+class LeaderboardSnapshot:
+    game_id: int
+    entries: tuple[LeaderboardEntry, ...]
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "game_id": self.game_id,
+            "entries": [entry.as_dict() for entry in self.entries],
+        }
+
+
+@dataclass(frozen=True)
+class LeaderboardCooldownResult:
+    room_status: str
+    restarted: bool
+    next_game_id: int | None
+    next_round_id: int | None
+
+
 MIN_GUESSER_SCORE = 20
 MAX_GUESSER_SCORE = 100
 MIN_DRAWER_BONUS = 10
@@ -332,6 +366,26 @@ def _get_eligible_drawers_for_game(game: Game) -> list[Player]:
     )
 
 
+def _get_start_game_eligible_participants(locked_room: Room) -> list[Player]:
+    """Return participants who may start or auto-restart a game.
+
+    A8 reuses the same eligibility rule as the original host-driven game start:
+    only CONNECTED participants with PLAYING status may enter a fresh game.
+    Keeping that query in one helper avoids the restart path silently drifting
+    from the manual start path.
+    """
+
+    return list(
+        Player.objects.select_for_update()
+        .filter(
+            room=locked_room,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            connection_status=Player.ConnectionStatus.CONNECTED,
+        )
+        .order_by("created_at", "id")
+    )
+
+
 def _get_remaining_eligible_drawers(game: Game) -> list[Player]:
     eligible_drawers = _get_eligible_drawers_for_game(game)
     already_drawn_participant_ids = set(
@@ -553,15 +607,7 @@ def start_game_for_room(room: Room) -> StartedGame:
     if locked_room.status != Room.Status.LOBBY:
         raise StartGameError("A game can only be started while the room is in lobby status.")
 
-    eligible_participants = list(
-        Player.objects.select_for_update()
-        .filter(
-            room=locked_room,
-            participation_status=Player.ParticipationStatus.PLAYING,
-            connection_status=Player.ConnectionStatus.CONNECTED,
-        )
-        .order_by("created_at", "id")
-    )
+    eligible_participants = _get_start_game_eligible_participants(locked_room)
     if len(eligible_participants) < 2:
         raise StartGameError("At least 2 eligible participants are required to start a game.")
 
@@ -614,6 +660,127 @@ def start_game_for_room(room: Room) -> StartedGame:
         transaction.on_commit(lambda: _schedule_round_runtime_start(first_round.id))
 
     return StartedGame(game=game, first_round=first_round)
+
+
+def build_game_leaderboard_snapshot(game_id: int) -> LeaderboardSnapshot:
+    """Return a deterministic leaderboard snapshot for one finished game.
+
+    Scores live on current participant rows rather than on a separate
+    leaderboard table. The snapshot therefore reads the room participants
+    directly and sorts them by score descending, then by join order, so ties
+    remain stable for clients and tests.
+    """
+
+    game = Game.objects.select_related("room").get(pk=game_id)
+    entries = tuple(
+        LeaderboardEntry(
+            player_id=row["id"],
+            display_name=row["display_name"],
+            current_score=row["current_score"],
+        )
+        for row in Player.objects.filter(room_id=game.room_id)
+        .order_by("-current_score", "created_at", "id")
+        .values("id", "display_name", "current_score")
+    )
+    return LeaderboardSnapshot(game_id=game.id, entries=entries)
+
+
+@transaction.atomic
+def cancel_active_game_for_room(room_id: int) -> bool:
+    """Cancel every in-progress game in one room.
+
+    The room lifecycle code uses this when active play becomes non-resumable,
+    such as A8's "everyone left" path. The helper updates the active round(s)
+    and game row(s) together inside one transaction so callers never observe a
+    cancelled game with an active round still attached.
+    """
+
+    cancelled_at = timezone.now()
+    active_game_ids = list(
+        Game.objects.select_for_update()
+        .filter(room_id=room_id, status=GameStatus.IN_PROGRESS)
+        .order_by("started_at", "id")
+        .values_list("id", flat=True)
+    )
+    if not active_game_ids:
+        return False
+
+    Round.objects.select_for_update().filter(
+        game_id__in=active_game_ids,
+        status__isnull=True,
+        ended_at__isnull=True,
+    ).update(
+        status=RoundStatus.CANCELLED,
+        ended_at=cancelled_at,
+        updated_at=cancelled_at,
+    )
+    Game.objects.filter(
+        id__in=active_game_ids,
+        status=GameStatus.IN_PROGRESS,
+    ).update(
+        status=GameStatus.CANCELLED,
+        ended_at=cancelled_at,
+        updated_at=cancelled_at,
+    )
+    return True
+
+
+@transaction.atomic
+def complete_leaderboard_cooldown_for_room(room_id: int) -> LeaderboardCooldownResult:
+    """Advance a finished room out of the A8 leaderboard cooldown.
+
+    This helper is intentionally conservative. It only restarts when the room
+    is still marked IN_PROGRESS and the latest game is FINISHED. That prevents
+    a stray timer callback from starting a new game after the room already
+    moved to lobby or empty_grace for some other reason.
+    """
+
+    locked_room = Room.objects.select_for_update().select_related("word_pack").get(pk=room_id)
+    latest_game = (
+        Game.objects.select_for_update()
+        .filter(room_id=locked_room.id)
+        .order_by("-started_at", "-id")
+        .first()
+    )
+
+    if (
+        locked_room.status != Room.Status.IN_PROGRESS
+        or latest_game is None
+        or latest_game.status != GameStatus.FINISHED
+    ):
+        return LeaderboardCooldownResult(
+            room_status=locked_room.status,
+            restarted=False,
+            next_game_id=None,
+            next_round_id=None,
+        )
+
+    from rooms.services import promote_mid_game_spectators_to_players
+
+    # Mid-game joiners may still be marked SPECTATING when the leaderboard
+    # starts. Promote them before the restart eligibility check so the next
+    # game treats them exactly like the rest of the room.
+    promote_mid_game_spectators_to_players(room_id=locked_room.id)
+
+    locked_room.status = Room.Status.LOBBY
+    locked_room.save(update_fields=["status", "updated_at"])
+
+    eligible_participants = _get_start_game_eligible_participants(locked_room)
+    if len(eligible_participants) < 2:
+        return LeaderboardCooldownResult(
+            room_status=Room.Status.LOBBY,
+            restarted=False,
+            next_game_id=None,
+            next_round_id=None,
+        )
+
+    started_game = start_game_for_room(locked_room)
+    return LeaderboardCooldownResult(
+        room_status=Room.Status.IN_PROGRESS,
+        restarted=True,
+        next_game_id=started_game.game.id,
+        next_round_id=started_game.first_round.id,
+    )
 
 
 @transaction.atomic
