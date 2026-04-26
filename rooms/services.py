@@ -772,6 +772,14 @@ def leave_participant(*, redis_client, player_id: int) -> None:
     # socket disconnect is not enough because the participant row still exists
     # and the room must remain reclaimable by the same session.
     if not Player.objects.filter(room_id=room.id).exists():
+        if room.status == Room.Status.IN_PROGRESS:
+            # A8: once the final participant permanently leaves an active room,
+            # the current game is no longer resumable. Cancel it here on the
+            # leave path only; temporary disconnects must still follow the
+            # separate reconnect/grace behavior.
+            from games.services import cancel_active_game_for_room
+
+            cancel_active_game_for_room(room.id)
         enter_empty_room_grace(
             redis_client=redis_client,
             room_id=room.id,

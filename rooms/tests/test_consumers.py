@@ -247,6 +247,7 @@ async def _connect_and_drain_initial_sync(
         "round.intermission_timer",
         "round.started",
         "round.drawer_word",
+        "scoreboard.state",
     }
 
     def _append_and_validate(message: dict) -> None:
@@ -796,6 +797,64 @@ class RoomConsumerConnectTests(TransactionTestCase):
         self.assertEqual(round_state["payload"]["phase"], "intermission")
         self.assertIn("tick_sequence", round_state["payload"])
         self.assertIn("server_timestamp", round_state["payload"])
+
+        await reconnect_socket.disconnect()
+
+    @override_settings(
+        SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True,
+        SKETCHIT_ROUND_DURATION_SECONDS=5,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=0.4,
+        SKETCHIT_LEADERBOARD_DURATION_SECONDS=2,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.05,
+    )
+    async def test_reconnect_during_leaderboard_receives_scoreboard_sync_and_no_active_round(self):
+        @database_sync_to_async
+        def _add_second_snapshot_word() -> None:
+            second_word = Word.objects.create(text="planet")
+            WordPackEntry.objects.create(word_pack=self.word_pack, word=second_word)
+
+        await _add_second_snapshot_word()
+        await _create_connected_room_member(self.room.id, "Bob")
+        initial_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        await _connect_and_receive_initial_room_state(initial_socket, self.room.join_code)
+
+        first_round_id = await _start_game(self.room.id)
+        await _receive_until_type(initial_socket, "round.started")
+        await _end_round_by_correct_guess(first_round_id)
+        await _receive_until_type(initial_socket, "round.intermission_started")
+
+        second_round_started = await _receive_until_type(initial_socket, "round.started")
+        second_round_id = second_round_started["payload"]["round_id"]
+        await _end_round_by_correct_guess(second_round_id)
+        await _receive_until_type(initial_socket, "game.finished")
+        await _receive_until_type(initial_socket, "scoreboard.state")
+        await initial_socket.disconnect()
+
+        reconnect_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        await _connect_and_receive_initial_room_state(reconnect_socket, self.room.join_code)
+
+        scoreboard_state = await _receive_until_type(reconnect_socket, "scoreboard.state")
+        self.assertEqual(scoreboard_state["payload"]["phase"], "leaderboard")
+        self.assertIn("remaining_seconds", scoreboard_state["payload"])
+        self.assertIn("entries", scoreboard_state["payload"])
+
+        await reconnect_socket.send_json_to({
+            "type": "guess.submit",
+            "payload": {"text": "rocket"},
+        })
+        guess_error = await _receive_until_type(reconnect_socket, "guess.error")
+        self.assertEqual(
+            guess_error["payload"]["message"],
+            "No active round in progress.",
+        )
 
         await reconnect_socket.disconnect()
 

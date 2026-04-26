@@ -296,6 +296,54 @@ class ParticipantLifecycleServiceTests(TestCase):
         self.assertIsNone(self.room.empty_since)
         self.assertFalse(Player.objects.filter(pk=non_host_player.id).exists())
 
+    def test_last_permanent_leave_cancels_active_game_before_entering_empty_grace(self):
+        second_player = Player.objects.create(
+            room=self.room,
+            session_key="session-456",
+            display_name="Jamie",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        self.room.status = Room.Status.IN_PROGRESS
+        self.room.save(update_fields=["status", "updated_at"])
+
+        active_game = Game.objects.create(
+            room=self.room,
+            status=GameStatus.IN_PROGRESS,
+        )
+        game_word = GameWord.objects.create(game=active_game, text="rocket")
+        active_round = Round.objects.create(
+            game=active_game,
+            drawer_participant=self.player,
+            drawer_nickname=self.player.display_name,
+            selected_game_word=game_word,
+            sequence_number=1,
+        )
+
+        self._execute_on_commit(
+            lambda: leave_participant(
+                redis_client=self.redis_client,
+                player_id=second_player.id,
+            )
+        )
+        self._execute_on_commit(
+            lambda: leave_participant(
+                redis_client=self.redis_client,
+                player_id=self.player.id,
+            )
+        )
+
+        self.room.refresh_from_db()
+        active_game.refresh_from_db()
+        active_round.refresh_from_db()
+
+        self.assertEqual(self.room.status, Room.Status.EMPTY_GRACE)
+        self.assertIsNotNone(self.room.empty_since)
+        self.assertEqual(active_game.status, GameStatus.CANCELLED)
+        self.assertIsNotNone(active_game.ended_at)
+        self.assertEqual(active_round.status, RoundStatus.CANCELLED)
+        self.assertIsNotNone(active_round.ended_at)
+
     def test_connect_participant_rejects_mismatched_session_key(self):
         with self.assertRaisesMessage(
             ValueError,
