@@ -391,16 +391,24 @@ def _next_timer_tick(
     *,
     join_code: str,
     expected_phase: str,
-    expected_round_id: int,
+    expected_state_id: int,
+    expected_state_id_field: str = "round_id",
     sequence_field: str,
 ) -> tuple[int, str] | None:
+    """Advance one timer sequence only if runtime state still matches.
+
+    Most phases are keyed by ``round_id``. The A8 leaderboard cooldown is keyed
+    by ``game_id`` instead so reconnect consumers do not mistake it for an
+    active round.
+    """
+
     client = get_redis_client()
     turn_state = game_redis.get_turn_state(client, join_code)
     if not turn_state:
         return None
     if turn_state.get("phase") != expected_phase:
         return None
-    if turn_state.get("round_id") != str(expected_round_id):
+    if turn_state.get(expected_state_id_field) != str(expected_state_id):
         return None
 
     sequence = (_parse_int(turn_state.get(sequence_field)) or 0) + 1
@@ -430,7 +438,7 @@ def _round_timer_worker(
         tick_data = _next_timer_tick(
             join_code=join_code,
             expected_phase="round",
-            expected_round_id=round_id,
+            expected_state_id=round_id,
             sequence_field="round_timer_sequence",
         )
         if tick_data is None:
@@ -483,7 +491,7 @@ def _intermission_timer_worker(
         tick_data = _next_timer_tick(
             join_code=join_code,
             expected_phase="intermission",
-            expected_round_id=completed_round_id,
+            expected_state_id=completed_round_id,
             sequence_field="intermission_timer_sequence",
         )
         if tick_data is None:
@@ -679,7 +687,8 @@ def _leaderboard_timer_worker(
         tick_data = _next_timer_tick(
             join_code=join_code,
             expected_phase="leaderboard",
-            expected_round_id=game_id,
+            expected_state_id=game_id,
+            expected_state_id_field="game_id",
             sequence_field="leaderboard_timer_sequence",
         )
         if tick_data is None:
@@ -1481,7 +1490,9 @@ def start_leaderboard_cooldown(
             "phase": "leaderboard",
             "status": "leaderboard",
             "game_id": str(game_id),
-            "round_id": str(game_id),
+            # Keep round_id empty during leaderboard so reconnect consumers
+            # cannot mistake the cooldown for an active drawable round.
+            "round_id": "",
             "completed_round_id": str(completed_round_id),
             "completed_round_sequence": completed_round_sequence,
             "deadline_at": deadline_at.isoformat(),

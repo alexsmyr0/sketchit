@@ -2069,6 +2069,7 @@ class RoundTimerCoordinatorTests(TransactionTestCase):
         self.assertIn("entries", scoreboard_payload)
         self.assertEqual(turn_state.get("phase"), "leaderboard")
         self.assertEqual(turn_state.get("game_id"), str(game.id))
+        self.assertEqual(turn_state.get("round_id"), "")
         # A8 changes the post-finish behavior: runtime stays alive during the
         # leaderboard cooldown instead of being torn down immediately.
         self.assertNotEqual(turn_state, {})
