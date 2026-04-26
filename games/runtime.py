@@ -123,6 +123,48 @@ def _parse_iso_datetime(raw_value: str | None) -> datetime | None:
         return None
 
 
+def _decode_leaderboard_entries(
+    raw_value: str | None,
+) -> list[dict[str, object]] | None:
+    """Decode the frozen leaderboard entries stored in runtime turn state."""
+
+    if not raw_value:
+        return None
+
+    try:
+        decoded = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(decoded, list):
+        return None
+
+    entries: list[dict[str, object]] = []
+    for entry in decoded:
+        if not isinstance(entry, dict):
+            return None
+
+        player_id = entry.get("player_id")
+        display_name = entry.get("display_name")
+        current_score = entry.get("current_score")
+        if not isinstance(player_id, int):
+            return None
+        if not isinstance(display_name, str):
+            return None
+        if not isinstance(current_score, int):
+            return None
+
+        entries.append(
+            {
+                "player_id": player_id,
+                "display_name": display_name,
+                "current_score": current_score,
+            }
+        )
+
+    return entries
+
+
 def _remaining_seconds(deadline_at: datetime) -> int:
     return max(0, int(math.ceil((deadline_at - timezone.now()).total_seconds())))
 
@@ -569,14 +611,22 @@ def _build_scoreboard_state_payload(
     game_id: int,
     deadline_at: datetime,
     tick_sequence: int,
+    leaderboard_entries: list[dict[str, object]] | None = None,
 ) -> dict:
-    """Build the authoritative A8 leaderboard payload from live DB state."""
+    """Build the authoritative A8 leaderboard payload for cooldown clients.
 
-    from games.services import build_game_leaderboard_snapshot
+    The leaderboard entries are frozen when the cooldown starts so late joins
+    or leaves cannot rewrite the finished game's results mid-countdown.
+    """
 
-    leaderboard_snapshot = build_game_leaderboard_snapshot(game_id)
+    if leaderboard_entries is None:
+        from games.services import build_game_leaderboard_snapshot
+
+        leaderboard_snapshot = build_game_leaderboard_snapshot(game_id)
+        leaderboard_entries = leaderboard_snapshot.as_payload()["entries"]
     return {
-        **leaderboard_snapshot.as_payload(),
+        "game_id": game_id,
+        "entries": leaderboard_entries,
         "phase": "leaderboard",
         "deadline_at": deadline_at.isoformat(),
         "remaining_seconds": _remaining_seconds(deadline_at),
@@ -597,6 +647,9 @@ def _broadcast_scoreboard_state_from_turn_state(join_code: str) -> None:
     deadline_at = _parse_iso_datetime(turn_state.get("deadline_at"))
     if game_id is None or deadline_at is None:
         return
+    leaderboard_entries = _decode_leaderboard_entries(
+        turn_state.get("leaderboard_entries_json")
+    )
 
     broadcast_room_event(
         join_code,
@@ -605,6 +658,7 @@ def _broadcast_scoreboard_state_from_turn_state(join_code: str) -> None:
             game_id=game_id,
             deadline_at=deadline_at,
             tick_sequence=_parse_int(turn_state.get("leaderboard_timer_sequence")) or 0,
+            leaderboard_entries=leaderboard_entries,
         ),
     )
 
@@ -630,17 +684,9 @@ def _leaderboard_timer_worker(
         )
         if tick_data is None:
             return
-        tick_sequence, _server_timestamp = tick_data
+        _tick_sequence, _server_timestamp = tick_data
 
-        broadcast_room_event(
-            join_code,
-            "scoreboard.state",
-            _build_scoreboard_state_payload(
-                game_id=game_id,
-                deadline_at=deadline_at,
-                tick_sequence=tick_sequence,
-            ),
-        )
+        _broadcast_scoreboard_state_from_turn_state(join_code)
         if remaining <= 0:
             break
 
@@ -667,14 +713,12 @@ def _leaderboard_timer_worker(
 
     result = complete_leaderboard_cooldown_for_room(game.room_id)
     if result.restarted and result.next_round_id is not None:
-        # The cooldown transaction already created the next game/round. We
-        # re-emit room.state immediately so clients see any spectator->playing
-        # promotion before the next round payload arrives.
+        # The restart transaction already scheduled the next round runtime on
+        # commit, so only the room.state broadcast belongs here.
         schedule_room_state_broadcast_after_commit(
             join_code=join_code,
             room_id=game.room_id,
         )
-        start_round_runtime(result.next_round_id)
         return
 
     schedule_room_state_broadcast_after_commit(
@@ -970,6 +1014,9 @@ def get_sync_events_for_player(join_code: str, player_id: int) -> list[dict]:
         deadline_at = _parse_iso_datetime(turn_state.get("deadline_at"))
         if game_id is None or deadline_at is None:
             return []
+        leaderboard_entries = _decode_leaderboard_entries(
+            turn_state.get("leaderboard_entries_json")
+        )
 
         return [
             {
@@ -978,6 +1025,7 @@ def get_sync_events_for_player(join_code: str, player_id: int) -> list[dict]:
                     game_id=game_id,
                     deadline_at=deadline_at,
                     tick_sequence=_parse_int(turn_state.get("leaderboard_timer_sequence")) or 0,
+                    leaderboard_entries=leaderboard_entries,
                 ),
             }
         ]
@@ -1420,8 +1468,11 @@ def start_leaderboard_cooldown(
     now_iso = timezone.now().isoformat()
 
     client = get_redis_client()
+    from games.services import build_game_leaderboard_snapshot
+
     current_turn_state = game_redis.get_turn_state(client, join_code)
     completed_round_sequence = current_turn_state.get("completed_round_sequence", "")
+    leaderboard_snapshot = build_game_leaderboard_snapshot(game_id)
 
     game_redis.set_turn_state(
         client,
@@ -1434,6 +1485,11 @@ def start_leaderboard_cooldown(
             "completed_round_id": str(completed_round_id),
             "completed_round_sequence": completed_round_sequence,
             "deadline_at": deadline_at.isoformat(),
+            # Freeze the leaderboard once so reconnects and timer ticks keep
+            # showing the same finished-game results throughout the cooldown.
+            "leaderboard_entries_json": json.dumps(
+                leaderboard_snapshot.as_payload()["entries"]
+            ),
             "leaderboard_timer_sequence": "0",
             "last_timer_server_timestamp": now_iso,
         },

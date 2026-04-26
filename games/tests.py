@@ -2106,6 +2106,56 @@ class RoundTimerCoordinatorTests(TransactionTestCase):
     @override_settings(
         SKETCHIT_ROUND_DURATION_SECONDS=5,
         SKETCHIT_INTERMISSION_DURATION_SECONDS=0.4,
+        SKETCHIT_LEADERBOARD_DURATION_SECONDS=1.0,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.05,
+    )
+    def test_leaderboard_snapshot_stays_frozen_during_cooldown_membership_changes(self):
+        self._finish_default_two_player_game()
+
+        def _scoreboard_state_emitted() -> bool:
+            return bool(self._event_payloads("scoreboard.state"))
+
+        self._wait_for(_scoreboard_state_emitted, timeout_seconds=6)
+        initial_payload = self._event_payloads("scoreboard.state")[-1]
+        initial_entries = initial_payload["entries"]
+        initial_event_count = len(self._event_payloads("scoreboard.state"))
+
+        leave_participant(
+            redis_client=self.fake_redis,
+            player_id=self.member.id,
+        )
+        late_joiner = Player.objects.create(
+            room=self.room,
+            session_key="leaderboard-late-joiner",
+            display_name="Leaderboard Late Joiner",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.SPECTATING,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+
+        def _next_scoreboard_tick_emitted() -> bool:
+            return len(self._event_payloads("scoreboard.state")) > initial_event_count
+
+        self._wait_for(_next_scoreboard_tick_emitted, timeout_seconds=3)
+        latest_payload = self._event_payloads("scoreboard.state")[-1]
+        self.assertEqual(latest_payload["entries"], initial_entries)
+        self.assertNotIn(
+            late_joiner.id,
+            [entry["player_id"] for entry in latest_payload["entries"]],
+        )
+
+        sync_events = game_runtime.get_sync_events_for_player(
+            self.room.join_code,
+            self.host.id,
+        )
+        scoreboard_event = next(
+            event for event in sync_events if event["type"] == "scoreboard.state"
+        )
+        self.assertEqual(scoreboard_event["payload"]["entries"], initial_entries)
+
+    @override_settings(
+        SKETCHIT_ROUND_DURATION_SECONDS=5,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=0.4,
         SKETCHIT_LEADERBOARD_DURATION_SECONDS=0.4,
         SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.05,
     )
@@ -2136,6 +2186,22 @@ class RoundTimerCoordinatorTests(TransactionTestCase):
         self.assertEqual(self.host.current_score, 0)
         self.assertEqual(self.member.current_score, 0)
         self.assertNotEqual(second_game.id, game.id)
+
+        second_round = second_game.rounds.get(sequence_number=1)
+
+        def _second_round_started_broadcasted() -> bool:
+            return any(
+                payload["round_id"] == second_round.id
+                for payload in self._event_payloads("round.started")
+            )
+
+        self._wait_for(_second_round_started_broadcasted, timeout_seconds=3)
+        started_payloads = [
+            payload
+            for payload in self._event_payloads("round.started")
+            if payload["round_id"] == second_round.id
+        ]
+        self.assertEqual(len(started_payloads), 1)
 
     @override_settings(
         SKETCHIT_ROUND_DURATION_SECONDS=5,

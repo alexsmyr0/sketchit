@@ -663,12 +663,12 @@ def start_game_for_room(room: Room) -> StartedGame:
 
 
 def build_game_leaderboard_snapshot(game_id: int) -> LeaderboardSnapshot:
-    """Return a deterministic leaderboard snapshot for one finished game.
+    """Return the current end-of-game leaderboard ordering for one room.
 
-    Scores live on current participant rows rather than on a separate
-    leaderboard table. The snapshot therefore reads the room participants
-    directly and sorts them by score descending, then by join order, so ties
-    remain stable for clients and tests.
+    A8 does not persist historical score rows. Callers that need an immutable
+    leaderboard for the cooldown window must therefore capture this once when
+    the game finishes and then reuse that frozen snapshot instead of re-reading
+    room membership after joins or leaves.
     """
 
     game = Game.objects.select_related("room").get(pk=game_id)
