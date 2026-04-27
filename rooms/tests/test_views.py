@@ -823,7 +823,7 @@ class RoomLobbyStateViewTests(TestCase):
         self.assertEqual(len(data["participants"]), 2)
         self.assertSetEqual(
             set(data["participants"][0].keys()),
-            {"id", "display_name", "connection_status", "participation_status"},
+            {"id", "display_name", "connection_status", "participation_status", "current_score"},
         )
 
         participants_by_id = {
@@ -836,6 +836,7 @@ class RoomLobbyStateViewTests(TestCase):
                 "display_name": self.host_player.display_name,
                 "connection_status": self.host_player.connection_status,
                 "participation_status": self.host_player.participation_status,
+                "current_score": self.host_player.current_score,
             },
         )
         self.assertEqual(
@@ -845,6 +846,7 @@ class RoomLobbyStateViewTests(TestCase):
                 "display_name": self.member_player.display_name,
                 "connection_status": self.member_player.connection_status,
                 "participation_status": self.member_player.participation_status,
+                "current_score": self.member_player.current_score,
             },
         )
 
@@ -1368,12 +1370,14 @@ class UpdateLobbySettingsTests(TestCase):
                         "display_name": self.host_player.display_name,
                         "connection_status": self.host_player.connection_status,
                         "participation_status": self.host_player.participation_status,
+                        "current_score": self.host_player.current_score,
                     },
                     {
                         "id": self.member_player.id,
                         "display_name": self.member_player.display_name,
                         "connection_status": self.member_player.connection_status,
                         "participation_status": self.member_player.participation_status,
+                        "current_score": self.member_player.current_score,
                     },
                 ],
             },

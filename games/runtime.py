@@ -944,7 +944,23 @@ def get_round_correctness_state(
     )
 
 
-def _build_round_state_payload(turn_state: dict[str, str]) -> dict | None:
+def _get_leaderboard(join_code: str) -> list[dict]:
+    """Return a live leaderboard ordered by score for room-scoped UI sync."""
+
+    return [
+        {
+            "id": participant.id,
+            "display_name": participant.display_name,
+            "current_score": participant.current_score,
+            "participation_status": participant.participation_status,
+        }
+        for participant in Player.objects.filter(room__join_code=join_code).order_by(
+            "-current_score", "created_at"
+        )
+    ]
+
+
+def _build_round_state_payload(join_code: str, turn_state: dict[str, str]) -> dict | None:
     phase = turn_state.get("phase")
     if phase not in {"round", "intermission"}:
         return None
@@ -991,6 +1007,9 @@ def _build_round_state_payload(turn_state: dict[str, str]) -> dict | None:
     if ended_at_raw:
         payload["ended_at"] = ended_at_raw
 
+    if phase == "intermission":
+        payload["leaderboard"] = _get_leaderboard(join_code)
+
     return payload
 
 
@@ -999,7 +1018,7 @@ def _broadcast_round_state_from_turn_state(join_code: str) -> None:
     turn_state = game_redis.get_turn_state(client, join_code)
     if not turn_state:
         return
-    round_state_payload = _build_round_state_payload(turn_state)
+    round_state_payload = _build_round_state_payload(join_code, turn_state)
     if round_state_payload is None:
         return
     broadcast_room_event(
@@ -1026,8 +1045,19 @@ def get_sync_events_for_player(join_code: str, player_id: int) -> list[dict]:
         leaderboard_entries = _decode_leaderboard_entries(
             turn_state.get("leaderboard_entries_json")
         )
+        winner = leaderboard_entries[0] if leaderboard_entries else None
 
         return [
+            {
+                "type": "game.finished",
+                "payload": {
+                    "game_id": game_id,
+                    "status": "finished",
+                    "leaderboard": leaderboard_entries or [],
+                    "winner": winner,
+                    "server_timestamp": timezone.now().isoformat(),
+                },
+            },
             {
                 "type": "scoreboard.state",
                 "payload": _build_scoreboard_state_payload(
@@ -1039,7 +1069,7 @@ def get_sync_events_for_player(join_code: str, player_id: int) -> list[dict]:
             }
         ]
 
-    round_state_payload = _build_round_state_payload(turn_state)
+    round_state_payload = _build_round_state_payload(join_code, turn_state)
     if round_state_payload is None:
         return []
 
@@ -1482,6 +1512,8 @@ def start_leaderboard_cooldown(
     current_turn_state = game_redis.get_turn_state(client, join_code)
     completed_round_sequence = current_turn_state.get("completed_round_sequence", "")
     leaderboard_snapshot = build_game_leaderboard_snapshot(game_id)
+    leaderboard_entries = leaderboard_snapshot.as_payload()["entries"]
+    winner = leaderboard_entries[0] if leaderboard_entries else None
 
     game_redis.set_turn_state(
         client,
@@ -1498,9 +1530,7 @@ def start_leaderboard_cooldown(
             "deadline_at": deadline_at.isoformat(),
             # Freeze the leaderboard once so reconnects and timer ticks keep
             # showing the same finished-game results throughout the cooldown.
-            "leaderboard_entries_json": json.dumps(
-                leaderboard_snapshot.as_payload()["entries"]
-            ),
+            "leaderboard_entries_json": json.dumps(leaderboard_entries),
             "leaderboard_timer_sequence": "0",
             "last_timer_server_timestamp": now_iso,
         },
@@ -1518,6 +1548,8 @@ def start_leaderboard_cooldown(
         {
             "game_id": game_id,
             "status": "finished",
+            "leaderboard": leaderboard_entries,
+            "winner": winner,
             "server_timestamp": timezone.now().isoformat(),
         },
     )

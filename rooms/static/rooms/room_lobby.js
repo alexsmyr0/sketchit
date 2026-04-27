@@ -1,5 +1,6 @@
 /**
- * LobbyClient handles real-time lobby synchronization and host controls.
+ * LobbyClient handles both the pre-game lobby and the lightweight gameplay HUD
+ * that shares the same room page template.
  */
 class LobbyClient {
     constructor() {
@@ -7,6 +8,8 @@ class LobbyClient {
         this.currentPlayerId = JSON.parse(document.getElementById('current-player-id').textContent);
 
         this.elements = {
+            lobbyView: document.getElementById('lobby-view'),
+            gameView: document.getElementById('game-view'),
             roomNameDisplay: document.getElementById('room-name-display'),
             roomStatusBadge: document.getElementById('room-status-badge'),
             participantList: document.getElementById('participant-list'),
@@ -25,6 +28,28 @@ class LobbyClient {
             guestViewLoader: document.getElementById('guest-view-loader'),
             lobbyError: document.getElementById('lobby-error'),
             lobbyStatus: document.getElementById('lobby-status'),
+
+            // Game HUD
+            roundNumber: document.getElementById('round-number'),
+            timerDisplay: document.getElementById('timer-display'),
+            timerBar: document.getElementById('timer-bar'),
+            gameParticipantList: document.getElementById('game-participant-list'),
+            wordDisplay: document.getElementById('word-display'),
+            drawerHint: document.getElementById('drawer-hint'),
+
+            // Guessing
+            guessHistory: document.getElementById('guess-history'),
+            guessInput: document.getElementById('guess-input'),
+            guessInputContainer: document.getElementById('guess-input-container'),
+            submitGuessButton: document.getElementById('submit-guess-button'),
+
+            // Intermission
+            intermissionOverlay: document.getElementById('intermission-overlay'),
+            intermissionTitle: document.getElementById('intermission-title'),
+            intermissionResults: document.getElementById('intermission-results'),
+            intermissionSeconds: document.getElementById('intermission-seconds'),
+            intermissionTimer: document.querySelector('.intermission-timer'),
+            intermissionReturnButton: document.getElementById('intermission-return-button'),
         };
 
         this.socket = null;
@@ -46,6 +71,12 @@ class LobbyClient {
         this.isSavingSettings = false;
         this.isStartingGame = false;
         this.isAwaitingStartRoomState = false;
+        this.isDrawer = false;
+        this.isSpectator = false;
+        this.activeRoundId = null;
+        this.currentPhase = null;
+        this.roundDuration = null;
+        this.intermissionDuration = null;
 
         this.init();
     }
@@ -56,10 +87,12 @@ class LobbyClient {
     }
 
     setupEventListeners() {
+        // Copy Join URL
         if (this.elements.copyUrlButton) {
             this.elements.copyUrlButton.addEventListener('click', () => this.copyJoinUrl());
         }
 
+        // Host Settings Form
         if (this.elements.settingsForm) {
             this.elements.settingsForm.addEventListener('submit', (event) => {
                 event.preventDefault();
@@ -67,8 +100,25 @@ class LobbyClient {
             });
         }
 
+        // Start Game Button
         if (this.elements.startGameButton) {
             this.elements.startGameButton.addEventListener('click', () => this.startGame());
+        }
+
+        // Guess Submission
+        if (this.elements.guessInput) {
+            this.elements.guessInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') this.submitGuess();
+            });
+        }
+        if (this.elements.submitGuessButton) {
+            this.elements.submitGuessButton.addEventListener('click', () => this.submitGuess());
+        }
+
+        if (this.elements.intermissionReturnButton) {
+            this.elements.intermissionReturnButton.addEventListener('click', () => {
+                window.location.reload();
+            });
         }
     }
 
@@ -122,6 +172,33 @@ class LobbyClient {
             case 'host.changed':
                 this.handleHostChanged(event.payload);
                 break;
+            case 'round.started':
+                this.handleRoundStarted(event.payload);
+                break;
+            case 'round.timer':
+                this.handleRoundTimer(event.payload);
+                break;
+            case 'round.state':
+                this.handleRoundState(event.payload);
+                break;
+            case 'round.intermission_started':
+                this.handleIntermissionStarted(event.payload);
+                break;
+            case 'round.intermission_timer':
+                this.handleIntermissionTimer(event.payload);
+                break;
+            case 'round.drawer_word':
+                this.handleDrawerWord(event.payload);
+                break;
+            case 'guess.result':
+                this.handleGuessResult(event.payload);
+                break;
+            case 'guess.error':
+                this.handleGuessError(event.payload);
+                break;
+            case 'game.finished':
+                this.handleGameFinished(event.payload);
+                break;
             default:
                 break;
         }
@@ -143,6 +220,18 @@ class LobbyClient {
         }
     }
 
+    normalizeParticipant(participant) {
+        return {
+            ...participant,
+            connection_status: typeof participant.connection_status === 'string'
+                ? participant.connection_status.toLowerCase()
+                : participant.connection_status,
+            participation_status: typeof participant.participation_status === 'string'
+                ? participant.participation_status.toLowerCase()
+                : participant.participation_status,
+        };
+    }
+
     updateLobbyUI(state, { forceSettingsSync = false } = {}) {
         const { room, host, participants } = state;
         const previousHostId = this.currentHostId;
@@ -151,7 +240,9 @@ class LobbyClient {
 
         this.isAwaitingStartRoomState = false;
         this.hasReceivedRoomState = true;
-        this.currentParticipants = participants;
+        this.currentParticipants = Array.isArray(participants)
+            ? participants.map((participant) => this.normalizeParticipant(participant))
+            : [];
         this.currentHostId = host ? host.id : null;
         this.currentRoomStatus = room.status;
 
@@ -170,6 +261,9 @@ class LobbyClient {
         this.renderParticipantList();
         this.syncHostControls();
         this.syncLobbyLockState(room.status);
+        this.renderGameParticipants();
+        this.syncRoomMode();
+        this.syncGuessComposer();
 
         if (previousHostId !== null && previousHostId !== this.currentHostId) {
             this.showStatus('Room host changed', { autoHideMs: 3000 });
@@ -213,8 +307,8 @@ class LobbyClient {
         }
 
         const eligibleCount = this.currentParticipants.filter((participant) => (
-            participant.connection_status === 'CONNECTED'
-            && participant.participation_status !== 'SPECTATING'
+            participant.connection_status === 'connected'
+            && participant.participation_status !== 'spectating'
         )).length;
         const canStart = isHost && isLobby && eligibleCount >= 2 && !this.isBusy();
 
@@ -361,8 +455,383 @@ class LobbyClient {
         });
     }
 
+    renderGameParticipants() {
+        if (!this.elements.gameParticipantList) {
+            return;
+        }
+
+        this.elements.gameParticipantList.innerHTML = '';
+
+        this.currentParticipants.forEach((participant) => {
+            const item = document.createElement('li');
+            item.className = `participant-item ${participant.id === this.currentPlayerId ? 'is-self' : ''}`;
+
+            const name = document.createElement('span');
+            name.className = 'display-name';
+            const score = participant.current_score === undefined ? '—' : participant.current_score;
+            const suffix = participant.id === this.currentPlayerId ? ' (You)' : '';
+            name.textContent = `${participant.display_name}${suffix}`;
+
+            const scoreNode = document.createElement('span');
+            scoreNode.className = 'score-pill';
+            scoreNode.textContent = String(score);
+
+            item.appendChild(name);
+            item.appendChild(scoreNode);
+            this.elements.gameParticipantList.appendChild(item);
+        });
+    }
+
     isBusy() {
         return this.isSavingSettings || this.isStartingGame || this.isAwaitingStartRoomState;
+    }
+
+    getCurrentParticipant() {
+        return this.currentParticipants.find((participant) => participant.id === this.currentPlayerId) || null;
+    }
+
+    syncRoomMode() {
+        const inGame = this.currentRoomStatus === 'in_progress' || this.currentRoomStatus === 'finished';
+
+        if (this.elements.lobbyView) {
+            this.elements.lobbyView.hidden = inGame;
+        }
+        if (this.elements.gameView) {
+            this.elements.gameView.hidden = !inGame;
+        }
+
+        if (!inGame) {
+            this.resetGameplayStateForLobby();
+        }
+    }
+
+    resetGameplayStateForLobby() {
+        this.currentPhase = null;
+        this.activeRoundId = null;
+        this.isDrawer = false;
+        this.isSpectator = false;
+        this.roundDuration = null;
+        this.intermissionDuration = null;
+        this.hideIntermissionOverlay();
+
+        if (this.elements.wordDisplay) {
+            this.elements.wordDisplay.textContent = '_ _ _ _';
+        }
+        if (this.elements.drawerHint) {
+            this.elements.drawerHint.hidden = true;
+        }
+        if (this.elements.timerDisplay) {
+            this.elements.timerDisplay.textContent = '90';
+        }
+        if (this.elements.timerBar) {
+            this.elements.timerBar.style.width = '100%';
+        }
+        if (this.elements.guessHistory) {
+            this.elements.guessHistory.innerHTML = '';
+        }
+        this.syncGuessComposer();
+    }
+
+    syncGuessComposer() {
+        if (!this.elements.guessInput || !this.elements.submitGuessButton) {
+            return;
+        }
+
+        const canSubmit = this.currentRoomStatus === 'in_progress'
+            && this.currentPhase === 'round'
+            && !this.isDrawer
+            && !this.isSpectator
+            && this.socket
+            && this.socket.readyState === WebSocket.OPEN;
+
+        this.elements.guessInput.disabled = !canSubmit;
+        this.elements.submitGuessButton.disabled = !canSubmit;
+
+        if (this.elements.guessInputContainer) {
+            this.elements.guessInputContainer.dataset.disabled = canSubmit ? 'false' : 'true';
+        }
+
+        if (this.isDrawer) {
+            this.elements.guessInput.placeholder = 'You are drawing this round.';
+        } else if (this.isSpectator) {
+            this.elements.guessInput.placeholder = 'You are spectating this round.';
+        } else if (this.currentPhase === 'intermission') {
+            this.elements.guessInput.placeholder = 'Wait for the next round...';
+        } else if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+            this.elements.guessInput.placeholder = 'Reconnecting...';
+        } else {
+            this.elements.guessInput.placeholder = 'Type your guess here...';
+        }
+    }
+
+    setTimerProgress(remainingSeconds) {
+        if (this.elements.timerDisplay) {
+            this.elements.timerDisplay.textContent = String(Math.max(0, remainingSeconds));
+        }
+
+        if (!this.elements.timerBar || !this.roundDuration) {
+            return;
+        }
+
+        const percent = Math.max(0, Math.min(100, (remainingSeconds / this.roundDuration) * 100));
+        this.elements.timerBar.style.width = `${percent}%`;
+    }
+
+    setIntermissionSeconds(remainingSeconds) {
+        if (this.elements.intermissionSeconds) {
+            this.elements.intermissionSeconds.textContent = String(Math.max(0, remainingSeconds));
+        }
+    }
+
+    setWordDisplay(text) {
+        if (this.elements.wordDisplay) {
+            this.elements.wordDisplay.textContent = text || '';
+        }
+    }
+
+    appendGuessHistoryLine(message, outcome = '') {
+        if (!this.elements.guessHistory) {
+            return;
+        }
+
+        const item = document.createElement('li');
+        item.className = 'guess-history-item';
+        if (outcome) {
+            item.dataset.outcome = String(outcome).toLowerCase();
+        }
+        item.textContent = message;
+        this.elements.guessHistory.appendChild(item);
+    }
+
+    formatGuessOutcome(payload) {
+        const rawOutcome = typeof payload.outcome === 'string' ? payload.outcome.toLowerCase() : 'result';
+        const player = this.currentParticipants.find((participant) => participant.id === payload.player_id);
+        const actor = player ? player.display_name : 'A player';
+        const guessText = payload.text ? ` "${payload.text}"` : '';
+
+        if (typeof payload.message === 'string' && payload.message.trim()) {
+            return payload.message;
+        }
+
+        switch (rawOutcome) {
+            case 'correct':
+                return `${actor} guessed correctly${guessText}.`;
+            case 'near_match':
+                return `${actor} was close${guessText}.`;
+            case 'duplicate':
+                return `${actor} already tried${guessText}.`;
+            case 'incorrect':
+                return `${actor} guessed${guessText}.`;
+            default:
+                return `${actor}: ${rawOutcome}${guessText}`;
+        }
+    }
+
+    renderLeaderboardRows(leaderboard) {
+        if (!Array.isArray(leaderboard) || leaderboard.length === 0) {
+            return '<p>No scores yet.</p>';
+        }
+
+        return leaderboard.map((participant) => {
+            const score = participant.current_score === undefined ? '—' : participant.current_score;
+            return `<div class="leaderboard-row"><span>${participant.display_name}</span><span>${score}</span></div>`;
+        }).join('');
+    }
+
+    showIntermissionOverlay({ title, leaderboard = [], countdownVisible = true }) {
+        if (!this.elements.intermissionOverlay) {
+            return;
+        }
+
+        if (this.elements.intermissionTitle) {
+            this.elements.intermissionTitle.textContent = title;
+        }
+        if (this.elements.intermissionResults) {
+            this.elements.intermissionResults.innerHTML = `<h3>Leaderboard</h3>${this.renderLeaderboardRows(leaderboard)}`;
+        }
+        if (this.elements.intermissionTimer) {
+            this.elements.intermissionTimer.hidden = !countdownVisible;
+        }
+        if (this.elements.intermissionReturnButton) {
+            this.elements.intermissionReturnButton.hidden = countdownVisible;
+        }
+
+        this.elements.intermissionOverlay.hidden = false;
+    }
+
+    hideIntermissionOverlay() {
+        if (!this.elements.intermissionOverlay) {
+            return;
+        }
+
+        this.elements.intermissionOverlay.hidden = true;
+        if (this.elements.intermissionTimer) {
+            this.elements.intermissionTimer.hidden = false;
+        }
+        if (this.elements.intermissionReturnButton) {
+            this.elements.intermissionReturnButton.hidden = true;
+        }
+    }
+
+    handleRoundStarted(payload) {
+        this.currentPhase = 'round';
+        this.activeRoundId = payload.round_id || null;
+        this.roundDuration = payload.duration_seconds || this.roundDuration;
+        this.isDrawer = payload.role === 'drawer' || payload.drawer_participant_id === this.currentPlayerId;
+        this.isSpectator = false;
+
+        if (this.elements.roundNumber && payload.sequence_number) {
+            this.elements.roundNumber.textContent = `Round ${payload.sequence_number}`;
+        }
+        if (this.elements.drawerHint) {
+            this.elements.drawerHint.hidden = !this.isDrawer;
+        }
+
+        const maskedWord = payload.masked_word ? payload.masked_word.split('').join(' ') : '_ _ _ _';
+        this.setWordDisplay(this.isDrawer && payload.word ? payload.word : maskedWord);
+        this.setTimerProgress(this.roundDuration || 0);
+        this.hideIntermissionOverlay();
+        this.syncGuessComposer();
+    }
+
+    handleRoundTimer(payload) {
+        this.currentPhase = 'round';
+        this.activeRoundId = payload.round_id || this.activeRoundId;
+        this.setTimerProgress(payload.remaining_seconds || 0);
+        this.syncGuessComposer();
+    }
+
+    handleRoundState(payload) {
+        this.currentPhase = payload.phase || this.currentPhase;
+        this.activeRoundId = payload.round_id || this.activeRoundId;
+        this.isDrawer = payload.drawer_participant_id === this.currentPlayerId;
+        this.isSpectator = this.getCurrentParticipant()?.participation_status === 'spectating';
+
+        if (payload.phase === 'intermission') {
+            this.showIntermissionOverlay({
+                title: 'Round Over!',
+                leaderboard: payload.leaderboard || [],
+                countdownVisible: true,
+            });
+            this.setIntermissionSeconds(payload.remaining_seconds || 0);
+        } else {
+            this.hideIntermissionOverlay();
+        }
+
+        this.syncGuessComposer();
+    }
+
+    handleIntermissionStarted(payload) {
+        this.currentPhase = 'intermission';
+        this.intermissionDuration = payload.duration_seconds || this.intermissionDuration;
+        this.setIntermissionSeconds(payload.duration_seconds || 0);
+        this.showIntermissionOverlay({
+            title: 'Round Over!',
+            leaderboard: this.currentParticipants,
+            countdownVisible: true,
+        });
+        this.syncGuessComposer();
+    }
+
+    handleIntermissionTimer(payload) {
+        this.currentPhase = 'intermission';
+        this.setIntermissionSeconds(payload.remaining_seconds || 0);
+        this.showIntermissionOverlay({
+            title: 'Round Over!',
+            leaderboard: this.currentParticipants,
+            countdownVisible: true,
+        });
+        this.syncGuessComposer();
+    }
+
+    handleDrawerWord(payload) {
+        this.isDrawer = true;
+        this.isSpectator = false;
+        if (this.elements.drawerHint) {
+            this.elements.drawerHint.hidden = false;
+        }
+        this.setWordDisplay(payload.word || '');
+        this.syncGuessComposer();
+    }
+
+    handleGuessResult(payload) {
+        const message = this.formatGuessOutcome(payload);
+        this.appendGuessHistoryLine(message, payload.outcome || '');
+
+        if (payload.player_id === this.currentPlayerId && this.elements.guessInput) {
+            this.elements.guessInput.value = '';
+        }
+
+        if (Array.isArray(payload.score_updates)) {
+            const updatesById = new Map(payload.score_updates.map((update) => [update.player_id, update.current_score]));
+            this.currentParticipants = this.currentParticipants.map((participant) => (
+                updatesById.has(participant.id)
+                    ? { ...participant, current_score: updatesById.get(participant.id) }
+                    : participant
+            ));
+            this.renderGameParticipants();
+        }
+    }
+
+    handleGuessError(payload) {
+        const message = payload && (payload.message || payload.error_message)
+            ? (payload.message || payload.error_message)
+            : 'Unable to submit that guess right now.';
+        this.appendGuessHistoryLine(message, 'error');
+        this.showError(message);
+        this.syncGuessComposer();
+    }
+
+    handleGameFinished(payload) {
+        this.currentPhase = 'finished';
+        this.activeRoundId = null;
+        this.isDrawer = false;
+        this.isSpectator = false;
+
+        const winnerHeading = payload.winner
+            ? `<p><strong>Winner:</strong> ${payload.winner.display_name}</p>`
+            : '<p>No winner recorded.</p>';
+        const leaderboardMarkup = this.renderLeaderboardRows(payload.leaderboard || []);
+
+        if (this.elements.intermissionTitle) {
+            this.elements.intermissionTitle.textContent = 'Game Over!';
+        }
+        if (this.elements.intermissionResults) {
+            this.elements.intermissionResults.innerHTML = `${winnerHeading}<h3>Final Scores</h3>${leaderboardMarkup}`;
+        }
+        if (this.elements.intermissionTimer) {
+            this.elements.intermissionTimer.hidden = true;
+        }
+        if (this.elements.intermissionReturnButton) {
+            this.elements.intermissionReturnButton.hidden = false;
+        }
+        if (this.elements.intermissionOverlay) {
+            this.elements.intermissionOverlay.hidden = false;
+        }
+
+        this.syncGuessComposer();
+    }
+
+    submitGuess() {
+        if (!this.elements.guessInput || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
+            this.showError('Connection is still reconnecting. Please try your guess again in a moment.');
+            return;
+        }
+
+        if (this.isDrawer || this.isSpectator || this.currentPhase !== 'round') {
+            return;
+        }
+
+        const text = this.elements.guessInput.value.trim();
+        if (!text) {
+            this.showError('Guess text cannot be empty.');
+            return;
+        }
+
+        this.socket.send(JSON.stringify({
+            type: 'guess.submit',
+            payload: { text },
+        }));
     }
 
     async readResponseData(response) {
@@ -610,6 +1079,7 @@ class LobbyClient {
     }
 }
 
+// Initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
     window.lobbyClient = new LobbyClient();
 });

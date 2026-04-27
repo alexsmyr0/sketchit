@@ -158,7 +158,7 @@ def _get_connected_peer_ids(room_id: int, player_id: int) -> list[int]:
 
 
 @database_sync_to_async
-def _get_initial_room_state_event(room_id: int) -> dict:
+def _get_initial_room_state_event(room_id: int, player_id: int) -> dict:
     """Return the direct A-06 ``room.state`` snapshot for one socket connect.
 
     Reusing the room-service event builder keeps the direct post-connect
@@ -168,7 +168,9 @@ def _get_initial_room_state_event(room_id: int) -> dict:
 
     from rooms.services import _build_room_state_event
 
-    return _build_room_state_event(room_id=room_id)
+    event = _build_room_state_event(room_id=room_id)
+    event["payload"]["current_player_id"] = player_id
+    return event
 
 
 class RoomConsumer(AsyncJsonWebsocketConsumer):
@@ -230,7 +232,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         # browser. We send the initial snapshot directly so the connecting 
         # client has authoritative state immediately without waiting for a
         # group broadcast.
-        initial_room_state_event = await _get_initial_room_state_event(self.room.id)
+        initial_room_state_event = await _get_initial_room_state_event(self.room.id, self.player.id)
         await self.send_json(initial_room_state_event)
 
         # Send canvas snapshot first, then round state
