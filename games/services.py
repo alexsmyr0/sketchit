@@ -78,6 +78,40 @@ class IntermissionAdvanceResult:
     next_round_id: int | None
 
 
+@dataclass(frozen=True)
+class LeaderboardEntry:
+    player_id: int
+    display_name: str
+    current_score: int
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "player_id": self.player_id,
+            "display_name": self.display_name,
+            "current_score": self.current_score,
+        }
+
+
+@dataclass(frozen=True)
+class LeaderboardSnapshot:
+    game_id: int
+    entries: tuple[LeaderboardEntry, ...]
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "game_id": self.game_id,
+            "entries": [entry.as_dict() for entry in self.entries],
+        }
+
+
+@dataclass(frozen=True)
+class LeaderboardCooldownResult:
+    room_status: str
+    restarted: bool
+    next_game_id: int | None
+    next_round_id: int | None
+
+
 MIN_GUESSER_SCORE = 20
 MAX_GUESSER_SCORE = 100
 MIN_DRAWER_BONUS = 10
@@ -332,6 +366,20 @@ def _get_eligible_drawers_for_game(game: Game) -> list[Player]:
     )
 
 
+def _get_start_game_eligible_participants(locked_room: Room) -> list[Player]:
+    """Return participants who may start or auto-restart a game."""
+
+    return list(
+        Player.objects.select_for_update()
+        .filter(
+            room=locked_room,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            connection_status=Player.ConnectionStatus.CONNECTED,
+        )
+        .order_by("created_at", "id")
+    )
+
+
 def _get_remaining_eligible_drawers(game: Game) -> list[Player]:
     eligible_drawers = _get_eligible_drawers_for_game(game)
     already_drawn_participant_ids = set(
@@ -413,6 +461,7 @@ def _schedule_round_intermission_start(
     completed_round_sequence: int,
     ended_at_iso: str,
     completion_reason: str,
+    completion_status: str,
 ) -> None:
     from games import runtime as game_runtime
 
@@ -422,6 +471,7 @@ def _schedule_round_intermission_start(
         completed_round_sequence=completed_round_sequence,
         ended_at_iso=ended_at_iso,
         completion_reason=completion_reason,
+        completion_status=completion_status,
     )
 
 
@@ -431,6 +481,7 @@ def _handle_round_completed(locked_round: Round, *, completion_reason: str) -> N
     room_redis.clear_canvas_snapshot(client, locked_round.game.room.join_code)
 
     if _runtime_coordinator_enabled():
+        completion_status = locked_round.status or RoundStatus.COMPLETED
         transaction.on_commit(
             lambda: _schedule_round_intermission_start(
                 join_code=locked_round.game.room.join_code,
@@ -438,6 +489,7 @@ def _handle_round_completed(locked_round: Round, *, completion_reason: str) -> N
                 completed_round_sequence=locked_round.sequence_number,
                 ended_at_iso=locked_round.ended_at.isoformat(),
                 completion_reason=completion_reason,
+                completion_status=completion_status,
             )
         )
         return
@@ -549,15 +601,7 @@ def start_game_for_room(room: Room) -> StartedGame:
     if locked_room.status != Room.Status.LOBBY:
         raise StartGameError("A game can only be started while the room is in lobby status.")
 
-    eligible_participants = list(
-        Player.objects.select_for_update()
-        .filter(
-            room=locked_room,
-            participation_status=Player.ParticipationStatus.PLAYING,
-            connection_status=Player.ConnectionStatus.CONNECTED,
-        )
-        .order_by("created_at", "id")
-    )
+    eligible_participants = _get_start_game_eligible_participants(locked_room)
     if len(eligible_participants) < 2:
         raise StartGameError("At least 2 eligible participants are required to start a game.")
 
@@ -612,6 +656,72 @@ def start_game_for_room(room: Room) -> StartedGame:
     return StartedGame(game=game, first_round=first_round)
 
 
+def build_game_leaderboard_snapshot(game_id: int) -> LeaderboardSnapshot:
+    """Return the current end-of-game leaderboard ordering for one room."""
+
+    game = Game.objects.select_related("room").get(pk=game_id)
+    entries = tuple(
+        LeaderboardEntry(
+            player_id=row["id"],
+            display_name=row["display_name"],
+            current_score=row["current_score"],
+        )
+        for row in Player.objects.filter(room_id=game.room_id)
+        .order_by("-current_score", "created_at", "id")
+        .values("id", "display_name", "current_score")
+    )
+    return LeaderboardSnapshot(game_id=game.id, entries=entries)
+
+
+@transaction.atomic
+def complete_leaderboard_cooldown_for_room(room_id: int) -> LeaderboardCooldownResult:
+    """Advance a finished room out of the leaderboard cooldown."""
+
+    locked_room = Room.objects.select_for_update().select_related("word_pack").get(pk=room_id)
+    latest_game = (
+        Game.objects.select_for_update()
+        .filter(room_id=locked_room.id)
+        .order_by("-started_at", "-id")
+        .first()
+    )
+
+    if (
+        locked_room.status != Room.Status.IN_PROGRESS
+        or latest_game is None
+        or latest_game.status != GameStatus.FINISHED
+    ):
+        return LeaderboardCooldownResult(
+            room_status=locked_room.status,
+            restarted=False,
+            next_game_id=None,
+            next_round_id=None,
+        )
+
+    from rooms.services import promote_mid_game_spectators_to_players
+
+    promote_mid_game_spectators_to_players(room_id=locked_room.id)
+
+    locked_room.status = Room.Status.LOBBY
+    locked_room.save(update_fields=["status", "updated_at"])
+
+    eligible_participants = _get_start_game_eligible_participants(locked_room)
+    if len(eligible_participants) < 2:
+        return LeaderboardCooldownResult(
+            room_status=Room.Status.LOBBY,
+            restarted=False,
+            next_game_id=None,
+            next_round_id=None,
+        )
+
+    started_game = start_game_for_room(locked_room)
+    return LeaderboardCooldownResult(
+        room_status=Room.Status.IN_PROGRESS,
+        restarted=True,
+        next_game_id=started_game.game.id,
+        next_round_id=started_game.first_round.id,
+    )
+
+
 @transaction.atomic
 def complete_round_due_to_timer(round_id: int) -> bool:
     locked_round = (
@@ -626,6 +736,23 @@ def complete_round_due_to_timer(round_id: int) -> bool:
     locked_round.ended_at = timezone.now()
     locked_round.save(update_fields=["status", "ended_at", "updated_at"])
     _handle_round_completed(locked_round, completion_reason="timer_expired")
+    return True
+
+
+@transaction.atomic
+def complete_round_due_to_drawer_disconnect(round_id: int) -> bool:
+    locked_round = (
+        Round.objects.select_for_update()
+        .select_related("game__room")
+        .get(pk=round_id)
+    )
+    if locked_round.status is not None or locked_round.ended_at is not None:
+        return False
+
+    locked_round.status = RoundStatus.DRAWER_DISCONNECTED
+    locked_round.ended_at = timezone.now()
+    locked_round.save(update_fields=["status", "ended_at", "updated_at"])
+    _handle_round_completed(locked_round, completion_reason="drawer_disconnected")
     return True
 
 
