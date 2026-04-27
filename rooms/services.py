@@ -6,6 +6,7 @@ consumers, and later background tasks all apply the same rules.
 
 from __future__ import annotations
 
+import logging
 import random
 from datetime import datetime, timedelta
 
@@ -19,6 +20,8 @@ from games import redis as game_redis
 from rooms import redis as room_redis
 from rooms.models import Player, Room
 
+
+logger = logging.getLogger(__name__)
 
 EMPTY_ROOM_GRACE_PERIOD = timedelta(minutes=10)
 
@@ -313,6 +316,60 @@ def schedule_host_changed_broadcast_after_commit(
     )
 
 
+def _schedule_drawer_reconnect_resume_after_commit(
+    *,
+    join_code: str,
+    player_id: int,
+) -> None:
+    """Resume round runtime if an active drawer reconnects before grace expiry."""
+
+    def _resume_drawer_round_if_needed() -> None:
+        from games import runtime as game_runtime
+
+        try:
+            game_runtime.handle_participant_reconnected(
+                join_code=join_code,
+                participant_id=player_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to resume drawer round after reconnect.",
+                extra={
+                    "join_code": join_code,
+                    "player_id": player_id,
+                },
+            )
+
+    transaction.on_commit(_resume_drawer_round_if_needed)
+
+
+def _schedule_drawer_disconnect_grace_after_commit(
+    *,
+    join_code: str,
+    player_id: int,
+) -> None:
+    """Start drawer-disconnect grace runtime if the active drawer dropped."""
+
+    def _start_drawer_grace_if_needed() -> None:
+        from games import runtime as game_runtime
+
+        try:
+            game_runtime.handle_participant_disconnected(
+                join_code=join_code,
+                participant_id=player_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to start drawer disconnect grace window.",
+                extra={
+                    "join_code": join_code,
+                    "player_id": player_id,
+                },
+            )
+
+    transaction.on_commit(_start_drawer_grace_if_needed)
+
+
 def _validate_room_presence_identity(
     *,
     player: Player,
@@ -371,6 +428,11 @@ def connect_participant(
         connection_status=Player.ConnectionStatus.CONNECTED,
         last_seen_at=timezone.now(),
     )
+    if previous_connection_status != Player.ConnectionStatus.CONNECTED:
+        _schedule_drawer_reconnect_resume_after_commit(
+            join_code=room_join_code,
+            player_id=player.id,
+        )
     # Multiple tabs for the same session share one room-level participant.
     # Returning whether the durable status changed lets the consumer broadcast
     # to existing peers after the DB commit without treating extra tabs as a
@@ -651,6 +713,10 @@ def disconnect_participant(
             join_code=room_join_code,
             room_id=player.room_id,
         )
+        _schedule_drawer_disconnect_grace_after_commit(
+            join_code=room_join_code,
+            player_id=player.id,
+        )
 
 
 @transaction.atomic
@@ -688,6 +754,10 @@ def leave_participant(*, redis_client, player_id: int) -> None:
         player.room.join_code,
         player.session_key,
     )
+    _schedule_drawer_disconnect_grace_after_commit(
+        join_code=room.join_code,
+        player_id=player.id,
+    )
     player.delete()
     if room.host_id != previous_host_id:
         schedule_host_changed_broadcast_after_commit(
@@ -703,6 +773,14 @@ def leave_participant(*, redis_client, player_id: int) -> None:
     # socket disconnect is not enough because the participant row still exists
     # and the room must remain reclaimable by the same session.
     if not Player.objects.filter(room_id=room.id).exists():
+        if room.status == Room.Status.IN_PROGRESS:
+            # A8: once the final participant permanently leaves an active room,
+            # the current game is no longer resumable. Cancel it here on the
+            # leave path only; temporary disconnects must still follow the
+            # separate reconnect/grace behavior.
+            from games.services import cancel_active_game_for_room
+
+            cancel_active_game_for_room(room.id)
         enter_empty_room_grace(
             redis_client=redis_client,
             room_id=room.id,

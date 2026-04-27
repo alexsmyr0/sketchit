@@ -367,7 +367,13 @@ def _get_eligible_drawers_for_game(game: Game) -> list[Player]:
 
 
 def _get_start_game_eligible_participants(locked_room: Room) -> list[Player]:
-    """Return participants who may start or auto-restart a game."""
+    """Return participants who may start or auto-restart a game.
+
+    A8 reuses the same eligibility rule as the original host-driven game start:
+    only CONNECTED participants with PLAYING status may enter a fresh game.
+    Keeping that query in one helper avoids the restart path silently drifting
+    from the manual start path.
+    """
 
     return list(
         Player.objects.select_for_update()
@@ -657,7 +663,13 @@ def start_game_for_room(room: Room) -> StartedGame:
 
 
 def build_game_leaderboard_snapshot(game_id: int) -> LeaderboardSnapshot:
-    """Return the current end-of-game leaderboard ordering for one room."""
+    """Return the current end-of-game leaderboard ordering for one room.
+
+    A8 does not persist historical score rows. Callers that need an immutable
+    leaderboard for the cooldown window must therefore capture this once when
+    the game finishes and then reuse that frozen snapshot instead of re-reading
+    room membership after joins or leaves.
+    """
 
     game = Game.objects.select_related("room").get(pk=game_id)
     entries = tuple(
@@ -674,8 +686,54 @@ def build_game_leaderboard_snapshot(game_id: int) -> LeaderboardSnapshot:
 
 
 @transaction.atomic
+def cancel_active_game_for_room(room_id: int) -> bool:
+    """Cancel every in-progress game in one room.
+
+    The room lifecycle code uses this when active play becomes non-resumable,
+    such as A8's "everyone left" path. The helper updates the active round(s)
+    and game row(s) together inside one transaction so callers never observe a
+    cancelled game with an active round still attached.
+    """
+
+    cancelled_at = timezone.now()
+    active_game_ids = list(
+        Game.objects.select_for_update()
+        .filter(room_id=room_id, status=GameStatus.IN_PROGRESS)
+        .order_by("started_at", "id")
+        .values_list("id", flat=True)
+    )
+    if not active_game_ids:
+        return False
+
+    Round.objects.select_for_update().filter(
+        game_id__in=active_game_ids,
+        status__isnull=True,
+        ended_at__isnull=True,
+    ).update(
+        status=RoundStatus.CANCELLED,
+        ended_at=cancelled_at,
+        updated_at=cancelled_at,
+    )
+    Game.objects.filter(
+        id__in=active_game_ids,
+        status=GameStatus.IN_PROGRESS,
+    ).update(
+        status=GameStatus.CANCELLED,
+        ended_at=cancelled_at,
+        updated_at=cancelled_at,
+    )
+    return True
+
+
+@transaction.atomic
 def complete_leaderboard_cooldown_for_room(room_id: int) -> LeaderboardCooldownResult:
-    """Advance a finished room out of the leaderboard cooldown."""
+    """Advance a finished room out of the A8 leaderboard cooldown.
+
+    This helper is intentionally conservative. It only restarts when the room
+    is still marked IN_PROGRESS and the latest game is FINISHED. That prevents
+    a stray timer callback from starting a new game after the room already
+    moved to lobby or empty_grace for some other reason.
+    """
 
     locked_room = Room.objects.select_for_update().select_related("word_pack").get(pk=room_id)
     latest_game = (
@@ -699,6 +757,9 @@ def complete_leaderboard_cooldown_for_room(room_id: int) -> LeaderboardCooldownR
 
     from rooms.services import promote_mid_game_spectators_to_players
 
+    # Mid-game joiners may still be marked SPECTATING when the leaderboard
+    # starts. Promote them before the restart eligibility check so the next
+    # game treats them exactly like the rest of the room.
     promote_mid_game_spectators_to_players(room_id=locked_room.id)
 
     locked_room.status = Room.Status.LOBBY
