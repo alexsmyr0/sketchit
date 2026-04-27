@@ -163,6 +163,7 @@ def _serialize_participant(player):
         "display_name": player.display_name,
         "connection_status": player.connection_status,
         "participation_status": player.participation_status,
+        "current_score": player.current_score,
     }
 
 

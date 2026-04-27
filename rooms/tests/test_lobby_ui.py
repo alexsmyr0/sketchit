@@ -86,6 +86,20 @@ class RoomLobbyUITests(TestCase):
         # Verify guest listing in the same response
         self.assertContains(response, "GuestUser")
 
+    def test_room_page_template_renders_gameplay_shell_contract(self):
+        response = self.host_client.get(
+            reverse("room-lobby-state", args=[self.room.join_code]),
+            HTTP_ACCEPT="text/html",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'id="game-view"')
+        self.assertContains(response, 'id="guess-input"')
+        self.assertContains(response, 'id="timer-bar"')
+        self.assertContains(response, 'id="intermission-overlay"')
+        self.assertContains(response, 'id="intermission-results"')
+        self.assertContains(response, 'id="intermission-return-button"')
+
     def test_lobby_template_disables_start_until_two_eligible_players_exist(self):
         self.guest.connection_status = Player.ConnectionStatus.DISCONNECTED
         self.guest.participation_status = Player.ParticipationStatus.SPECTATING

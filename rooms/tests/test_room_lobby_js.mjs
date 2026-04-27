@@ -23,6 +23,12 @@ class MockElement {
         this.className = "";
         this.title = "";
         this._innerHTML = "";
+        this.style = {};
+        this.placeholder = "";
+        this.classList = {
+            add() {},
+            remove() {},
+        };
     }
 
     addEventListener(eventName, listener) {
@@ -133,7 +139,10 @@ async function loadRoomLobbyScript({
     const roomJoinCode = new MockElement({ textContent: JSON.stringify("ROOM1234") });
     const currentPlayerIdElement = new MockElement({ textContent: JSON.stringify(currentPlayerId) });
     const csrfInput = new MockInputElement({ value: "csrf-token" });
+    const lobbyView = new MockElement({ hidden: false });
+    const gameView = new MockElement({ hidden: true });
     const participantList = new MockElement();
+    const gameParticipantList = new MockElement();
     const hostControls = new MockElement();
     hostControls.hidden = hostControlsInitiallyHidden;
     const guestView = new MockElement({ hidden: guestViewInitiallyHidden });
@@ -144,13 +153,36 @@ async function loadRoomLobbyScript({
     const editVisibility = new MockSelectElement({ value: "private" });
     const startGameButton = new MockButtonElement({ textContent: "Start Game" });
     const minPlayersHint = new MockElement({ hidden: true });
-    const copyUrlButton = new MockButtonElement({ textContent: "📋" });
+    const copyUrlButton = new MockButtonElement({ textContent: "[copy]" });
     const joinUrlInput = new MockInputElement({ value: "http://localhost:8000/rooms/join/ROOM1234/" });
     const roomStatusBadge = new MockElement({ textContent: roomStatusText });
     const settingsForm = new MockElement();
     settingsForm.elements = [editRoomName, editVisibility, saveSettingsButton];
 
+    const roundNumber = new MockElement({ textContent: "Round 1" });
+    const timerDisplay = new MockElement({ textContent: "90" });
+    const timerBar = new MockElement();
+    timerBar.style.width = "100%";
+    const wordDisplay = new MockElement({ textContent: "_ _ _ _" });
+    const drawerHint = new MockElement({ hidden: true });
+    const guessHistory = new MockElement();
+    const guessInput = new MockInputElement({ value: "" });
+    const guessInputContainer = new MockElement();
+    const submitGuessButton = new MockButtonElement({ textContent: "Send" });
+
+    const intermissionOverlay = new MockElement({ hidden: true });
+    const intermissionTitle = new MockElement({ textContent: "Round Over!" });
+    const intermissionResults = new MockElement();
+    const intermissionSeconds = new MockElement({ textContent: "10" });
+    const intermissionTimer = new MockElement({ hidden: false });
+    const intermissionReturnButton = new MockButtonElement({
+        hidden: true,
+        textContent: "Return to lobby",
+    });
+
     const elementsById = new Map([
+        ["lobby-view", lobbyView],
+        ["game-view", gameView],
         ["room-name-display", new MockElement({ textContent: "Sketch Room" })],
         ["room-status-badge", roomStatusBadge],
         ["participant-list", participantList],
@@ -169,6 +201,21 @@ async function loadRoomLobbyScript({
         ["guest-view-loader", guestViewLoader],
         ["lobby-error", new MockElement({ hidden: true })],
         ["lobby-status", new MockElement({ hidden: true })],
+        ["round-number", roundNumber],
+        ["timer-display", timerDisplay],
+        ["timer-bar", timerBar],
+        ["game-participant-list", gameParticipantList],
+        ["word-display", wordDisplay],
+        ["drawer-hint", drawerHint],
+        ["guess-history", guessHistory],
+        ["guess-input", guessInput],
+        ["guess-input-container", guessInputContainer],
+        ["submit-guess-button", submitGuessButton],
+        ["intermission-overlay", intermissionOverlay],
+        ["intermission-title", intermissionTitle],
+        ["intermission-results", intermissionResults],
+        ["intermission-seconds", intermissionSeconds],
+        ["intermission-return-button", intermissionReturnButton],
         ["room-join-code", roomJoinCode],
         ["current-player-id", currentPlayerIdElement],
     ]);
@@ -176,9 +223,16 @@ async function loadRoomLobbyScript({
     class MockWebSocket {
         constructor(url) {
             this.url = url;
+            this.sent = [];
+            this.readyState = MockWebSocket.OPEN;
             socketInstances.push(this);
         }
+
+        send(payload) {
+            this.sent.push(payload);
+        }
     }
+    MockWebSocket.OPEN = 1;
 
     const document = {
         activeElement: null,
@@ -188,6 +242,9 @@ async function loadRoomLobbyScript({
         querySelector(selector) {
             if (selector === '[name="csrfmiddlewaretoken"]') {
                 return csrfInput;
+            }
+            if (selector === ".intermission-timer") {
+                return intermissionTimer;
             }
             return null;
         },
@@ -239,6 +296,10 @@ async function loadRoomLobbyScript({
             location: {
                 protocol: "http:",
                 host: "localhost:8000",
+                reloadCalled: false,
+                reload() {
+                    this.reloadCalled = true;
+                },
             },
             setTimeout(callback) {
                 const timerId = nextTimerId;
@@ -265,6 +326,8 @@ async function loadRoomLobbyScript({
         elementsById,
         fetchCalls,
         socketInstances,
+        intermissionTimer,
+        windowLocation: context.window.location,
         runAllTimers() {
             const pending = Array.from(timers.values());
             timers.clear();
@@ -287,7 +350,7 @@ test("copy fallback shows an error when execCommand fails", async () => {
         harness.elementsById.get("lobby-error").textContent,
         "Failed to copy invite link. Please copy it manually.",
     );
-    assert.equal(harness.elementsById.get("copy-url-button").textContent, "📋");
+    assert.equal(harness.elementsById.get("copy-url-button").textContent, "[copy]");
 });
 
 
@@ -472,7 +535,7 @@ test("guest promotion via host.changed exposed host controls before the next roo
 
     const participantEntries = harness.elementsById.get("participant-list").children;
     assert.equal(participantEntries.length, 2);
-    assert.equal(participantEntries[1].children[2].textContent, "👑");
+    assert.equal(participantEntries[1].children[2].title, "Room Host");
 });
 
 
@@ -509,6 +572,224 @@ test("room.state after host promotion kept the new host editable and moved the c
     const participantEntries = harness.elementsById.get("participant-list").children;
     assert.equal(participantEntries.length, 2);
     assert.equal(participantEntries[0].children.length, 2);
-    assert.equal(participantEntries[1].children[2].textContent, "👑");
+    assert.equal(participantEntries[1].children[2].title, "Room Host");
     assert.equal(participantEntries[1].children[3].textContent, "(You)");
+});
+
+
+test("in-progress room.state switches to the gameplay view and renders scores", async () => {
+    const harness = await loadRoomLobbyScript();
+
+    harness.client.handleServerEvent({
+        type: "room.state",
+        payload: buildRoomState({
+            roomStatus: "in_progress",
+            participants: [
+                {
+                    id: 7,
+                    display_name: "Host Alex",
+                    connection_status: "CONNECTED",
+                    participation_status: "PLAYING",
+                    current_score: 12,
+                },
+                {
+                    id: 9,
+                    display_name: "Jamie",
+                    connection_status: "CONNECTED",
+                    participation_status: "PLAYING",
+                },
+            ],
+        }),
+    });
+
+    assert.equal(harness.elementsById.get("lobby-view").hidden, true);
+    assert.equal(harness.elementsById.get("game-view").hidden, false);
+    const entries = harness.elementsById.get("game-participant-list").children;
+    assert.equal(entries.length, 2);
+    assert.equal(entries[0].children[1].textContent, "12");
+    assert.equal(entries[1].children[1].textContent, "—");
+});
+
+
+test("round.started and round.timer keep the timer bar numeric across updates", async () => {
+    const harness = await loadRoomLobbyScript();
+    harness.client.handleServerEvent({
+        type: "room.state",
+        payload: buildRoomState({ roomStatus: "in_progress" }),
+    });
+
+    harness.client.handleServerEvent({
+        type: "round.started",
+        payload: {
+            round_id: 4,
+            sequence_number: 2,
+            duration_seconds: 90,
+            masked_word: "apple",
+            role: "guesser",
+            drawer_participant_id: 9,
+        },
+    });
+    harness.client.handleServerEvent({
+        type: "round.timer",
+        payload: {
+            round_id: 4,
+            remaining_seconds: 45,
+        },
+    });
+
+    assert.equal(harness.elementsById.get("round-number").textContent, "Round 2");
+    assert.equal(harness.elementsById.get("timer-display").textContent, "45");
+    assert.equal(harness.elementsById.get("timer-bar").style.width, "50%");
+    assert.equal(harness.elementsById.get("word-display").textContent, "a p p l e");
+});
+
+
+test("round.drawer_word restores the drawer word after reconnect", async () => {
+    const harness = await loadRoomLobbyScript();
+    harness.client.handleServerEvent({
+        type: "room.state",
+        payload: buildRoomState({ roomStatus: "in_progress" }),
+    });
+
+    harness.client.handleServerEvent({
+        type: "round.drawer_word",
+        payload: {
+            round_id: 11,
+            word: "rocket",
+        },
+    });
+
+    assert.equal(harness.elementsById.get("word-display").textContent, "rocket");
+    assert.equal(harness.elementsById.get("drawer-hint").hidden, false);
+    assert.equal(harness.elementsById.get("guess-input").disabled, true);
+});
+
+
+test("spectators stay read-only during an active round", async () => {
+    const harness = await loadRoomLobbyScript();
+    harness.client.handleServerEvent({
+        type: "room.state",
+        payload: buildRoomState({
+            roomStatus: "in_progress",
+            participants: [
+                {
+                    id: 7,
+                    display_name: "Host Alex",
+                    connection_status: "CONNECTED",
+                    participation_status: "SPECTATING",
+                },
+                {
+                    id: 9,
+                    display_name: "Jamie",
+                    connection_status: "CONNECTED",
+                    participation_status: "PLAYING",
+                },
+            ],
+        }),
+    });
+    harness.client.handleServerEvent({
+        type: "round.state",
+        payload: {
+            phase: "round",
+            round_id: 8,
+            drawer_participant_id: 9,
+        },
+    });
+
+    assert.equal(harness.elementsById.get("guess-input").disabled, true);
+    assert.equal(harness.elementsById.get("submit-guess-button").disabled, true);
+    assert.equal(
+        harness.elementsById.get("guess-input").placeholder,
+        "You are spectating this round.",
+    );
+});
+
+
+test("submitGuess keeps the typed text when the socket is reconnecting", async () => {
+    const harness = await loadRoomLobbyScript();
+    harness.client.handleServerEvent({
+        type: "room.state",
+        payload: buildRoomState({ roomStatus: "in_progress" }),
+    });
+    harness.client.handleServerEvent({
+        type: "round.state",
+        payload: {
+            phase: "round",
+            round_id: 8,
+            drawer_participant_id: 9,
+        },
+    });
+
+    harness.client.socket.readyState = 0;
+    harness.elementsById.get("guess-input").value = "rocket";
+
+    harness.client.submitGuess();
+
+    assert.equal(harness.elementsById.get("guess-input").value, "rocket");
+    assert.equal(
+        harness.elementsById.get("lobby-error").textContent,
+        "Connection is still reconnecting. Please try your guess again in a moment.",
+    );
+});
+
+
+test("guess.error surfaces feedback instead of silently dropping the attempt", async () => {
+    const harness = await loadRoomLobbyScript();
+
+    harness.client.handleServerEvent({
+        type: "guess.error",
+        payload: {
+            message: "No active round in progress.",
+        },
+    });
+
+    assert.equal(harness.elementsById.get("lobby-error").textContent, "No active round in progress.");
+    assert.equal(harness.elementsById.get("guess-history").children.length, 1);
+    assert.equal(
+        harness.elementsById.get("guess-history").children[0].textContent,
+        "No active round in progress.",
+    );
+});
+
+
+test("round.state intermission and game.finished populate the overlay", async () => {
+    const harness = await loadRoomLobbyScript();
+    harness.client.handleServerEvent({
+        type: "room.state",
+        payload: buildRoomState({ roomStatus: "in_progress" }),
+    });
+
+    harness.client.handleServerEvent({
+        type: "round.state",
+        payload: {
+            phase: "intermission",
+            round_id: 8,
+            remaining_seconds: 6,
+            leaderboard: [
+                { display_name: "Host Alex", current_score: 42 },
+                { display_name: "Jamie", current_score: 12 },
+            ],
+        },
+    });
+
+    assert.equal(harness.elementsById.get("intermission-overlay").hidden, false);
+    assert.equal(harness.elementsById.get("intermission-seconds").textContent, "6");
+    assert.match(harness.elementsById.get("intermission-results").innerHTML, /Leaderboard/);
+
+    harness.client.handleServerEvent({
+        type: "game.finished",
+        payload: {
+            winner: { display_name: "Host Alex" },
+            leaderboard: [
+                { display_name: "Host Alex", current_score: 42 },
+                { display_name: "Jamie", current_score: 12 },
+            ],
+        },
+    });
+
+    assert.equal(harness.elementsById.get("intermission-title").textContent, "Game Over!");
+    assert.equal(harness.intermissionTimer.hidden, true);
+    assert.equal(harness.elementsById.get("intermission-return-button").hidden, false);
+    assert.match(harness.elementsById.get("intermission-results").innerHTML, /Winner:/);
+    assert.match(harness.elementsById.get("intermission-results").innerHTML, /Final Scores/);
 });
