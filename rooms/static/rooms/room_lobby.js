@@ -107,7 +107,7 @@ class LobbyClient {
 
         // Guess Submission
         if (this.elements.guessInput) {
-            this.elements.guessInput.addEventListener('keypress', (e) => {
+            this.elements.guessInput.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter') this.submitGuess();
             });
         }
@@ -220,6 +220,18 @@ class LobbyClient {
         }
     }
 
+    normalizeParticipant(participant) {
+        return {
+            ...participant,
+            connection_status: typeof participant.connection_status === 'string'
+                ? participant.connection_status.toLowerCase()
+                : participant.connection_status,
+            participation_status: typeof participant.participation_status === 'string'
+                ? participant.participation_status.toLowerCase()
+                : participant.participation_status,
+        };
+    }
+
     updateLobbyUI(state, { forceSettingsSync = false } = {}) {
         const { room, host, participants } = state;
         const previousHostId = this.currentHostId;
@@ -228,7 +240,9 @@ class LobbyClient {
 
         this.isAwaitingStartRoomState = false;
         this.hasReceivedRoomState = true;
-        this.currentParticipants = participants;
+        this.currentParticipants = Array.isArray(participants)
+            ? participants.map((participant) => this.normalizeParticipant(participant))
+            : [];
         this.currentHostId = host ? host.id : null;
         this.currentRoomStatus = room.status;
 
@@ -293,8 +307,8 @@ class LobbyClient {
         }
 
         const eligibleCount = this.currentParticipants.filter((participant) => (
-            participant.connection_status === 'CONNECTED'
-            && participant.participation_status !== 'SPECTATING'
+            participant.connection_status === 'connected'
+            && participant.participation_status !== 'spectating'
         )).length;
         const canStart = isHost && isLobby && eligibleCount >= 2 && !this.isBusy();
 
@@ -691,7 +705,7 @@ class LobbyClient {
         this.currentPhase = payload.phase || this.currentPhase;
         this.activeRoundId = payload.round_id || this.activeRoundId;
         this.isDrawer = payload.drawer_participant_id === this.currentPlayerId;
-        this.isSpectator = this.getCurrentParticipant()?.participation_status === 'SPECTATING';
+        this.isSpectator = this.getCurrentParticipant()?.participation_status === 'spectating';
 
         if (payload.phase === 'intermission') {
             this.showIntermissionOverlay({

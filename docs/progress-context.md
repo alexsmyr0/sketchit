@@ -10,10 +10,10 @@ This file is a concise snapshot of the current implementation state. It describe
 
 ## UI
 
-- Real-time product UI is partially implemented.
-- `room_entry.html` (G-01) and `room_lobby.html` (G-02) exist and are fully functional.
-- `room_lobby.js` handles WebSocket synchronization, host controls (starting game, updating settings), and participant list updates.
-- Premium styling has been applied to the entry and lobby screens.
+- Real-time product UI is implemented through `room_entry.html` and a unified `room_lobby.html` experience.
+- `room_lobby.js` now covers both the synchronized lobby and the G-03 gameplay HUD: room-state sync, host controls, timer/score rendering, guess input/result handling, spectator lockout, reconnect-safe round sync, and intermission/final leaderboard overlays.
+- The old standalone gameplay template/client files were removed so the room page remains the single browser surface for lobby plus gameplay state.
+- Premium styling has been applied to the entry and room screens.
 
 ## Backend
 
@@ -37,9 +37,8 @@ This file is a concise snapshot of the current implementation state. It describe
 
 ## Game logic
 
-- A game service layer is being implemented.
-- Turn flow, scoring, and round transitions are partially implemented.
-- Drawers can draw, and non-drawers can submit guesses (G-03/G-04 implementation in progress or partially present).
+- The game service and runtime layers drive turn flow, scoring, round transitions, leaderboard cooldowns, and drawer-disconnect handling.
+- The browser now renders the gameplay shell for guessing rounds and intermission states, while drawing-specific browser work remains separate under G-04.
 
 ## AI integration
 
