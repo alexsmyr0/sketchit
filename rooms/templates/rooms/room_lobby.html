@@ -116,8 +116,26 @@
                     </header>
                     
                     <div class="canvas-container">
-                        <div id="canvas-placeholder" class="canvas-placeholder">
-                            <p>Drawing surface coming soon...</p>
+                        {% comment %}
+                        G-04 drawing surface. The canvas is present for every player so
+                        reconnect snapshot events can be rendered, but the toolbar starts
+                        hidden and will only be enabled for the active drawer by JS.
+                        {% endcomment %}
+                        <canvas id="drawing-canvas" class="drawing-canvas" aria-label="Shared drawing canvas"></canvas>
+                        <div id="drawing-toolbar" class="drawing-toolbar" hidden>
+                            <div class="drawing-colors" aria-label="Brush color">
+                                <button type="button" class="color-swatch is-selected" data-color="#000000" aria-label="Black brush"></button>
+                                <button type="button" class="color-swatch" data-color="#ff595e" aria-label="Red brush"></button>
+                                <button type="button" class="color-swatch" data-color="#ffca3a" aria-label="Yellow brush"></button>
+                                <button type="button" class="color-swatch" data-color="#8ac926" aria-label="Green brush"></button>
+                                <button type="button" class="color-swatch" data-color="#1982c4" aria-label="Blue brush"></button>
+                            </div>
+                            <div class="drawing-sizes" aria-label="Brush size">
+                                <button type="button" class="brush-size is-selected" data-size="4" aria-label="Small brush">S</button>
+                                <button type="button" class="brush-size" data-size="8" aria-label="Medium brush">M</button>
+                                <button type="button" class="brush-size" data-size="14" aria-label="Large brush">L</button>
+                            </div>
+                            <button id="clear-canvas-button" type="button" class="clear-canvas-button">Clear</button>
                         </div>
                     </div>
                 </div>
