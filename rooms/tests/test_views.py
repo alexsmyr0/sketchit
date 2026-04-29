@@ -18,6 +18,20 @@ from rooms.services import get_empty_room_cleanup_deadline
 from words.models import Word, WordPack, WordPackEntry
 
 
+def _ensure_default_word_pack_for_tests():
+    """Create the MVP default word pack for tests that exercise room defaults.
+
+    TransactionTestCase flushes table data between tests. Because the default
+    word pack is data from a migration rather than a schema object, tests that
+    rely on Room.word_pack's default should recreate it explicitly.
+    """
+
+    word_pack, _ = WordPack.objects.get_or_create(name=MVP_DEFAULT_WORD_PACK_NAME)
+    word, _ = Word.objects.get_or_create(text="apple")
+    WordPackEntry.objects.get_or_create(word_pack=word_pack, word=word)
+    return word_pack
+
+
 class RoomEntryPageTests(TestCase):
     def test_room_entry_page_renders_forms_and_csrf_token(self):
         response = self.client.get("/")
@@ -274,6 +288,9 @@ class RoomWordPackModelTests(TestCase):
 
 
 class ConcurrentRoomOwnershipTests(TransactionTestCase):
+    def setUp(self):
+        _ensure_default_word_pack_for_tests()
+
     def _create_session_key(self):
         session = SessionStore()
         session.save()

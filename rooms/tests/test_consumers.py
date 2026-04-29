@@ -895,6 +895,7 @@ class RoomConsumerConnectTests(TransactionTestCase):
                     "display_name": self.player.display_name,
                     "connection_status": Player.ConnectionStatus.CONNECTED,
                     "participation_status": self.player.participation_status,
+                    "current_score": self.player.current_score,
                 }
             ],
         )
@@ -1058,7 +1059,15 @@ class RoomConsumerConnectTests(TransactionTestCase):
 
         await drawer_socket.disconnect()
 
-        grace_state = await self._receive_until_type(observer_socket, "round.state")
+        # A round.state for the normal drawing phase may already be queued from
+        # game start. Keep reading until the disconnect-grace state arrives.
+        grace_state = None
+        for _ in range(5):
+            candidate_state = await self._receive_until_type(observer_socket, "round.state")
+            if candidate_state["payload"]["status"] == "drawer_disconnected_grace":
+                grace_state = candidate_state
+                break
+        self.assertIsNotNone(grace_state)
         self.assertEqual(grace_state["payload"]["status"], "drawer_disconnected_grace")
         self.assertTrue(grace_state["payload"].get("drawer_disconnect_deadline_at"))
 
@@ -1218,6 +1227,7 @@ class RoomConsumerConnectTests(TransactionTestCase):
                     "display_name": bob_player.display_name,
                     "connection_status": Player.ConnectionStatus.CONNECTED,
                     "participation_status": bob_player.participation_status,
+                    "current_score": bob_player.current_score,
                 }
             ],
         )

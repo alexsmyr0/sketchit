@@ -7,20 +7,38 @@ from django.urls import reverse
 from django.utils import timezone
 
 from rooms.models import Player, Room
+from words.models import Word, WordPack, WordPackEntry
+
+
+class _FakeStartedGame:
+    """Small test double matching the fields the start-game view reads."""
+
+    def __init__(self, *, game, first_round):
+        self.game = game
+        self.first_round = first_round
 
 
 class RoomLobbyUITests(TestCase):
     def _ensure_session_key(self, client):
+        """Create a real session key so the view can identify the test client."""
         session = client.session
         session.save()
         return session.session_key
 
     def setUp(self):
+        # Room.word_pack is required in the real MySQL-backed schema. Creating
+        # the pack explicitly keeps these template tests independent from any
+        # seed data that may or may not exist in a reused test database.
+        self.word_pack = WordPack.objects.create(name="Lobby Test Pack")
+        self.word = Word.objects.create(text="rocket")
+        WordPackEntry.objects.create(word_pack=self.word_pack, word=self.word)
+
         self.room = Room.objects.create(
             name="Test Room",
             join_code="LOBBY123",
             visibility=Room.Visibility.PUBLIC,
-            status=Room.Status.LOBBY
+            status=Room.Status.LOBBY,
+            word_pack=self.word_pack,
         )
         
         # Setup Host
@@ -144,26 +162,32 @@ class RoomLobbyUITests(TestCase):
     @patch("rooms.views.schedule_room_state_broadcast_after_commit")
     def test_start_game_triggers_broadcast(self, mock_broadcast):
         url = reverse("start-game", args=[self.room.join_code])
-        
-        # Mock start_game_for_room to return a structure the view can handle
-        mock_started_game = patch("rooms.views.start_game_for_room").start()
-        mock_started_game.return_value.game.id = 1
-        mock_started_game.return_value.game.status = "in_progress"
-        mock_started_game.return_value.game.snapshot_words.count.return_value = 5
-        mock_started_game.return_value.first_round.id = 10
-        mock_started_game.return_value.first_round.sequence_number = 1
-        mock_started_game.return_value.first_round.status = "active"
-        mock_started_game.return_value.first_round.drawer_participant_id = self.host.id
-        mock_started_game.return_value.first_round.drawer_nickname = self.host.display_name
-        mock_started_game.return_value.first_round.selected_game_word_id = 100
 
-        try:
+        # The view only needs a narrow StartedGame-shaped object here; using a
+        # context-managed patch prevents this test double from leaking into
+        # later view tests in the full MySQL suite.
+        fake_game = type("FakeGame", (), {})()
+        fake_game.id = 1
+        fake_game.status = "in_progress"
+        fake_game.snapshot_words = type(
+            "FakeSnapshotWords",
+            (),
+            {"count": lambda self: 5},
+        )()
+        fake_round = type("FakeRound", (), {})()
+        fake_round.id = 10
+        fake_round.sequence_number = 1
+        fake_round.status = "active"
+        fake_round.drawer_participant_id = self.host.id
+        fake_round.drawer_nickname = self.host.display_name
+        fake_round.selected_game_word_id = 100
+        fake_started_game = _FakeStartedGame(game=fake_game, first_round=fake_round)
+
+        with patch("rooms.views.start_game_for_room", return_value=fake_started_game) as mock_started_game:
             response = self.host_client.post(url)
             self.assertEqual(response.status_code, 201) # View returns 201 on success
             mock_started_game.assert_called_once()
-        finally:
-            patch("rooms.views.start_game_for_room").stop()
-        
+
         # Verify broadcast was scheduled by the view
         mock_broadcast.assert_called_once_with(
             join_code=self.room.join_code,

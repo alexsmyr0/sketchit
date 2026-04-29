@@ -1,5 +1,5 @@
-import json
-import asyncio
+"""Tests for browser-facing gameplay events over the room WebSocket."""
+
 import os
 import fakeredis
 from datetime import timedelta
@@ -12,7 +12,6 @@ os.environ.setdefault("MYSQL_PASSWORD", "test")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 
 from django.test import TransactionTestCase, override_settings
-from django.urls import reverse
 from channels.testing import WebsocketCommunicator
 from channels.db import database_sync_to_async
 from config.routing import websocket_urlpatterns
@@ -21,18 +20,30 @@ from channels.routing import URLRouter
 from rooms.models import Room, Player
 from words.models import Word, WordPack, WordPackEntry
 from django.contrib.sessions.backends.db import SessionStore
-from games.services import start_game_for_room
 from games import runtime as game_runtime
+from rooms.tests.test_consumers import (
+    _connect_and_drain_initial_sync,
+    _receive_until_type,
+)
 
 _TEST_APP = AuthMiddlewareStack(URLRouter(websocket_urlpatterns))
 
-@override_settings(DATABASES={'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}})
+
 class GameplayUITests(TransactionTestCase):
+    """Gameplay WebSocket UI tests that need committed rows across async tasks.
+
+    TransactionTestCase is intentional here: Channels and database_sync_to_async
+    may use different database connections, so the setup data must be committed
+    and visible outside the main test method's connection.
+    """
+
     def setUp(self):
         from rooms import consumers as room_consumers
         game_runtime.reset_runtime_state_for_tests()
         
-        # Patch Redis
+        # The app normally talks to Redis for runtime room/game state. These
+        # tests replace that dependency with fakeredis so they can focus on the
+        # WebSocket behavior without requiring a real Redis server.
         self.fake_redis = fakeredis.FakeRedis()
         room_consumers._redis_client = self.fake_redis
         game_runtime._redis_client = self.fake_redis
@@ -63,12 +74,14 @@ class GameplayUITests(TransactionTestCase):
         self.room.save()
 
     def tearDown(self):
+        """Restore patched runtime dependencies so one test cannot affect another."""
         from games import runtime as game_runtime
         game_runtime.reset_runtime_state_for_tests()
         from games import services as game_services
         game_services._get_redis_client = self._orig_services_redis
 
     def _session_headers(self):
+        """Send the saved Django session key as a WebSocket cookie."""
         return [(b"cookie", f"sessionid={self.session.session_key}".encode())]
 
     @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)
@@ -89,7 +102,8 @@ class GameplayUITests(TransactionTestCase):
 
     @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)
     async def test_guess_submission_and_result(self):
-        # Add another player to start the game
+        # Django's ORM is synchronous. Wrapping setup in database_sync_to_async
+        # keeps the async test method from blocking the event loop.
         @database_sync_to_async
         def _setup_second_player_and_start_game():
             session2 = SessionStore()
@@ -102,31 +116,35 @@ class GameplayUITests(TransactionTestCase):
                 session_expires_at=timezone.now() + timedelta(hours=1)
             )
             from games.services import start_game_for_room
-            start_game_for_room(self.room)
+            started_game = start_game_for_room(self.room)
 
-        await _setup_second_player_and_start_game()
-        
+            # The first drawer is random. Return the session key for whichever
+            # player is not drawing so the test always submits a legal guess.
+            if started_game.first_round.drawer_participant_id == self.player.id:
+                return session2.session_key
+            return self.session.session_key
+
+        guesser_session_key = await _setup_second_player_and_start_game()
+
         communicator = WebsocketCommunicator(
             _TEST_APP,
             f"/ws/rooms/{self.room.join_code}/",
-            headers=self._session_headers()
+            headers=[(b"cookie", f"sessionid={guesser_session_key}".encode())]
         )
-        await communicator.connect()
-        
-        # Drain initial sync events
-        while True:
-            try:
-                msg = await communicator.receive_json_from(timeout=0.1)
-            except asyncio.TimeoutError:
-                break
-        
-        # Submit a guess
+        await _connect_and_drain_initial_sync(
+            communicator,
+            self.room.join_code,
+            expects_game_active=True,
+        )
+
+        # After connection, the consumer has already sent room and round sync
+        # events. The actual behavior under test starts with this guess event.
         await communicator.send_json_to({
             "type": "guess.submit",
             "payload": {"text": "apple"}
         })
-        
-        response = await communicator.receive_json_from()
+
+        response = await _receive_until_type(communicator, "guess.result")
         self.assertEqual(response["type"], "guess.result")
         self.assertEqual(response["payload"]["outcome"], "correct")
         

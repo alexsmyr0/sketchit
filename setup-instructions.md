@@ -121,6 +121,7 @@ docker compose run --rm app python manage.py test rooms.tests games.tests --sett
 
 Important notes:
 
+- `config.test_settings` is the only supported Django test settings module.
 - `config.test_settings` is intended to be used from Docker, not from the host shell.
 - The test settings force `MYSQL_HOST=mysql` and Docker test credentials, so host-side commands like `python manage.py test --settings=config.test_settings` are not the supported path.
 - `config.test_settings` still uses MySQL, but swaps Channels to the in-memory layer so tests that do not need Redis transport behavior can run without Redis itself being under test.
