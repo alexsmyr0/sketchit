@@ -28,6 +28,7 @@ class MockElement {
         this.classList = {
             add() {},
             remove() {},
+            toggle() {},
         };
     }
 
@@ -63,6 +64,54 @@ class MockButtonElement extends MockElement {}
 class MockInputElement extends MockElement {}
 class MockSelectElement extends MockElement {}
 class MockTextAreaElement extends MockElement {}
+
+
+class MockCanvasContext {
+    constructor() {
+        this.calls = [];
+        this.fillStyle = "";
+        this.strokeStyle = "";
+        this.lineWidth = 1;
+        this.lineCap = "butt";
+        this.lineJoin = "miter";
+    }
+
+    fillRect(...args) { this.calls.push(["fillRect", ...args]); }
+    beginPath() { this.calls.push(["beginPath"]); }
+    moveTo(...args) { this.calls.push(["moveTo", ...args]); }
+    lineTo(...args) { this.calls.push(["lineTo", ...args]); }
+    stroke() { this.calls.push(["stroke"]); }
+    arc(...args) { this.calls.push(["arc", ...args]); }
+    fill() { this.calls.push(["fill"]); }
+}
+
+
+class MockCanvasElement extends MockElement {
+    constructor() {
+        super();
+        this.width = 0;
+        this.height = 0;
+        this.clientWidth = 600;
+        this.clientHeight = 400;
+        this.context = new MockCanvasContext();
+    }
+
+    getContext(type) {
+        return type === "2d" ? this.context : null;
+    }
+
+    getBoundingClientRect() {
+        return {
+            left: 0,
+            top: 0,
+            width: this.clientWidth,
+            height: this.clientHeight,
+        };
+    }
+
+    setPointerCapture() {}
+    releasePointerCapture() {}
+}
 
 
 function makeDeferred() {
@@ -165,6 +214,26 @@ async function loadRoomLobbyScript({
     timerBar.style.width = "100%";
     const wordDisplay = new MockElement({ textContent: "_ _ _ _" });
     const drawerHint = new MockElement({ hidden: true });
+    const canvasContainer = new MockElement();
+    canvasContainer.getBoundingClientRect = () => ({
+        left: 0,
+        top: 0,
+        width: 600,
+        height: 400,
+    });
+    const drawingCanvas = new MockCanvasElement();
+    const drawingToolbar = new MockElement({ hidden: true });
+    const colorSwatches = [
+        new MockButtonElement({ dataset: { color: "#000000" } }),
+        new MockButtonElement({ dataset: { color: "#ff595e" } }),
+        new MockButtonElement({ dataset: { color: "#1982c4" } }),
+    ];
+    const brushSizeButtons = [
+        new MockButtonElement({ dataset: { size: "4" } }),
+        new MockButtonElement({ dataset: { size: "8" } }),
+        new MockButtonElement({ dataset: { size: "14" } }),
+    ];
+    const clearCanvasButton = new MockButtonElement({ textContent: "Clear" });
     const guessHistory = new MockElement();
     const guessInput = new MockInputElement({ value: "" });
     const guessInputContainer = new MockElement();
@@ -207,6 +276,9 @@ async function loadRoomLobbyScript({
         ["game-participant-list", gameParticipantList],
         ["word-display", wordDisplay],
         ["drawer-hint", drawerHint],
+        ["drawing-canvas", drawingCanvas],
+        ["drawing-toolbar", drawingToolbar],
+        ["clear-canvas-button", clearCanvasButton],
         ["guess-history", guessHistory],
         ["guess-input", guessInput],
         ["guess-input-container", guessInputContainer],
@@ -246,12 +318,27 @@ async function loadRoomLobbyScript({
             if (selector === ".intermission-timer") {
                 return intermissionTimer;
             }
+            if (selector === ".canvas-container") {
+                return canvasContainer;
+            }
             return null;
+        },
+        querySelectorAll(selector) {
+            if (selector === ".color-swatch") {
+                return colorSwatches;
+            }
+            if (selector === ".brush-size") {
+                return brushSizeButtons;
+            }
+            return [];
         },
         getElementById(id) {
             return elementsById.get(id) ?? null;
         },
         createElement(tagName) {
+            if (tagName === "canvas") {
+                return new MockCanvasElement();
+            }
             return new MockElement({ dataset: { tagName } });
         },
         execCommand(command) {
@@ -310,6 +397,9 @@ async function loadRoomLobbyScript({
             clearTimeout(timerId) {
                 timers.delete(timerId);
             },
+            addEventListener(eventName, listener) {
+                listeners.set(`window:${eventName}`, listener);
+            },
         },
     };
     context.window.document = document;
@@ -326,6 +416,12 @@ async function loadRoomLobbyScript({
         elementsById,
         fetchCalls,
         socketInstances,
+        drawingCanvas,
+        drawingContext: drawingCanvas.context,
+        drawingToolbar,
+        clearCanvasButton,
+        colorSwatches,
+        brushSizeButtons,
         intermissionTimer,
         windowLocation: context.window.location,
         runAllTimers() {
@@ -792,4 +888,186 @@ test("round.state intermission and game.finished populate the overlay", async ()
     assert.equal(harness.elementsById.get("intermission-return-button").hidden, false);
     assert.match(harness.elementsById.get("intermission-results").innerHTML, /Winner:/);
     assert.match(harness.elementsById.get("intermission-results").innerHTML, /Final Scores/);
+});
+
+
+test("drawer canvas input sent drawing stroke and end-stroke events", async () => {
+    const harness = await loadRoomLobbyScript();
+
+    harness.client.handleServerEvent({
+        type: "room.state",
+        payload: buildRoomState({ roomStatus: "in_progress" }),
+    });
+    harness.client.handleServerEvent({
+        type: "round.started",
+        payload: {
+            round_id: 31,
+            role: "drawer",
+            drawer_participant_id: 7,
+            duration_seconds: 90,
+            sequence_number: 1,
+            word: "apple",
+        },
+    });
+
+    harness.drawingCanvas.getListener("pointerdown")({
+        clientX: 60,
+        clientY: 40,
+        pointerId: 1,
+        preventDefault() {},
+    });
+    harness.drawingCanvas.getListener("pointermove")({
+        clientX: 120,
+        clientY: 80,
+        pointerId: 1,
+        preventDefault() {},
+    });
+    harness.drawingCanvas.getListener("pointerup")({
+        pointerId: 1,
+        preventDefault() {},
+    });
+
+    const sentMessages = harness.socketInstances[0].sent.map((message) => JSON.parse(message));
+    const strokeMessages = sentMessages.filter((message) => message.type === "drawing.stroke");
+    const endStrokeMessages = sentMessages.filter((message) => message.type === "drawing.end_stroke");
+
+    assert.equal(harness.drawingToolbar.hidden, false);
+    assert.equal(strokeMessages.length, 2);
+    assert.equal(endStrokeMessages.length, 1);
+    assert.equal(strokeMessages[1].payload.color, "#000000");
+    assert.equal(strokeMessages[1].payload.size, 4);
+    assert.equal(strokeMessages[1].payload.x1, 0.1);
+    assert.equal(strokeMessages[1].payload.y1, 0.1);
+    assert.equal(strokeMessages[1].payload.x2, 0.2);
+    assert.equal(strokeMessages[1].payload.y2, 0.2);
+});
+
+
+test("non-drawer canvas input did not send drawing events", async () => {
+    const harness = await loadRoomLobbyScript();
+
+    harness.client.handleServerEvent({
+        type: "room.state",
+        payload: buildRoomState({ roomStatus: "in_progress" }),
+    });
+    harness.client.handleServerEvent({
+        type: "round.started",
+        payload: {
+            round_id: 32,
+            role: "guesser",
+            drawer_participant_id: 9,
+            duration_seconds: 90,
+            sequence_number: 1,
+            masked_word: "_____",
+        },
+    });
+
+    harness.drawingCanvas.getListener("pointerdown")({
+        clientX: 60,
+        clientY: 40,
+        pointerId: 1,
+        preventDefault() {},
+    });
+    harness.drawingCanvas.getListener("pointermove")({
+        clientX: 120,
+        clientY: 80,
+        pointerId: 1,
+        preventDefault() {},
+    });
+    harness.drawingCanvas.getListener("pointerup")({
+        pointerId: 1,
+        preventDefault() {},
+    });
+
+    const sentMessages = harness.socketInstances[0].sent.map((message) => JSON.parse(message));
+
+    assert.equal(harness.drawingToolbar.hidden, true);
+    assert.deepEqual(sentMessages.filter((message) => message.type.startsWith("drawing.")), []);
+});
+
+
+test("inbound drawing stroke and clear events rendered on the canvas", async () => {
+    const harness = await loadRoomLobbyScript();
+    const initialClearCount = harness.drawingContext.calls
+        .filter(([name]) => name === "fillRect")
+        .length;
+
+    harness.client.handleServerEvent({
+        type: "drawing.stroke",
+        payload: {
+            x1: 0.1,
+            y1: 0.1,
+            x2: 0.5,
+            y2: 0.5,
+            color: "#1982c4",
+            size: 8,
+        },
+    });
+    harness.client.handleServerEvent({
+        type: "drawing.clear",
+        payload: {},
+    });
+
+    const callNames = harness.drawingContext.calls.map(([name]) => name);
+    const clearCount = harness.drawingContext.calls
+        .filter(([name]) => name === "fillRect")
+        .length;
+
+    assert.ok(callNames.includes("moveTo"));
+    assert.ok(callNames.includes("lineTo"));
+    assert.ok(callNames.includes("stroke"));
+    assert.ok(callNames.includes("arc"));
+    assert.equal(clearCount, initialClearCount + 1);
+});
+
+
+test("round.started did not erase reconnect snapshot replay for the same round", async () => {
+    const harness = await loadRoomLobbyScript();
+
+    harness.client.handleServerEvent({
+        type: "room.state",
+        payload: buildRoomState({ roomStatus: "in_progress" }),
+    });
+    harness.client.handleServerEvent({
+        type: "drawing.stroke",
+        payload: {
+            x1: 0.1,
+            y1: 0.1,
+            x2: 0.5,
+            y2: 0.5,
+            color: "#1982c4",
+            size: 8,
+        },
+    });
+    harness.client.handleServerEvent({
+        type: "round.state",
+        payload: {
+            phase: "round",
+            round_id: 33,
+            drawer_participant_id: 9,
+            remaining_seconds: 42,
+        },
+    });
+
+    const clearCountBeforeRoundStarted = harness.drawingContext.calls
+        .filter(([name]) => name === "fillRect")
+        .length;
+
+    harness.client.handleServerEvent({
+        type: "round.started",
+        payload: {
+            round_id: 33,
+            role: "guesser",
+            drawer_participant_id: 9,
+            duration_seconds: 90,
+            sequence_number: 1,
+            masked_word: "_____",
+        },
+    });
+
+    const clearCountAfterRoundStarted = harness.drawingContext.calls
+        .filter(([name]) => name === "fillRect")
+        .length;
+
+    assert.equal(clearCountAfterRoundStarted, clearCountBeforeRoundStarted);
 });
