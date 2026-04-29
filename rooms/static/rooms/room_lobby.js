@@ -36,6 +36,12 @@ class LobbyClient {
             gameParticipantList: document.getElementById('game-participant-list'),
             wordDisplay: document.getElementById('word-display'),
             drawerHint: document.getElementById('drawer-hint'),
+            canvasContainer: document.querySelector('.canvas-container'),
+            drawingCanvas: document.getElementById('drawing-canvas'),
+            drawingToolbar: document.getElementById('drawing-toolbar'),
+            clearCanvasButton: document.getElementById('clear-canvas-button'),
+            colorSwatches: Array.from(document.querySelectorAll('.color-swatch')),
+            brushSizeButtons: Array.from(document.querySelectorAll('.brush-size')),
 
             // Guessing
             guessHistory: document.getElementById('guess-history'),
@@ -77,11 +83,17 @@ class LobbyClient {
         this.currentPhase = null;
         this.roundDuration = null;
         this.intermissionDuration = null;
+        this.drawingContext = null;
+        this.isDrawing = false;
+        this.lastCanvasPoint = null;
+        this.brushColor = '#000000';
+        this.brushSize = 4;
 
         this.init();
     }
 
     init() {
+        this.setupDrawingSurface();
         this.connectWebSocket();
         this.setupEventListeners();
     }
@@ -120,6 +132,351 @@ class LobbyClient {
                 window.location.reload();
             });
         }
+    }
+
+    /**
+     * Prepare the HTML canvas and drawing controls once the page is ready.
+     *
+     * The canvas exists for every player because viewers and reconnecting users
+     * still need to render server-sent drawing events. Only the active drawer
+     * is allowed to send drawing events back to the room socket.
+     */
+    setupDrawingSurface() {
+        if (!this.elements.drawingCanvas) {
+            return;
+        }
+
+        this.drawingContext = this.elements.drawingCanvas.getContext('2d');
+        this.resizeDrawingCanvas();
+
+        this.elements.drawingCanvas.addEventListener('pointerdown', (event) => this.handleCanvasPointerDown(event));
+        this.elements.drawingCanvas.addEventListener('pointermove', (event) => this.handleCanvasPointerMove(event));
+        this.elements.drawingCanvas.addEventListener('pointerup', (event) => this.handleCanvasPointerUp(event));
+        this.elements.drawingCanvas.addEventListener('pointerleave', (event) => this.handleCanvasPointerUp(event));
+        this.elements.drawingCanvas.addEventListener('pointercancel', (event) => this.handleCanvasPointerUp(event));
+
+        this.elements.colorSwatches.forEach((button) => {
+            button.addEventListener('click', () => this.selectBrushColor(button.dataset.color));
+        });
+
+        this.elements.brushSizeButtons.forEach((button) => {
+            button.addEventListener('click', () => this.selectBrushSize(button.dataset.size));
+        });
+
+        if (this.elements.clearCanvasButton) {
+            this.elements.clearCanvasButton.addEventListener('click', () => this.clearDrawingCanvas({ broadcast: true }));
+        }
+
+        if (typeof window.addEventListener === 'function') {
+            window.addEventListener('resize', () => this.resizeDrawingCanvas());
+        }
+
+        this.syncDrawingControls();
+    }
+
+    /**
+     * Size the backing canvas to match the visible canvas area.
+     *
+     * Canvas drawing uses its internal width/height, not CSS pixels. Without
+     * this resize, coordinates would be stretched and remote strokes would not
+     * line up cleanly between browsers.
+     */
+    resizeDrawingCanvas() {
+        if (!this.elements.drawingCanvas || !this.drawingContext) {
+            return;
+        }
+
+        const bounds = this.elements.canvasContainer
+            ? this.elements.canvasContainer.getBoundingClientRect()
+            : this.elements.drawingCanvas.getBoundingClientRect();
+        const width = Math.max(1, Math.round(bounds.width || this.elements.drawingCanvas.clientWidth || 800));
+        const height = Math.max(1, Math.round(bounds.height || this.elements.drawingCanvas.clientHeight || 500));
+
+        if (this.elements.drawingCanvas.width === width && this.elements.drawingCanvas.height === height) {
+            return;
+        }
+
+        this.elements.drawingCanvas.width = width;
+        this.elements.drawingCanvas.height = height;
+        this.clearDrawingCanvas();
+    }
+
+    /**
+     * Keep toolbar visibility and disabled states aligned with the player's
+     * current round role. This is a browser-side guard; the backend remains the
+     * real authority and also rejects non-drawer drawing events.
+     */
+    syncDrawingControls() {
+        const canDraw = this.canSendDrawingEvents();
+
+        if (this.elements.canvasContainer) {
+            this.elements.canvasContainer.dataset.drawingEnabled = canDraw ? 'true' : 'false';
+        }
+
+        if (this.elements.drawingToolbar) {
+            this.elements.drawingToolbar.hidden = !canDraw;
+        }
+
+        [
+            ...this.elements.colorSwatches,
+            ...this.elements.brushSizeButtons,
+            this.elements.clearCanvasButton,
+        ].filter(Boolean).forEach((control) => {
+            control.disabled = !canDraw;
+        });
+    }
+
+    /**
+     * Return true only when this browser may send drawing events.
+     *
+     * Viewers still render incoming strokes, but they must not generate new
+     * strokes through the UI.
+     */
+    canSendDrawingEvents() {
+        return this.currentRoomStatus === 'in_progress'
+            && this.currentPhase === 'round'
+            && this.isDrawer
+            && !this.isSpectator
+            && this.socket
+            && this.socket.readyState === WebSocket.OPEN;
+    }
+
+    /**
+     * Convert a pointer event into canvas-local pixel coordinates.
+     *
+     * Browser events report page coordinates. Drawing needs coordinates
+     * relative to the canvas itself.
+     */
+    getCanvasPoint(event) {
+        const bounds = this.elements.drawingCanvas.getBoundingClientRect();
+        return {
+            x: event.clientX - bounds.left,
+            y: event.clientY - bounds.top,
+        };
+    }
+
+    /**
+     * Convert canvas pixels into 0..1 coordinates for socket payloads.
+     *
+     * Normalized coordinates let viewers with differently-sized canvases draw
+     * the same stroke in the same relative position.
+     */
+    normalizeCanvasPoint(point) {
+        return {
+            x: point.x / this.elements.drawingCanvas.width,
+            y: point.y / this.elements.drawingCanvas.height,
+        };
+    }
+
+    /**
+     * Convert normalized socket coordinates back into local canvas pixels.
+     */
+    denormalizeCanvasPoint(point) {
+        return {
+            x: point.x * this.elements.drawingCanvas.width,
+            y: point.y * this.elements.drawingCanvas.height,
+        };
+    }
+
+    /**
+     * Draw one segment locally. The same helper is used for local drawer input,
+     * live remote strokes, and reconnect snapshot replay.
+     */
+    drawStrokeSegment({ x1, y1, x2, y2, color, size }) {
+        if (!this.drawingContext) {
+            return;
+        }
+
+        const from = this.denormalizeCanvasPoint({ x: x1, y: y1 });
+        const to = this.denormalizeCanvasPoint({ x: x2, y: y2 });
+        const brushColor = color || '#000000';
+        const brushSize = Number(size) || 4;
+
+        this.drawingContext.strokeStyle = brushColor;
+        this.drawingContext.fillStyle = brushColor;
+        this.drawingContext.lineWidth = brushSize;
+        this.drawingContext.lineCap = 'round';
+        this.drawingContext.lineJoin = 'round';
+        this.drawingContext.beginPath();
+        this.drawingContext.moveTo(from.x, from.y);
+        this.drawingContext.lineTo(to.x, to.y);
+        this.drawingContext.stroke();
+
+        // A matching end-cap makes a click/tap show as a dot instead of an
+        // invisible zero-length line.
+        this.drawingContext.beginPath();
+        this.drawingContext.arc(to.x, to.y, brushSize / 2, 0, Math.PI * 2);
+        this.drawingContext.fill();
+    }
+
+    /**
+     * Paint the canvas back to a blank white drawing surface.
+     *
+     * When broadcast is true, the drawer's clear action is also sent to the
+     * server so all viewers and future reconnects see the cleared canvas.
+     */
+    clearDrawingCanvas({ broadcast = false } = {}) {
+        if (!this.elements.drawingCanvas || !this.drawingContext) {
+            return;
+        }
+
+        this.drawingContext.fillStyle = '#ffffff';
+        this.drawingContext.fillRect(
+            0,
+            0,
+            this.elements.drawingCanvas.width,
+            this.elements.drawingCanvas.height,
+        );
+
+        if (broadcast && this.canSendDrawingEvents()) {
+            this.sendDrawingEvent('drawing.clear', {});
+        }
+    }
+
+    /**
+     * Send one drawing event through the already-open room socket.
+     */
+    sendDrawingEvent(type, payload) {
+        if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+            return;
+        }
+
+        this.socket.send(JSON.stringify({ type, payload }));
+    }
+
+    /**
+     * Start a local stroke for the active drawer.
+     */
+    handleCanvasPointerDown(event) {
+        if (!this.canSendDrawingEvents()) {
+            return;
+        }
+
+        event.preventDefault();
+        this.isDrawing = true;
+        this.lastCanvasPoint = this.getCanvasPoint(event);
+
+        if (typeof this.elements.drawingCanvas.setPointerCapture === 'function') {
+            this.elements.drawingCanvas.setPointerCapture(event.pointerId);
+        }
+
+        this.sendStrokeFromPoints(this.lastCanvasPoint, this.lastCanvasPoint);
+    }
+
+    /**
+     * Continue the current local stroke and broadcast that segment.
+     */
+    handleCanvasPointerMove(event) {
+        if (!this.isDrawing || !this.canSendDrawingEvents()) {
+            return;
+        }
+
+        event.preventDefault();
+        const nextPoint = this.getCanvasPoint(event);
+        this.sendStrokeFromPoints(this.lastCanvasPoint, nextPoint);
+        this.lastCanvasPoint = nextPoint;
+    }
+
+    /**
+     * Finish the current local stroke and notify viewers that the stroke ended.
+     */
+    handleCanvasPointerUp(event) {
+        if (!this.isDrawing) {
+            return;
+        }
+
+        if (event && typeof event.preventDefault === 'function') {
+            event.preventDefault();
+        }
+
+        this.isDrawing = false;
+        this.lastCanvasPoint = null;
+
+        if (event && typeof this.elements.drawingCanvas.releasePointerCapture === 'function') {
+            this.elements.drawingCanvas.releasePointerCapture(event.pointerId);
+        }
+
+        if (this.canSendDrawingEvents()) {
+            this.sendDrawingEvent('drawing.end_stroke', {});
+        }
+    }
+
+    /**
+     * Draw and broadcast one normalized stroke segment.
+     */
+    sendStrokeFromPoints(fromPoint, toPoint) {
+        const from = this.normalizeCanvasPoint(fromPoint);
+        const to = this.normalizeCanvasPoint(toPoint);
+        const payload = {
+            x1: from.x,
+            y1: from.y,
+            x2: to.x,
+            y2: to.y,
+            color: this.brushColor,
+            size: this.brushSize,
+        };
+
+        this.drawStrokeSegment(payload);
+        this.sendDrawingEvent('drawing.stroke', payload);
+    }
+
+    /**
+     * Apply a server-sent drawing stroke from another player or snapshot replay.
+     */
+    handleDrawingStroke(payload) {
+        if (!payload || typeof payload !== 'object') {
+            return;
+        }
+
+        this.drawStrokeSegment(payload);
+    }
+
+    /**
+     * Handle a server-sent stroke boundary.
+     *
+     * The current canvas protocol does not need to render anything for this
+     * event, but keeping the handler explicit makes the socket event surface
+     * easy for beginner teammates to follow.
+     */
+    handleDrawingEndStroke() {
+        this.isDrawing = false;
+        this.lastCanvasPoint = null;
+    }
+
+    /**
+     * Apply a server-sent clear event.
+     */
+    handleDrawingClear() {
+        this.clearDrawingCanvas();
+    }
+
+    /**
+     * Select the brush color used for future local strokes.
+     */
+    selectBrushColor(color) {
+        if (!color) {
+            return;
+        }
+
+        this.brushColor = color;
+        this.elements.colorSwatches.forEach((button) => {
+            button.classList.toggle('is-selected', button.dataset.color === color);
+        });
+    }
+
+    /**
+     * Select the brush size used for future local strokes.
+     */
+    selectBrushSize(size) {
+        const parsedSize = Number(size);
+        if (!Number.isFinite(parsedSize) || parsedSize <= 0) {
+            return;
+        }
+
+        this.brushSize = parsedSize;
+        this.elements.brushSizeButtons.forEach((button) => {
+            button.classList.toggle('is-selected', Number(button.dataset.size) === parsedSize);
+        });
     }
 
     connectWebSocket() {
@@ -189,6 +546,15 @@ class LobbyClient {
                 break;
             case 'round.drawer_word':
                 this.handleDrawerWord(event.payload);
+                break;
+            case 'drawing.stroke':
+                this.handleDrawingStroke(event.payload);
+                break;
+            case 'drawing.end_stroke':
+                this.handleDrawingEndStroke();
+                break;
+            case 'drawing.clear':
+                this.handleDrawingClear();
                 break;
             case 'guess.result':
                 this.handleGuessResult(event.payload);
@@ -264,6 +630,7 @@ class LobbyClient {
         this.renderGameParticipants();
         this.syncRoomMode();
         this.syncGuessComposer();
+        this.syncDrawingControls();
 
         if (previousHostId !== null && previousHostId !== this.currentHostId) {
             this.showStatus('Room host changed', { autoHideMs: 3000 });
@@ -529,7 +896,9 @@ class LobbyClient {
         if (this.elements.guessHistory) {
             this.elements.guessHistory.innerHTML = '';
         }
+        this.clearDrawingCanvas();
         this.syncGuessComposer();
+        this.syncDrawingControls();
     }
 
     syncGuessComposer() {
@@ -674,6 +1043,7 @@ class LobbyClient {
     }
 
     handleRoundStarted(payload) {
+        const previousRoundId = this.activeRoundId;
         this.currentPhase = 'round';
         this.activeRoundId = payload.round_id || null;
         this.roundDuration = payload.duration_seconds || this.roundDuration;
@@ -689,9 +1059,13 @@ class LobbyClient {
 
         const maskedWord = payload.masked_word ? payload.masked_word.split('').join(' ') : '_ _ _ _';
         this.setWordDisplay(this.isDrawer && payload.word ? payload.word : maskedWord);
+        if (this.activeRoundId && this.activeRoundId !== previousRoundId) {
+            this.clearDrawingCanvas();
+        }
         this.setTimerProgress(this.roundDuration || 0);
         this.hideIntermissionOverlay();
         this.syncGuessComposer();
+        this.syncDrawingControls();
     }
 
     handleRoundTimer(payload) {
@@ -699,6 +1073,7 @@ class LobbyClient {
         this.activeRoundId = payload.round_id || this.activeRoundId;
         this.setTimerProgress(payload.remaining_seconds || 0);
         this.syncGuessComposer();
+        this.syncDrawingControls();
     }
 
     handleRoundState(payload) {
@@ -719,6 +1094,7 @@ class LobbyClient {
         }
 
         this.syncGuessComposer();
+        this.syncDrawingControls();
     }
 
     handleIntermissionStarted(payload) {
@@ -731,6 +1107,7 @@ class LobbyClient {
             countdownVisible: true,
         });
         this.syncGuessComposer();
+        this.syncDrawingControls();
     }
 
     handleIntermissionTimer(payload) {
@@ -742,6 +1119,7 @@ class LobbyClient {
             countdownVisible: true,
         });
         this.syncGuessComposer();
+        this.syncDrawingControls();
     }
 
     handleDrawerWord(payload) {
@@ -752,6 +1130,7 @@ class LobbyClient {
         }
         this.setWordDisplay(payload.word || '');
         this.syncGuessComposer();
+        this.syncDrawingControls();
     }
 
     handleGuessResult(payload) {
@@ -810,6 +1189,7 @@ class LobbyClient {
         }
 
         this.syncGuessComposer();
+        this.syncDrawingControls();
     }
 
     submitGuess() {
