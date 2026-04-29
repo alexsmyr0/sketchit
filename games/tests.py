@@ -180,6 +180,7 @@ class RoomRuntimeTeardownTests(SimpleTestCase):
             {
                 "round_timer_running": False,
                 "intermission_timer_running": False,
+                "leaderboard_timer_running": False,
                 "drawer_disconnect_timer_running": False,
             },
         )

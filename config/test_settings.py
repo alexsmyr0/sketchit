@@ -1,5 +1,8 @@
 import os
 
+# This is the only supported Django test settings module. It intentionally
+# keeps the MySQL database backend from config.settings so tests exercise the
+# same database engine as development and runtime.
 os.environ["MYSQL_DATABASE"] = "sketchit"
 os.environ["MYSQL_USER"] = "root"
 os.environ["MYSQL_PASSWORD"] = "sketchit-root"
