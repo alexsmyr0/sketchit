@@ -43,7 +43,7 @@
                 <div class="join-link-section">
                     <label for="join-url">Invite Friends</label>
                     <div class="copy-input-group">
-                        <input id="join-url" type="text" readonly value="{{ request.scheme }}://{{ request.get_host }}{% url 'join-room' room.join_code %}">
+                        <input id="join-url" type="text" readonly value="{{ request.scheme }}://{{ request.get_host }}/?code={{ room.join_code }}">
                         <button id="copy-url-button" type="button" class="icon-button" title="Copy Link">📋</button>
                     </div>
                 </div>
