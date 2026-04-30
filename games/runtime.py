@@ -27,7 +27,7 @@ from redis.exceptions import RedisError, WatchError
 
 from games import redis as game_redis
 from games.models import Round
-from rooms.models import Player
+from rooms.models import Player, Room
 from rooms import redis as room_redis
 
 
@@ -1035,6 +1035,15 @@ def get_sync_events_for_player(join_code: str, player_id: int) -> list[dict]:
     client = get_redis_client()
     turn_state = game_redis.get_turn_state(client, join_code)
     if not turn_state:
+        return []
+
+    # Validate against MySQL before trusting Redis state.  Redis turn_state can
+    # survive a process restart (24-hour TTL) while the room reverts to LOBBY in
+    # MySQL.  Without this check a player joining a fresh lobby would receive a
+    # stale "phase=intermission" event and see a frozen "Round Over!" overlay.
+    room = Room.objects.filter(join_code=join_code).only("status").first()
+    if room is None or room.status != Room.Status.IN_PROGRESS:
+        teardown_room_runtime(join_code, redis_client=client)
         return []
 
     if turn_state.get("phase") == "leaderboard":
