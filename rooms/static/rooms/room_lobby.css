@@ -377,6 +377,15 @@ body {
     padding: 2rem;
 }
 
+/* The .overlay rule above sets display:flex which has higher precedence than
+   the browser's built-in [hidden]{display:none} UA rule. This explicit
+   author-level override restores the correct behaviour so that
+   hideIntermissionOverlay() (which sets element.hidden=true) actually hides
+   the element even when the .overlay class is present. */
+.overlay[hidden] {
+    display: none;
+}
+
 .overlay-content {
     background: white;
     padding: 3rem;
