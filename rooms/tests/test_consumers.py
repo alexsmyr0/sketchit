@@ -538,20 +538,15 @@ class RoomConsumerConnectTests(TransactionTestCase):
 
         await communicator.disconnect()
 
-        # Lobby disconnect is a permanent leave — the membership row is deleted,
-        # not just marked DISCONNECTED.
-        player_still_exists = await database_sync_to_async(
-            Player.objects.filter(pk=self.player.id).exists
-        )()
-        self.assertFalse(player_still_exists)
+        # Check DB disconnect update
+        await database_sync_to_async(self.player.refresh_from_db)()
+        self.assertEqual(self.player.connection_status, Player.ConnectionStatus.DISCONNECTED)
 
         # Check Redis disconnect update
         presence = room_redis.get_presence(self.fake_redis, self.room.join_code)
         self.assertNotIn(self.session_key, presence)
 
-    async def test_lobby_disconnect_reassigns_host(self):
-        # Lobby disconnects are permanent leaves, so closing the host's socket
-        # must hand ownership to the next connected participant.
+    async def test_disconnect_does_not_reassign_host(self):
         second_session_key = await _create_room_member(self.room.id, "Bob")
         second_player = await database_sync_to_async(Player.objects.get)(
             room=self.room,
@@ -583,49 +578,54 @@ class RoomConsumerConnectTests(TransactionTestCase):
         await host_socket.disconnect()
 
         await database_sync_to_async(self.room.refresh_from_db)()
-        # The departing host's row is deleted; ownership transfers to Bob.
-        self.assertEqual(self.room.host_id, second_player.id)
+        self.assertEqual(self.room.host_id, self.player.id)
+        self.assertNotEqual(self.room.host_id, second_player.id)
 
         await member_socket.disconnect()
 
-    async def test_lobby_disconnect_deletes_participant_row(self):
-        # In the lobby there is nothing to reconnect to, so the membership row
-        # must be removed when the last socket closes (not just marked offline).
-        socket = WebsocketCommunicator(
+    async def test_reconnect_reuses_same_participant_row(self):
+        first_socket = WebsocketCommunicator(
             _TEST_APP,
             _ws_url(self.room.join_code),
             headers=_session_headers(self.session_key),
         )
-        await _connect_and_receive_initial_room_state(socket, self.room.join_code)
+        await _connect_and_receive_initial_room_state(
+            first_socket,
+            self.room.join_code,
+        )
 
-        await socket.disconnect()
+        original_player_id = self.player.id
 
-        row_exists = await database_sync_to_async(
-            Player.objects.filter(pk=self.player.id).exists
-        )()
-        self.assertFalse(row_exists)
+        await first_socket.disconnect()
+        await database_sync_to_async(self.player.refresh_from_db)()
+        self.assertEqual(
+            self.player.connection_status,
+            Player.ConnectionStatus.DISCONNECTED,
+        )
 
-    async def test_lobby_disconnect_socket_reconnect_rejected(self):
-        # After a lobby disconnect the participant row is gone.  Opening a new
-        # socket with the same session must be rejected (4003) because the
-        # session is no longer a member of the room.  Re-entry requires going
-        # through the HTTP join flow again.
-        socket = WebsocketCommunicator(
+        second_socket = WebsocketCommunicator(
             _TEST_APP,
             _ws_url(self.room.join_code),
             headers=_session_headers(self.session_key),
         )
-        await _connect_and_receive_initial_room_state(socket, self.room.join_code)
-        await socket.disconnect()
-
-        reconnect = WebsocketCommunicator(
-            _TEST_APP,
-            _ws_url(self.room.join_code),
-            headers=_session_headers(self.session_key),
+        await _connect_and_receive_initial_room_state(
+            second_socket,
+            self.room.join_code,
         )
-        connected, close_code = await reconnect.connect()
-        self.assertFalse(connected)
-        self.assertEqual(close_code, 4003)
+
+        refreshed_player = await database_sync_to_async(Player.objects.get)(
+            room=self.room,
+            session_key=self.session_key,
+        )
+        self.assertEqual(refreshed_player.id, original_player_id)
+        self.assertEqual(
+            await database_sync_to_async(
+                Player.objects.filter(room=self.room, session_key=self.session_key).count
+            )(),
+            1,
+        )
+
+        await second_socket.disconnect()
 
     async def test_presence_stays_connected_until_last_same_session_socket_disconnects(self):
         first = WebsocketCommunicator(
@@ -659,11 +659,11 @@ class RoomConsumerConnectTests(TransactionTestCase):
 
         await second.disconnect()
 
-        # Both sockets gone → lobby permanent leave → row deleted.
-        row_exists = await database_sync_to_async(
-            Player.objects.filter(pk=self.player.id).exists
-        )()
-        self.assertFalse(row_exists)
+        await database_sync_to_async(self.player.refresh_from_db)()
+        self.assertEqual(
+            self.player.connection_status,
+            Player.ConnectionStatus.DISCONNECTED,
+        )
         presence = room_redis.get_presence(self.fake_redis, self.room.join_code)
         self.assertNotIn(self.session_key, presence)
 

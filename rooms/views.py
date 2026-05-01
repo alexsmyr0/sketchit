@@ -273,7 +273,20 @@ def create_room(request):
             .first()
         )
         if existing_player is not None:
-            return _build_room_assignment_conflict_response(existing_player.room)
+            # A DISCONNECTED row in a LOBBY room is a stale remnant from a
+            # previous session that left without using the Leave button (tab
+            # close, back nav, hard refresh that didn't reconnect).  Clean it
+            # up now so the session can create a fresh room.
+            if (
+                existing_player.connection_status == Player.ConnectionStatus.DISCONNECTED
+                and existing_player.room.status == Room.Status.LOBBY
+            ):
+                leave_participant(
+                    redis_client=room_runtime_redis_client,
+                    player_id=existing_player.id,
+                )
+            else:
+                return _build_room_assignment_conflict_response(existing_player.room)
 
         room = _create_room_with_unique_join_code(
             name=cleaned_data["name"],
@@ -367,10 +380,24 @@ def join_room(request, join_code):
         )
         if player is not None:
             if player.room_id != room.id:
-                # Keep the conflict semantics, but include a recovery target so
-                # the entry page can send the guest back to the room they still
-                # validly own instead of leaving them stuck at a dead end.
-                return _build_room_assignment_conflict_response(player.room)
+                # A DISCONNECTED row in a LOBBY room is a stale remnant the
+                # session left behind (tab close, hard refresh without reconnect).
+                # Clean it up so the session can join the requested room instead
+                # of receiving a 409 that points back to an abandoned lobby.
+                if (
+                    player.connection_status == Player.ConnectionStatus.DISCONNECTED
+                    and player.room.status == Room.Status.LOBBY
+                ):
+                    leave_participant(
+                        redis_client=room_runtime_redis_client,
+                        player_id=player.id,
+                    )
+                    player = None
+                else:
+                    # Keep the conflict semantics, but include a recovery target
+                    # so the entry page can send the guest back to the room they
+                    # still validly own instead of leaving them stuck at a dead end.
+                    return _build_room_assignment_conflict_response(player.room)
 
             # Rejoining the same room should not create a duplicate participant or
             # change the original display name, but it should refresh the session

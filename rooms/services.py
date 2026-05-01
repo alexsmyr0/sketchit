@@ -671,19 +671,15 @@ def disconnect_participant(
     """Mark one participant socket as disconnected.
 
     A participant only becomes fully disconnected after the final socket for
-    that same session leaves the room.
+    that same session leaves the room.  Temporary disconnects (page refresh,
+    brief network loss) must not delete the participant row — the session
+    needs to remain a valid room member so the next page load succeeds.
 
-    **Lobby rooms** — there is no game state to preserve for reconnect (no
-    score, no active round), so closing the last socket is treated as a
-    permanent departure.  The call is routed through ``leave_participant``
-    which deletes the membership row, handles host reassignment, and starts
-    empty-room grace if the room is now empty.  This frees the session to
-    join or create another room without hitting a 409 conflict.
-
-    **Rooms with a game in progress** — the participant row is kept so that
-    reconnect-grace and drawer-grace semantics can fire correctly.  Only the
-    connection-status field is updated and the relevant post-disconnect tasks
-    are scheduled.
+    Stale lobby rows left by sessions that never return are cleaned up lazily
+    in the create/join views: when a session tries to enter a *different* room
+    and its existing row is DISCONNECTED in a LOBBY room, that view calls
+    ``leave_participant`` before proceeding.  This keeps the socket path simple
+    and avoids the hard-refresh regression caused by eager deletion here.
     """
 
     player = _get_locked_player(player_id)
@@ -707,7 +703,6 @@ def disconnect_participant(
         room_join_code,
         session_key,
     )
-    previously_connected = player.connection_status == Player.ConnectionStatus.CONNECTED
     Player.objects.filter(pk=player.id).update(
         connection_status=(
             Player.ConnectionStatus.CONNECTED
@@ -716,28 +711,18 @@ def disconnect_participant(
         ),
         last_seen_at=timezone.now(),
     )
-
-    if connection_still_present or not previously_connected:
-        # Another socket for this session is still open, or the participant was
-        # already marked offline — nothing more to do.
-        return
-
-    # This was the last active socket for a previously-connected participant.
-    if player.room.status == Room.Status.LOBBY:
-        # Lobby: no reconnect-grace needed.  Route through the full permanent
-        # leave path so the membership row is cleared immediately.
-        leave_participant(redis_client=redis_client, player_id=player.id)
-        return
-
-    # Game in progress: keep the row for drawer-grace / reconnect flow.
-    schedule_room_state_broadcast_after_commit(
-        join_code=room_join_code,
-        room_id=player.room_id,
-    )
-    _schedule_drawer_disconnect_grace_after_commit(
-        join_code=room_join_code,
-        player_id=player.id,
-    )
+    if (
+        not connection_still_present
+        and player.connection_status != Player.ConnectionStatus.DISCONNECTED
+    ):
+        schedule_room_state_broadcast_after_commit(
+            join_code=room_join_code,
+            room_id=player.room_id,
+        )
+        _schedule_drawer_disconnect_grace_after_commit(
+            join_code=room_join_code,
+            player_id=player.id,
+        )
 
 
 @transaction.atomic
