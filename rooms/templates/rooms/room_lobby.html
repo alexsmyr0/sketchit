@@ -20,6 +20,14 @@
             </div>
         </header>
 
+        <div id="invite-widget" class="invite-widget lobby-card">
+            <label for="join-url">Invite Friends</label>
+            <div class="copy-input-group">
+                <input id="join-url" type="text" readonly value="{{ request.scheme }}://{{ request.get_host }}/?code={{ room.join_code }}">
+                <button id="copy-url-button" type="button" class="icon-button" title="Copy Link">📋</button>
+            </div>
+        </div>
+
         <main class="lobby-main" id="lobby-view">
             <section class="lobby-card participants-card">
                 <div class="participants-card-header">
@@ -43,16 +51,6 @@
             </section>
 
             <section class="lobby-card details-card">
-                <div class="join-link-section">
-                    <label for="join-url">Invite Friends</label>
-                    <div class="copy-input-group">
-                        <input id="join-url" type="text" readonly value="{{ request.scheme }}://{{ request.get_host }}/?code={{ room.join_code }}">
-                        <button id="copy-url-button" type="button" class="icon-button" title="Copy Link">📋</button>
-                    </div>
-                </div>
-
-                <hr class="divider">
-
                 <div id="host-controls" class="host-controls"{% if participant.id != host.id %} hidden{% endif %}>
                     <div class="host-controls-header">
                         <h3>Lobby Settings</h3>

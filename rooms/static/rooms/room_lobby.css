@@ -428,6 +428,7 @@ body {
 .badge.in_progress { background-color: var(--success); color: #fff; }
 
 .lobby-main {
+    margin-top: 1rem;
     display: grid;
     grid-template-columns: 1fr 1.5fr;
     gap: 2rem;
