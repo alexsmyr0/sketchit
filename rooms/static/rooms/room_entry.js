@@ -59,6 +59,9 @@ function redirectToRoom(payload) {
     window.location.assign(payload.room_url);
 }
 
+const params = new URLSearchParams(window.location.search);
+const prefillCode = params.get("code");
+
 const displayNameInput = document.getElementById("display_name");
 const roomCodeInput = document.getElementById("room_code");
 const roomNameInput = document.getElementById("room_name");
@@ -67,6 +70,10 @@ const createButton = document.getElementById("create-button");
 const publicJoinButtons = Array.from(document.querySelectorAll(".join-public-button"));
 const entryError = document.getElementById("entry-error");
 const entryStatus = document.getElementById("entry-status");
+
+if (prefillCode) {
+    roomCodeInput.value = prefillCode.toUpperCase();
+}
 
 function showError(message) {
     entryStatus.hidden = true;
@@ -158,7 +165,7 @@ document.getElementById("entry-form").addEventListener("submit", async function 
     showStatus("Joining room...");
 
     try {
-        const typedRoomCode = roomCodeInput.value.trim();
+        const typedRoomCode = roomCodeInput.value.trim() || prefillCode || "";
         if (typedRoomCode) {
             await joinRoomByCode(typedRoomCode, displayName);
             return;

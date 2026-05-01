@@ -106,3 +106,15 @@ Reviewed Kosta's K7 implementation where he handles drawer disconnect grace & tu
 
 ## 24/04
 Looked into Kosta's K7 patches and it now passes. I merged shortly
+
+## 26/04
+Implemented G4 where I wired drawing canvas to the room socket. Got graded by Kwstas and my implementation passes
+
+## 28/04
+Fixed a bug where we were accidentally still using sqlite to run some tests and standardized tests on MySQL
+
+## 29/04
+Patched a bug where creating a room presented a room intermission overlay that was wrong as the room was in lobby state and brand new. The problem was CSS Display:flex overriding [hidden] attribute causing the overlay to linger forever
+
+## 30/04
+Patched a bug where entering the join code from another room and joining, was calling create room instead of join room and was just creating a new room.
