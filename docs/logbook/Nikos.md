@@ -26,3 +26,12 @@ Implemented the real-time lobby for Sketchit.
 - Implemented `room_lobby.js` for WebSocket synchronization and dynamic UI updates (participant list, room metadata, host controls).
 - Added "Copy Join URL" functionality for easy room sharing.
 - Ensured host-only controls are correctly restricted and functional.
+
+## 28/04
+made it so lobby disconnect now permanently removes participant row
+
+Disconnecting from a lobby room routes through leave_participant instead of just stamping DISCONNECTED on the row. The stale membership row was blocking the session from joining or creating another room with a 409 conflict. Host reassignment and empty-room grace fire correctly on departure.
+
+## 30/04
+Added Leave button to lobby settings header
+Added a Leave button to the right of the Lobby Settings title. Clicking it POSTs to the new rooms/<join_code>/leave/ endpoint and redirects to the entry page. The button is disabled on click to prevent double-submission.

@@ -19,6 +19,7 @@ from rooms.models import Player, Room
 from rooms.services import (
     delete_room_if_empty_grace_expired,
     get_empty_room_cleanup_deadline,
+    leave_participant,
     purge_expired_participants_for_session,
     restore_room_from_empty_grace,
     schedule_host_changed_broadcast_after_commit,
@@ -617,6 +618,30 @@ def start_game(request, join_code):
         },
         status=201,
     )
+
+
+def leave_room(request, join_code):
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    try:
+        room = Room.objects.get(join_code=join_code.upper())
+    except Room.DoesNotExist:
+        return JsonResponse({"detail": "Room not found."}, status=404)
+
+    session_key = _get_or_create_session_key(request)
+    player = room.participants.filter(session_key=session_key).first()
+    if player is None:
+        return JsonResponse(
+            {"detail": "This guest session is not a participant in this room."},
+            status=403,
+        )
+
+    leave_participant(
+        redis_client=_get_room_runtime_redis_client(),
+        player_id=player.id,
+    )
+    return JsonResponse({"detail": "Left room."}, status=200)
 
 
 @ensure_csrf_cookie

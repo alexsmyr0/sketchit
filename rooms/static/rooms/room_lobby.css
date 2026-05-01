@@ -567,6 +567,33 @@ body {
     opacity: 0.9;
 }
 
+.host-controls-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.host-controls-header h3 {
+    margin: 0;
+}
+
+.leave-button {
+    padding: 0.35rem 0.9rem;
+    border-radius: 8px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1.5px solid var(--danger);
+    background: transparent;
+    color: var(--danger);
+    transition: background 0.15s, color 0.15s;
+}
+
+.leave-button:hover {
+    background: var(--danger);
+    color: #fff;
+}
+
 .settings-form {
     display: flex;
     flex-direction: column;

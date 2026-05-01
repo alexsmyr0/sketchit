@@ -20,6 +20,7 @@ class LobbyClient {
             editRoomName: document.getElementById('edit-room-name'),
             editVisibility: document.getElementById('edit-visibility'),
             startGameButton: document.getElementById('start-game-button'),
+            leaveRoomButton: document.getElementById('leave-room-button'),
             minPlayersHint: document.getElementById('min-players-hint'),
             hostControls: document.getElementById('host-controls'),
             hostControlsNote: document.getElementById('host-controls-note'),
@@ -115,6 +116,11 @@ class LobbyClient {
         // Start Game Button
         if (this.elements.startGameButton) {
             this.elements.startGameButton.addEventListener('click', () => this.startGame());
+        }
+
+        // Leave Room Button
+        if (this.elements.leaveRoomButton) {
+            this.elements.leaveRoomButton.addEventListener('click', () => this.leaveRoom());
         }
 
         // Guess Submission
@@ -1341,6 +1347,20 @@ class LobbyClient {
             this.isStartingGame = false;
             this.syncHostControls();
             this.syncLobbyLockState(this.currentRoomStatus);
+        }
+    }
+
+    async leaveRoom() {
+        if (this.elements.leaveRoomButton) {
+            this.elements.leaveRoomButton.disabled = true;
+        }
+        try {
+            await fetch(`/rooms/${this.joinCode}/leave/`, {
+                method: 'POST',
+                headers: { 'X-CSRFToken': this.getCsrfToken() },
+            });
+        } finally {
+            window.location.href = '/';
         }
     }
 
