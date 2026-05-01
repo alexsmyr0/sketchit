@@ -23,7 +23,7 @@ from rooms.models import Player, Room
 
 logger = logging.getLogger(__name__)
 
-EMPTY_ROOM_GRACE_PERIOD = timedelta(minutes=10)
+EMPTY_ROOM_GRACE_PERIOD = timedelta(minutes=1)
 
 
 def _get_locked_player(player_id: int) -> Player:

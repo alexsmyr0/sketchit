@@ -544,7 +544,10 @@ def public_room_directory(request):
     public_rooms = (
         Room.objects.select_related("host")
         .annotate(participant_count=Count("participants"))
-        .filter(visibility=Room.Visibility.PUBLIC)
+        .filter(
+            visibility=Room.Visibility.PUBLIC,
+            status__in=[Room.Status.LOBBY, Room.Status.IN_PROGRESS],
+        )
         .order_by("-created_at", "-id")
     )
 
@@ -649,7 +652,10 @@ def room_entry_page(request):
     public_rooms = (
         Room.objects.select_related("host")
         .annotate(participant_count=Count("participants"))
-        .filter(visibility=Room.Visibility.PUBLIC)
+        .filter(
+            visibility=Room.Visibility.PUBLIC,
+            status__in=[Room.Status.LOBBY, Room.Status.IN_PROGRESS],
+        )
         .order_by("-created_at", "-id")
     )
 
