@@ -213,25 +213,36 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         self.player_group: str = _player_group_name(self.join_code, self.player.id)
         self.session_key: str = session_key
 
-        # The lifecycle service call below marks the participant connected in
-        # Redis/MySQL and will schedule a room-wide ``room.state`` broadcast
-        # via the room-group. Using the service for broadcasts ensures that
-        # peers receive state derived from a successful DB commit.
-        await _mark_participant_connected(
-            self.player.id,
-            self.join_code,
-            self.session_key,
-            self.channel_name,
-        )
+        # Accept the socket and join the channel groups before marking the
+        # participant connected. The lifecycle service schedules a room-wide
+        # ``room.state`` broadcast via on_commit; the guest must already be in
+        # the room group when that broadcast fires so they receive the updated
+        # participant list alongside the host.
         await self.accept()
 
         await self.channel_layer.group_add(self.room_group, self.channel_name)
         await self.channel_layer.group_add(self.player_group, self.channel_name)
 
-        # The socket must be accepted before we try to send frames back to the
-        # browser. We send the initial snapshot directly so the connecting 
-        # client has authoritative state immediately without waiting for a
-        # group broadcast.
+        try:
+            await _mark_participant_connected(
+                self.player.id,
+                self.join_code,
+                self.session_key,
+                self.channel_name,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to mark participant %s connected in room %s",
+                self.player.id,
+                self.join_code,
+            )
+            await self.close(code=4003)
+            return
+
+        # The socket is accepted and the group broadcast has fired. We also
+        # send the initial snapshot directly so the connecting client gets
+        # current_player_id for self-labelling in the UI without waiting for
+        # a further group event.
         initial_room_state_event = await _get_initial_room_state_event(self.room.id, self.player.id)
         await self.send_json(initial_room_state_event)
 
