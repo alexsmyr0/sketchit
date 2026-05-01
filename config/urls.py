@@ -20,6 +20,7 @@ from django.urls import path
 from rooms.views import (
     create_room,
     join_room,
+    leave_room,
     public_room_directory,
     room_entry_page,
     room_lobby_state,
@@ -36,4 +37,5 @@ urlpatterns = [
     path("rooms/<str:join_code>/", room_lobby_state, name="room-lobby-state"),
     path("rooms/<str:join_code>/settings/", update_lobby_settings, name="update-lobby-settings"),
     path("rooms/<str:join_code>/start-game/", start_game, name="start-game"),
+    path("rooms/<str:join_code>/leave/", leave_room, name="leave-room"),
 ]

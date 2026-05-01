@@ -23,7 +23,7 @@ from rooms.models import Player, Room
 
 logger = logging.getLogger(__name__)
 
-EMPTY_ROOM_GRACE_PERIOD = timedelta(minutes=10)
+EMPTY_ROOM_GRACE_PERIOD = timedelta(minutes=1)
 
 
 def _get_locked_player(player_id: int) -> Player:
@@ -671,9 +671,15 @@ def disconnect_participant(
     """Mark one participant socket as disconnected.
 
     A participant only becomes fully disconnected after the final socket for
-    that same session leaves the room. Temporary disconnects should not delete
-    the participant row or trigger host reassignment; those behaviors belong to
-    a permanent leave only.
+    that same session leaves the room.  Temporary disconnects (page refresh,
+    brief network loss) must not delete the participant row — the session
+    needs to remain a valid room member so the next page load succeeds.
+
+    Stale lobby rows left by sessions that never return are cleaned up lazily
+    in the create/join views: when a session tries to enter a *different* room
+    and its existing row is DISCONNECTED in a LOBBY room, that view calls
+    ``leave_participant`` before proceeding.  This keeps the socket path simple
+    and avoids the hard-refresh regression caused by eager deletion here.
     """
 
     player = _get_locked_player(player_id)

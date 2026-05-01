@@ -51,7 +51,10 @@
                 <hr class="divider">
 
                 <div id="host-controls" class="host-controls"{% if participant.id != host.id %} hidden{% endif %}>
-                    <h3>Lobby Settings</h3>
+                    <div class="host-controls-header">
+                        <h3>Lobby Settings</h3>
+                        <button id="leave-room-button" type="button" class="leave-button">Leave</button>
+                    </div>
                     <p id="host-controls-note" class="hint status-note" hidden></p>
                     <form id="settings-form" class="settings-form">
                         {% csrf_token %}

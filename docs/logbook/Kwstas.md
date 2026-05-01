@@ -42,3 +42,8 @@
 ## Apr 20
 
 - Added near-match, duplicate, and correct-once guess rules.
+
+## Apr 29
+Lowered Grace period for empty rooms from 10 minutes to 1. When a room has 0 participants it will now be deleted after 1 minute.
+
+Fixed a bug where after the grace period, a room that is deleted is still visible to players in the homepage as a "zombie" entry. Clicking join returned a 404. Now the UI gets updated accordingly.

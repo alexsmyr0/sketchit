@@ -19,6 +19,7 @@ from rooms.models import Player, Room
 from rooms.services import (
     delete_room_if_empty_grace_expired,
     get_empty_room_cleanup_deadline,
+    leave_participant,
     purge_expired_participants_for_session,
     restore_room_from_empty_grace,
     schedule_host_changed_broadcast_after_commit,
@@ -272,7 +273,20 @@ def create_room(request):
             .first()
         )
         if existing_player is not None:
-            return _build_room_assignment_conflict_response(existing_player.room)
+            # A DISCONNECTED row in a LOBBY room is a stale remnant from a
+            # previous session that left without using the Leave button (tab
+            # close, back nav, hard refresh that didn't reconnect).  Clean it
+            # up now so the session can create a fresh room.
+            if (
+                existing_player.connection_status == Player.ConnectionStatus.DISCONNECTED
+                and existing_player.room.status == Room.Status.LOBBY
+            ):
+                leave_participant(
+                    redis_client=room_runtime_redis_client,
+                    player_id=existing_player.id,
+                )
+            else:
+                return _build_room_assignment_conflict_response(existing_player.room)
 
         room = _create_room_with_unique_join_code(
             name=cleaned_data["name"],
@@ -366,10 +380,24 @@ def join_room(request, join_code):
         )
         if player is not None:
             if player.room_id != room.id:
-                # Keep the conflict semantics, but include a recovery target so
-                # the entry page can send the guest back to the room they still
-                # validly own instead of leaving them stuck at a dead end.
-                return _build_room_assignment_conflict_response(player.room)
+                # A DISCONNECTED row in a LOBBY room is a stale remnant the
+                # session left behind (tab close, hard refresh without reconnect).
+                # Clean it up so the session can join the requested room instead
+                # of receiving a 409 that points back to an abandoned lobby.
+                if (
+                    player.connection_status == Player.ConnectionStatus.DISCONNECTED
+                    and player.room.status == Room.Status.LOBBY
+                ):
+                    leave_participant(
+                        redis_client=room_runtime_redis_client,
+                        player_id=player.id,
+                    )
+                    player = None
+                else:
+                    # Keep the conflict semantics, but include a recovery target
+                    # so the entry page can send the guest back to the room they
+                    # still validly own instead of leaving them stuck at a dead end.
+                    return _build_room_assignment_conflict_response(player.room)
 
             # Rejoining the same room should not create a duplicate participant or
             # change the original display name, but it should refresh the session
@@ -543,7 +571,10 @@ def public_room_directory(request):
     public_rooms = (
         Room.objects.select_related("host")
         .annotate(participant_count=Count("participants"))
-        .filter(visibility=Room.Visibility.PUBLIC)
+        .filter(
+            visibility=Room.Visibility.PUBLIC,
+            status__in=[Room.Status.LOBBY, Room.Status.IN_PROGRESS],
+        )
         .order_by("-created_at", "-id")
     )
 
@@ -619,12 +650,39 @@ def start_game(request, join_code):
     )
 
 
+def leave_room(request, join_code):
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    try:
+        room = Room.objects.get(join_code=join_code.upper())
+    except Room.DoesNotExist:
+        return JsonResponse({"detail": "Room not found."}, status=404)
+
+    session_key = _get_or_create_session_key(request)
+    player = room.participants.filter(session_key=session_key).first()
+    if player is None:
+        return JsonResponse(
+            {"detail": "This guest session is not a participant in this room."},
+            status=403,
+        )
+
+    leave_participant(
+        redis_client=_get_room_runtime_redis_client(),
+        player_id=player.id,
+    )
+    return JsonResponse({"detail": "Left room."}, status=200)
+
+
 @ensure_csrf_cookie
 def room_entry_page(request):
     public_rooms = (
         Room.objects.select_related("host")
         .annotate(participant_count=Count("participants"))
-        .filter(visibility=Room.Visibility.PUBLIC)
+        .filter(
+            visibility=Room.Visibility.PUBLIC,
+            status__in=[Room.Status.LOBBY, Room.Status.IN_PROGRESS],
+        )
         .order_by("-created_at", "-id")
     )
 
