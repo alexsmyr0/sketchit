@@ -22,7 +22,10 @@
 
         <main class="lobby-main" id="lobby-view">
             <section class="lobby-card participants-card">
-                <h3>Participants</h3>
+                <div class="participants-card-header">
+                    <h3>Participants</h3>
+                    <button id="leave-room-button" type="button" class="leave-button">Leave</button>
+                </div>
                 <ul id="participant-list" class="participant-list">
                     {% for p in participants %}
                         <li class="participant-item {% if p.id == participant.id %}is-self{% endif %}" data-player-id="{{ p.id }}">
@@ -53,7 +56,6 @@
                 <div id="host-controls" class="host-controls"{% if participant.id != host.id %} hidden{% endif %}>
                     <div class="host-controls-header">
                         <h3>Lobby Settings</h3>
-                        <button id="leave-room-button" type="button" class="leave-button">Leave</button>
                     </div>
                     <p id="host-controls-note" class="hint status-note" hidden></p>
                     <form id="settings-form" class="settings-form">

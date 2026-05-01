@@ -118,3 +118,7 @@ Patched a bug where creating a room presented a room intermission overlay that w
 
 ## 30/04
 Patched a bug where entering the join code from another room and joining, was calling create room instead of join room and was just creating a new room.
+
+## 01/05
+Lobby settings were visible to non admins of a room (Even though they couldn't edit them). I removed them so the UI looks cleaner.
+

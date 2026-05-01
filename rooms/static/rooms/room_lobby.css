@@ -446,10 +446,21 @@ body {
     box-shadow: var(--shadow);
 }
 
+.participants-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1.5rem;
+}
+
 .lobby-card h3 {
     margin-top: 0;
     font-size: 1.25rem;
     margin-bottom: 1.5rem;
+}
+
+.participants-card-header h3 {
+    margin: 0;
 }
 
 /* Participant List */
@@ -563,14 +574,15 @@ body {
     gap: 1.5rem;
 }
 
-.host-controls[data-mode="read-only"] {
-    opacity: 0.9;
+/* display:flex above overrides browser UA [hidden]{display:none} — restore it
+   so syncHostControls() correctly hides controls for non-owners and shows them
+   when ownership transfers. */
+.host-controls[hidden] {
+    display: none;
 }
 
-.host-controls-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+.host-controls[data-mode="read-only"] {
+    opacity: 0.9;
 }
 
 .host-controls-header h3 {
