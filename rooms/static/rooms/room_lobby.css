@@ -434,6 +434,12 @@ body {
     gap: 2rem;
 }
 
+/* display:grid above overrides browser UA [hidden]{display:none} — restore it
+   so syncRoomMode() correctly hides lobby panels when the game starts. */
+.lobby-main[hidden] {
+    display: none;
+}
+
 @media (max-width: 768px) {
     .lobby-main {
         grid-template-columns: 1fr;
@@ -513,6 +519,17 @@ body {
     font-size: 0.8rem;
     color: var(--text-secondary);
     font-weight: 500;
+}
+
+/* Invite widget — fixed top-right during gameplay */
+.invite-widget.game-mode {
+    position: fixed;
+    top: 1rem;
+    right: 1rem;
+    z-index: 100;
+    max-width: 280px;
+    padding: 1rem 1.25rem;
+    margin: 0;
 }
 
 /* Join Link Section */

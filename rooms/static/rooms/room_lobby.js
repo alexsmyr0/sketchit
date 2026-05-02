@@ -50,6 +50,9 @@ class LobbyClient {
             guessInputContainer: document.getElementById('guess-input-container'),
             submitGuessButton: document.getElementById('submit-guess-button'),
 
+            // Invite widget (repositioned top-right during gameplay)
+            inviteWidget: document.getElementById('invite-widget'),
+
             // Intermission
             intermissionOverlay: document.getElementById('intermission-overlay'),
             intermissionTitle: document.getElementById('intermission-title'),
@@ -871,6 +874,9 @@ class LobbyClient {
         }
         if (this.elements.gameView) {
             this.elements.gameView.hidden = !inGame;
+        }
+        if (this.elements.inviteWidget) {
+            this.elements.inviteWidget.classList.toggle('game-mode', inGame);
         }
 
         if (!inGame) {
