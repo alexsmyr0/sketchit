@@ -24,9 +24,16 @@ body {
 }
 
 .lobby-container {
+    box-sizing: border-box;
     width: 100%;
     max-width: 900px;
     padding: 2rem;
+}
+
+.lobby-container.game-active {
+    box-sizing: border-box;
+    max-width: 1400px;
+    padding: 1.5rem 2rem;
 }
 
 .lobby-header {
@@ -70,17 +77,15 @@ body {
 
 /* Game Mode Styles */
 .game-main {
-    width: 100%;
-    max-width: 1200px;
-    margin: 0 auto;
+    /* Block element fills container content area naturally.
+       No width/max-width override — lobby-container.game-active
+       already caps the overall width at 1400px. */
 }
 
 .game-grid {
     display: grid;
-    grid-template-columns: 240px 1fr 300px;
+    grid-template-columns: 200px 1fr 240px;
     gap: 1.5rem;
-    height: calc(100vh - 180px);
-    min-height: 500px;
 }
 
 @media (max-width: 1024px) {
@@ -151,18 +156,20 @@ body {
     display: flex;
     flex-direction: column;
     gap: 1rem;
+    align-self: start;
 }
 
 .game-hud {
     background: var(--card-bg);
     border-radius: var(--radius);
-    padding: 1.5rem;
+    padding: 1rem 1.5rem;
     box-shadow: var(--shadow);
     text-align: center;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
+    gap: 0.25rem;
 }
 
 .word-display {
@@ -182,13 +189,13 @@ body {
 }
 
 .canvas-container {
-    flex-grow: 1;
+    aspect-ratio: 5 / 4;
+    width: 100%;
     background: #fff;
     border-radius: var(--radius);
     box-shadow: var(--shadow);
     position: relative;
     overflow: hidden;
-    min-height: 400px;
 }
 
 .drawing-canvas {
@@ -318,6 +325,7 @@ body {
     list-style: none;
     padding: 0;
     margin: 0;
+    flex-grow: 1;
     overflow-y: auto;
     display: flex;
     flex-direction: column;

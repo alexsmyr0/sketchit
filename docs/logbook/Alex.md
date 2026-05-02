@@ -122,3 +122,9 @@ Patched a bug where entering the join code from another room and joining, was ca
 ## 01/05
 Lobby settings were visible to non admins of a room (Even though they couldn't edit them). I removed them so the UI looks cleaner.
 
+## 02/05
+Some of the lobby UI was not being hidden on game start. Fixed that so only game relevant UI is visible in-game. Also moved invite friends container to top right of the screen so people can still share the invite link to other players
+
+Also drawing canvas was stretched too tall and due to the way canvas was being rendered, my cursor was misiligned with the actual drawing coordinates so it would draw lower than my cursos. Fixed that by calling resizeDrawingCanvas() after the game view becomes visible
+
+

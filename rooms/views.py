@@ -398,13 +398,13 @@ def join_room(request, join_code):
                     # so the entry page can send the guest back to the room they
                     # still validly own instead of leaving them stuck at a dead end.
                     return _build_room_assignment_conflict_response(player.room)
-
-            # Rejoining the same room should not create a duplicate participant or
-            # change the original display name, but it should refresh the session
-            # expiry we store on the player record.
-            player.session_expires_at = request.session.get_expiry_date()
-            player.save(update_fields=["session_expires_at", "updated_at"])
-            return _build_room_response(room, status=200)
+            else:
+                # Rejoining the same room should not create a duplicate participant
+                # or change the original display name, but it should refresh the
+                # session expiry we store on the player record.
+                player.session_expires_at = request.session.get_expiry_date()
+                player.save(update_fields=["session_expires_at", "updated_at"])
+                return _build_room_response(room, status=200)
 
         # Capacity only matters for brand-new joins, not same-session rejoin reuse.
         #
