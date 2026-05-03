@@ -539,37 +539,30 @@ body {
     font-weight: 500;
 }
 
-/* Invite widget — fixed top-left during gameplay, collapses to icon-only */
-.invite-widget.game-mode {
-    position: fixed;
-    top: 1rem;
-    left: 1rem;
-    right: auto;
-    z-index: 100;
-    padding: 0.75rem 1rem;
-    margin: 0;
-    width: auto;
-    max-width: none;
-    /* Row layout: "Invite Friends"  [📋] */
+/* Hide original invite widget in game mode — game-top-bar takes over */
+.lobby-container.game-active #invite-widget {
+    display: none;
+}
+
+/* Game top bar — sits above the game-grid, full width of lobby-container */
+.game-top-bar {
     display: flex;
-    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+.game-top-bar__invite {
+    display: flex;
     align-items: center;
     gap: 0.75rem;
 }
 
-.invite-widget.game-mode label {
-    margin: 0;
+.game-top-bar__invite-label {
     font-size: 0.9rem;
     font-weight: 600;
     white-space: nowrap;
-    cursor: default;
-}
-
-/* Hide URL input only — label + button stay visible.
-   JS still reads joinUrlInput.value for clipboard copy — display:none
-   doesn't clear .value, so copyJoinUrl() keeps working. */
-.invite-widget.game-mode .copy-input-group input[type="text"] {
-    display: none;
+    color: var(--text-primary);
 }
 
 /* Join Link Section */
@@ -662,6 +655,12 @@ body {
 .leave-button:hover {
     background: var(--danger);
     color: #fff;
+}
+
+#leave-room-button-game {
+    padding: calc(0.35rem * 1.5) calc(0.9rem * 1.5);
+    font-size: calc(0.8rem * 1.5);
+    border-radius: 12px;
 }
 
 .settings-form {

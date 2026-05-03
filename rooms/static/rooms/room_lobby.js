@@ -50,8 +50,12 @@ class LobbyClient {
             guessInputContainer: document.getElementById('guess-input-container'),
             submitGuessButton: document.getElementById('submit-guess-button'),
 
-            // Invite widget (repositioned top-right during gameplay)
+            // Invite widget (hidden in game mode — game-top-bar takes over)
             inviteWidget: document.getElementById('invite-widget'),
+
+            // Game-mode top bar buttons
+            copyUrlButtonGame: document.getElementById('copy-url-button-game'),
+            leaveRoomButtonGame: document.getElementById('leave-room-button-game'),
 
             // Intermission
             intermissionOverlay: document.getElementById('intermission-overlay'),
@@ -103,9 +107,12 @@ class LobbyClient {
     }
 
     setupEventListeners() {
-        // Copy Join URL
+        // Copy Join URL (lobby widget + game top-bar)
         if (this.elements.copyUrlButton) {
             this.elements.copyUrlButton.addEventListener('click', () => this.copyJoinUrl());
+        }
+        if (this.elements.copyUrlButtonGame) {
+            this.elements.copyUrlButtonGame.addEventListener('click', () => this.copyJoinUrl());
         }
 
         // Host Settings Form
@@ -124,6 +131,11 @@ class LobbyClient {
         // Leave Room Button
         if (this.elements.leaveRoomButton) {
             this.elements.leaveRoomButton.addEventListener('click', () => this.leaveRoom());
+        }
+
+        // Game-mode leave button (top-left invite widget)
+        if (this.elements.leaveRoomButtonGame) {
+            this.elements.leaveRoomButtonGame.addEventListener('click', () => this.leaveRoom());
         }
 
         // Guess Submission
@@ -751,6 +763,9 @@ class LobbyClient {
 
         if (this.elements.copyUrlButton) {
             this.elements.copyUrlButton.disabled = this.isBusy();
+        }
+        if (this.elements.copyUrlButtonGame) {
+            this.elements.copyUrlButtonGame.disabled = this.isBusy();
         }
     }
 
@@ -1399,7 +1414,7 @@ class LobbyClient {
     }
 
     async copyJoinUrl() {
-        if (!this.elements.joinUrlInput || !this.elements.copyUrlButton || this.isBusy()) {
+        if (!this.elements.joinUrlInput || this.isBusy()) {
             return;
         }
 
@@ -1426,19 +1441,16 @@ class LobbyClient {
     }
 
     setCopyButtonFeedback(text, resetDelayMs) {
-        if (!this.elements.copyUrlButton) {
-            return;
-        }
-
         if (this.copyFeedbackTimeout) {
             clearTimeout(this.copyFeedbackTimeout);
             this.copyFeedbackTimeout = null;
         }
 
         const originalText = '📋';
-        this.elements.copyUrlButton.textContent = text;
+        const buttons = [this.elements.copyUrlButton, this.elements.copyUrlButtonGame].filter(Boolean);
+        buttons.forEach(btn => { btn.textContent = text; });
         this.copyFeedbackTimeout = window.setTimeout(() => {
-            this.elements.copyUrlButton.textContent = originalText;
+            buttons.forEach(btn => { btn.textContent = originalText; });
             this.copyFeedbackTimeout = null;
         }, resetDelayMs);
     }
