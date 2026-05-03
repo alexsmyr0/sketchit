@@ -424,6 +424,62 @@ body {
     margin: 2rem 0;
 }
 
+.leaderboard-table {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.leaderboard-header,
+.leaderboard-row {
+    display: grid;
+    grid-template-columns: 1.5rem 2rem 1fr 5rem;
+    align-items: center;
+    padding: 0.5rem 0.75rem;
+    border-radius: 8px;
+    text-align: left;
+}
+
+.leaderboard-header {
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+    border-bottom: 1px solid #f1f2f6;
+    border-radius: 0;
+    padding-bottom: 0.5rem;
+    margin-bottom: 0.25rem;
+}
+
+.leaderboard-row {
+    background: #f8f9fa;
+    font-size: 0.95rem;
+}
+
+.leaderboard-row--first {
+    background: #fffbea;
+    color: #92700a;
+    font-weight: 700;
+}
+
+.lb-rank {
+    font-weight: 600;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.lb-rank--first {
+    color: #b8860b;
+}
+
+.lb-score {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+}
+
 .intermission-timer {
     font-weight: 600;
     color: var(--text-secondary);
