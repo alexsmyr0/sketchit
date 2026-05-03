@@ -508,6 +508,28 @@ body {
     gap: 2rem;
 }
 
+.lobby-left-col {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    min-width: 0;
+}
+
+.lobby-right-col {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    min-width: 0;
+}
+
+.participants-card {
+    flex: 1;
+}
+
+.details-card {
+    flex: 1;
+}
+
 /* display:grid above overrides browser UA [hidden]{display:none} — restore it
    so syncRoomMode() correctly hides lobby panels when the game starts. */
 .lobby-main[hidden] {
@@ -641,6 +663,7 @@ body {
 
 .copy-input-group input {
     flex-grow: 1;
+    min-width: 0;
     padding: 0.75rem 1rem;
     border: 1px solid #dfe6e9;
     border-radius: 8px;
@@ -692,6 +715,12 @@ body {
     opacity: 0.9;
 }
 
+.host-controls-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
 .host-controls-header h3 {
     margin: 0;
 }
@@ -711,6 +740,12 @@ body {
 .leave-button:hover {
     background: var(--danger);
     color: #fff;
+}
+
+#leave-room-button {
+    padding: calc(0.35rem * 1.5) calc(0.9rem * 1.5);
+    font-size: calc(0.8rem * 1.5);
+    border-radius: 12px;
 }
 
 #leave-room-button-game {

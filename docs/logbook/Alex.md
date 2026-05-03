@@ -131,3 +131,6 @@ Also drawing canvas was stretched too tall and due to the way canvas was being r
 Game over return button was mislabeled as return to lobby but the intended functionality is for it to return to homepage. It also wasn't returning to homepage because it was mistakenly set to reload the page instead of navigating to "/". Fixed both in a bugfix branch.
 
 Also added a leave room button top left of the screen next to the invite friends container.
+
+Added an actual leaderboard at the end of each round that ranks players and 1st player's row is highlighted in gold and has a crown emoji.
+
