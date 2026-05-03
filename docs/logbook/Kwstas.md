@@ -47,3 +47,8 @@
 Lowered Grace period for empty rooms from 10 minutes to 1. When a room has 0 participants it will now be deleted after 1 minute.
 
 Fixed a bug where after the grace period, a room that is deleted is still visible to players in the homepage as a "zombie" entry. Clicking join returned a 404. Now the UI gets updated accordingly.
+
+## May 2
+Adjusted game round UI. canvas was fixed 800x500px which can be too big on some monitors and too small on others. Made canvas scalable but locked it and and chosen word container in a parent container with a hard px cap. 
+
+Guesses container was also getting cut on the right which was partially attributed to the fixed sizing I had before.

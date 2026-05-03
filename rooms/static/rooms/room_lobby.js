@@ -50,6 +50,9 @@ class LobbyClient {
             guessInputContainer: document.getElementById('guess-input-container'),
             submitGuessButton: document.getElementById('submit-guess-button'),
 
+            // Invite widget (repositioned top-right during gameplay)
+            inviteWidget: document.getElementById('invite-widget'),
+
             // Intermission
             intermissionOverlay: document.getElementById('intermission-overlay'),
             intermissionTitle: document.getElementById('intermission-title'),
@@ -871,6 +874,25 @@ class LobbyClient {
         }
         if (this.elements.gameView) {
             this.elements.gameView.hidden = !inGame;
+        }
+        if (this.elements.inviteWidget) {
+            this.elements.inviteWidget.classList.toggle('game-mode', inGame);
+        }
+
+        const lobbyContainer = document.querySelector('.lobby-container');
+        if (lobbyContainer) {
+            lobbyContainer.classList.toggle('game-active', inGame);
+        }
+
+        // Resize the canvas after the game view becomes visible. The initial
+        // resize (called at DOMContentLoaded) runs while #game-view is hidden,
+        // so getBoundingClientRect() returns zero and the fallback 800×500 buffer
+        // is used. Without this call the internal canvas dimensions won't match
+        // the actual CSS display size, causing drawing strokes to be misaligned
+        // with the cursor. requestAnimationFrame defers until after the browser
+        // has completed layout with the newly-visible game view.
+        if (inGame) {
+            window.requestAnimationFrame(() => this.resizeDrawingCanvas());
         }
 
         if (!inGame) {

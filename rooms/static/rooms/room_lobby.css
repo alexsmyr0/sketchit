@@ -24,14 +24,28 @@ body {
 }
 
 .lobby-container {
+    box-sizing: border-box;
     width: 100%;
     max-width: 900px;
-    padding: 2rem;
+    padding: 9rem 2rem 2rem;  /* top clears fixed header */
+}
+
+.lobby-container.game-active {
+    box-sizing: border-box;
+    max-width: 1800px;          /* wider container → bigger 1fr canvas column */
+    padding: 9rem 2rem 1.5rem;  /* top clears fixed header */
 }
 
 .lobby-header {
+    position: fixed;
+    top: 1rem;          /* same vertical offset as invite widget */
+    left: 0;
+    right: 0;
+    z-index: 40;        /* below invite widget (z-index:100) */
     text-align: center;
-    margin-bottom: 2rem;
+    background: var(--bg-color);  /* opaque so content doesn't bleed through */
+    padding: 0 2rem;
+    margin-bottom: 0;
 }
 
 .logo {
@@ -70,17 +84,16 @@ body {
 
 /* Game Mode Styles */
 .game-main {
-    width: 100%;
-    max-width: 1200px;
-    margin: 0 auto;
+    /* Natural height — grid row height set by center column (HUD + canvas).
+       Feed column stretches to match via align-self:stretch (grid default). */
 }
 
 .game-grid {
     display: grid;
-    grid-template-columns: 240px 1fr 300px;
+    grid-template-columns: 200px 1fr 300px;
     gap: 1.5rem;
-    height: calc(100vh - 180px);
-    min-height: 500px;
+    /* No explicit height — row height = center column (HUD + canvas).
+       Feed stretches to match via default align-self:stretch. */
 }
 
 @media (max-width: 1024px) {
@@ -101,6 +114,8 @@ body {
     display: flex;
     flex-direction: column;
     gap: 1rem;
+    min-height: 0;
+    overflow-y: auto;
 }
 
 .timer-card {
@@ -151,18 +166,24 @@ body {
     display: flex;
     flex-direction: column;
     gap: 1rem;
+    align-self: start;   /* don't stretch — lets canvas keep aspect-ratio */
+    min-height: 0;
+    /* width comes from grid 1fr column — don't override here */
 }
 
 .game-hud {
+    box-sizing: border-box;       /* padding included in width — stops bleed */
     background: var(--card-bg);
     border-radius: var(--radius);
-    padding: 1.5rem;
+    padding: 1rem 1.5rem;
     box-shadow: var(--shadow);
     text-align: center;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
+    gap: 0.25rem;
+    width: 100%;                  /* inherits from .game-center */
 }
 
 .word-display {
@@ -182,13 +203,13 @@ body {
 }
 
 .canvas-container {
-    flex-grow: 1;
+    aspect-ratio: 4 / 3;          /* classic drawing ratio — more vertical room */
+    width: 100%;                  /* inherits from .game-center */
     background: #fff;
     border-radius: var(--radius);
     box-shadow: var(--shadow);
     position: relative;
     overflow: hidden;
-    min-height: 400px;
 }
 
 .drawing-canvas {
@@ -298,6 +319,7 @@ body {
     border-radius: var(--radius);
     box-shadow: var(--shadow);
     overflow: hidden;
+    min-height: 0;   /* lets grid constrain height; enables overflow-y scroll chain */
 }
 
 .feed-container {
@@ -318,6 +340,7 @@ body {
     list-style: none;
     padding: 0;
     margin: 0;
+    flex-grow: 1;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
@@ -428,9 +451,16 @@ body {
 .badge.in_progress { background-color: var(--success); color: #fff; }
 
 .lobby-main {
+    margin-top: 1rem;
     display: grid;
     grid-template-columns: 1fr 1.5fr;
     gap: 2rem;
+}
+
+/* display:grid above overrides browser UA [hidden]{display:none} — restore it
+   so syncRoomMode() correctly hides lobby panels when the game starts. */
+.lobby-main[hidden] {
+    display: none;
 }
 
 @media (max-width: 768px) {
@@ -446,10 +476,21 @@ body {
     box-shadow: var(--shadow);
 }
 
+.participants-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1.5rem;
+}
+
 .lobby-card h3 {
     margin-top: 0;
     font-size: 1.25rem;
     margin-bottom: 1.5rem;
+}
+
+.participants-card-header h3 {
+    margin: 0;
 }
 
 /* Participant List */
@@ -501,6 +542,39 @@ body {
     font-size: 0.8rem;
     color: var(--text-secondary);
     font-weight: 500;
+}
+
+/* Invite widget — fixed top-left during gameplay, collapses to icon-only */
+.invite-widget.game-mode {
+    position: fixed;
+    top: 1rem;
+    left: 1rem;
+    right: auto;
+    z-index: 100;
+    padding: 0.75rem 1rem;
+    margin: 0;
+    width: auto;
+    max-width: none;
+    /* Row layout: "Invite Friends"  [📋] */
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.invite-widget.game-mode label {
+    margin: 0;
+    font-size: 0.9rem;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: default;
+}
+
+/* Hide URL input only — label + button stay visible.
+   JS still reads joinUrlInput.value for clipboard copy — display:none
+   doesn't clear .value, so copyJoinUrl() keeps working. */
+.invite-widget.game-mode .copy-input-group input[type="text"] {
+    display: none;
 }
 
 /* Join Link Section */
@@ -563,14 +637,15 @@ body {
     gap: 1.5rem;
 }
 
-.host-controls[data-mode="read-only"] {
-    opacity: 0.9;
+/* display:flex above overrides browser UA [hidden]{display:none} — restore it
+   so syncHostControls() correctly hides controls for non-owners and shows them
+   when ownership transfers. */
+.host-controls[hidden] {
+    display: none;
 }
 
-.host-controls-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+.host-controls[data-mode="read-only"] {
+    opacity: 0.9;
 }
 
 .host-controls-header h3 {
