@@ -93,6 +93,13 @@
         </main>
 
         <main class="game-main" id="game-view" hidden>
+            <div class="game-top-bar">
+                <div class="game-top-bar__invite">
+                    <span class="game-top-bar__invite-label">Invite Friends</span>
+                    <button id="copy-url-button-game" type="button" class="icon-button" title="Copy Link">📋</button>
+                </div>
+                <button id="leave-room-button-game" type="button" class="leave-button">Leave</button>
+            </div>
             <div class="game-grid">
                 <aside class="game-sidebar">
                     <div class="timer-card">
@@ -165,8 +172,8 @@
                 <div id="intermission-results">
                     <!-- Results/Leaderboard populated by JS -->
                 </div>
-                <p class="intermission-timer">Next round starts in <span id="intermission-seconds">10</span>s...</p>
-                <button id="intermission-return-button" class="action-button primary" type="button" hidden>Return to lobby</button>
+                <p class="intermission-timer">Returning to lobby in <span id="intermission-seconds">20</span>s...</p>
+                <button id="intermission-return-button" class="action-button primary" type="button" hidden>Return to Homepage</button>
             </div>
         </div>
     </div>

@@ -765,21 +765,11 @@ def complete_leaderboard_cooldown_for_room(room_id: int) -> LeaderboardCooldownR
     locked_room.status = Room.Status.LOBBY
     locked_room.save(update_fields=["status", "updated_at"])
 
-    eligible_participants = _get_start_game_eligible_participants(locked_room)
-    if len(eligible_participants) < 2:
-        return LeaderboardCooldownResult(
-            room_status=Room.Status.LOBBY,
-            restarted=False,
-            next_game_id=None,
-            next_round_id=None,
-        )
-
-    started_game = start_game_for_room(locked_room)
     return LeaderboardCooldownResult(
-        room_status=Room.Status.IN_PROGRESS,
-        restarted=True,
-        next_game_id=started_game.game.id,
-        next_round_id=started_game.first_round.id,
+        room_status=Room.Status.LOBBY,
+        restarted=False,
+        next_game_id=None,
+        next_round_id=None,
     )
 
 
