@@ -63,6 +63,7 @@ class LobbyClient {
             intermissionResults: document.getElementById('intermission-results'),
             intermissionSeconds: document.getElementById('intermission-seconds'),
             intermissionTimer: document.querySelector('.intermission-timer'),
+            intermissionTimerPrefix: document.getElementById('intermission-timer-prefix'),
             intermissionReturnButton: document.getElementById('intermission-return-button'),
         };
 
@@ -1047,10 +1048,28 @@ class LobbyClient {
             return '<p>No scores yet.</p>';
         }
 
-        return leaderboard.map((participant) => {
+        const header = `
+            <div class="leaderboard-table">
+                <div class="leaderboard-header">
+                    <span class="lb-icon"></span>
+                    <span class="lb-rank">#</span>
+                    <span class="lb-name">Name</span>
+                    <span class="lb-score">Score</span>
+                </div>`;
+
+        const rows = leaderboard.map((participant, index) => {
+            const rank = index + 1;
             const score = participant.current_score === undefined ? '—' : participant.current_score;
-            return `<div class="leaderboard-row"><span>${participant.display_name}</span><span>${score}</span></div>`;
+            const isFirst = rank === 1;
+            return `<div class="leaderboard-row${isFirst ? ' leaderboard-row--first' : ''}">
+                <span class="lb-icon">${isFirst ? '👑' : ''}</span>
+                <span class="lb-rank${isFirst ? ' lb-rank--first' : ''}">${rank}</span>
+                <span class="lb-name">${participant.display_name}</span>
+                <span class="lb-score">${score}</span>
+            </div>`;
         }).join('');
+
+        return header + rows + '</div>';
     }
 
     showIntermissionOverlay({ title, leaderboard = [], countdownVisible = true }) {
@@ -1080,6 +1099,9 @@ class LobbyClient {
         }
 
         this.elements.intermissionOverlay.hidden = true;
+        if (this.elements.intermissionTimerPrefix) {
+            this.elements.intermissionTimerPrefix.textContent = 'Next round';
+        }
         if (this.elements.intermissionTimer) {
             this.elements.intermissionTimer.hidden = false;
         }
@@ -1241,6 +1263,9 @@ class LobbyClient {
     handleScoreboardState(payload) {
         if (this.currentPhase !== 'finished') return;
 
+        if (this.elements.intermissionTimerPrefix) {
+            this.elements.intermissionTimerPrefix.textContent = 'Returning to lobby';
+        }
         if (this.elements.intermissionTimer) {
             this.elements.intermissionTimer.hidden = false;
         }

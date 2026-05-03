@@ -68,7 +68,7 @@ def _intermission_duration_seconds() -> float:
 def _leaderboard_duration_seconds() -> float:
     """Return the A8 leaderboard cooldown duration in seconds."""
 
-    return float(getattr(settings, "SKETCHIT_LEADERBOARD_DURATION_SECONDS", 20))
+    return float(getattr(settings, "SKETCHIT_LEADERBOARD_DURATION_SECONDS", 10))
 
 
 def _timer_tick_interval_seconds() -> float:
@@ -1429,6 +1429,36 @@ def start_intermission(
     now_iso = timezone.now().isoformat()
 
     client = get_redis_client()
+
+    # If the drawer pool is empty, every player has drawn this cycle.
+    # Skip the round intermission and go straight to the game-end leaderboard.
+    remaining_pool = game_redis.get_drawer_pool(client, join_code)
+    if not remaining_pool:
+        broadcast_room_event(
+            join_code,
+            "round.ended",
+            {
+                "round_id": completed_round_id,
+                "status": completion_status,
+                "reason": completion_reason,
+                "ended_at": ended_at_iso,
+                "server_timestamp": timezone.now().isoformat(),
+            },
+        )
+        from games.services import advance_game_after_intermission
+        result = advance_game_after_intermission(completed_round_id)
+        if result.next_round_id is not None:
+            # Edge case: spectator was promoted, game continues
+            start_round_runtime(result.next_round_id)
+            return
+        if result.game_finished:
+            start_leaderboard_cooldown(
+                join_code=join_code,
+                game_id=result.game_id,
+                completed_round_id=completed_round_id,
+            )
+        return
+
     current_turn_state = game_redis.get_turn_state(client, join_code)
     eligible_guesser_ids = current_turn_state.get("eligible_guesser_ids", "[]")
     correct_guesser_ids = current_turn_state.get("correct_guesser_ids", "[]")
