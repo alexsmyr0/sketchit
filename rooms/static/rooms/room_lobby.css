@@ -83,11 +83,6 @@ body {
 }
 
 /* Game Mode Styles */
-.game-main {
-    /* Natural height — grid row height set by center column (HUD + canvas).
-       Feed column stretches to match via align-self:stretch (grid default). */
-}
-
 .game-grid {
     display: grid;
     grid-template-columns: 200px 1fr 300px;

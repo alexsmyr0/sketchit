@@ -138,7 +138,7 @@ class LobbyClient {
 
         if (this.elements.intermissionReturnButton) {
             this.elements.intermissionReturnButton.addEventListener('click', () => {
-                window.location.reload();
+                window.location.href = '/';
             });
         }
     }
@@ -573,6 +573,9 @@ class LobbyClient {
                 break;
             case 'game.finished':
                 this.handleGameFinished(event.payload);
+                break;
+            case 'scoreboard.state':
+                this.handleScoreboardState(event.payload);
                 break;
             default:
                 break;
@@ -1218,6 +1221,15 @@ class LobbyClient {
 
         this.syncGuessComposer();
         this.syncDrawingControls();
+    }
+
+    handleScoreboardState(payload) {
+        if (this.currentPhase !== 'finished') return;
+
+        if (this.elements.intermissionTimer) {
+            this.elements.intermissionTimer.hidden = false;
+        }
+        this.setIntermissionSeconds(payload.remaining_seconds || 0);
     }
 
     submitGuess() {
