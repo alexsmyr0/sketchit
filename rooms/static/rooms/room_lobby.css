@@ -513,6 +513,11 @@ body {
     min-width: 0;
 }
 
+#invite-widget       { grid-column: 1; grid-row: 1; }
+#leave-room-button   { grid-column: 2; grid-row: 1; }
+.participants-card   { grid-column: 1; grid-row: 2; }
+.details-card        { grid-column: 2; grid-row: 2; }
+
 /* display:grid above overrides browser UA [hidden]{display:none} — restore it
    so syncRoomMode() correctly hides lobby panels when the game starts. */
 .lobby-main[hidden] {
@@ -811,7 +816,7 @@ body {
     font-size: 0.8rem;
     font-weight: 600;
     cursor: pointer;
-    border: 1.5px solid var(--danger);
+    border: 2px solid var(--danger);
     background: transparent;
     color: var(--danger);
     transition: background 0.15s, color 0.15s;
