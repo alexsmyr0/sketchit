@@ -681,10 +681,6 @@ class LobbyClient {
             this.elements.hostControls.dataset.busy = this.isBusy() ? 'true' : 'false';
         }
 
-        if (this.elements.leaveRoomButton) {
-            this.elements.leaveRoomButton.hidden = !isHost;
-        }
-
         if (this.elements.guestView) {
             this.elements.guestView.hidden = isHost;
         }
