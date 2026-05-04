@@ -505,29 +505,12 @@ body {
     margin-top: 1rem;
     display: grid;
     grid-template-columns: 1fr 1.5fr;
-    gap: 2rem;
+    column-gap: 2rem;
+    row-gap: 1rem;
 }
 
-.lobby-left-col {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
+.lobby-main > * {
     min-width: 0;
-}
-
-.lobby-right-col {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-    min-width: 0;
-}
-
-.participants-card {
-    flex: 1;
-}
-
-.details-card {
-    flex: 1;
 }
 
 /* display:grid above overrides browser UA [hidden]{display:none} — restore it
@@ -539,6 +522,10 @@ body {
 @media (max-width: 768px) {
     .lobby-main {
         grid-template-columns: 1fr;
+    }
+
+    #leave-room-button {
+        justify-self: end;
     }
 }
 
@@ -817,15 +804,6 @@ body {
     opacity: 0.9;
 }
 
-.host-controls-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-}
-
-.host-controls-header h3 {
-    margin: 0;
-}
 
 .leave-button {
     padding: 0.35rem 0.9rem;
@@ -848,6 +826,8 @@ body {
     padding: calc(0.35rem * 1.5) calc(0.9rem * 1.5);
     font-size: calc(0.8rem * 1.5);
     border-radius: 12px;
+    justify-self: end;
+    align-self: end;
 }
 
 #leave-room-button-game {

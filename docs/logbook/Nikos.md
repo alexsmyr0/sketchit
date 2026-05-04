@@ -35,3 +35,9 @@ Disconnecting from a lobby room routes through leave_participant instead of just
 ## 30/04
 Added Leave button to lobby settings header
 Added a Leave button to the right of the Lobby Settings title. Clicking it POSTs to the new rooms/<join_code>/leave/ endpoint and redirects to the entry page. The button is disabled on click to prevent double-submission.
+
+## 03/05
+
+Realligned the UI in the lobby as leave button wasn't in a good place and invite friends ui was taking up too much space. 
+
+Also replace the placeholder UI for the clipboard in invite friends with an actuall ui svg element.
