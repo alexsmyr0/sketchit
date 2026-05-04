@@ -1471,11 +1471,21 @@ class LobbyClient {
             this.copyFeedbackTimeout = null;
         }
 
-        const originalText = '📋';
         const buttons = [this.elements.copyUrlButton, this.elements.copyUrlButtonGame].filter(Boolean);
-        buttons.forEach(btn => { btn.textContent = text; });
+        // SVG .copy buttons: CSS :focus handles checkmark state, no textContent swap needed
+        buttons.forEach(btn => {
+            if (!btn.classList.contains('copy')) {
+                btn.textContent = text;
+            }
+        });
         this.copyFeedbackTimeout = window.setTimeout(() => {
-            buttons.forEach(btn => { btn.textContent = originalText; });
+            buttons.forEach(btn => {
+                if (btn.classList.contains('copy')) {
+                    btn.blur();
+                } else {
+                    btn.textContent = '📋';
+                }
+            });
             this.copyFeedbackTimeout = null;
         }, resetDelayMs);
     }
