@@ -107,12 +107,6 @@ docker compose exec app python manage.py makemigrations
 docker compose exec app python manage.py migrate
 ```
 
-Create a Django superuser for `/admin/`:
-
-```bash
-docker compose exec app python manage.py createsuperuser
-```
-
 Collect static files (when needed):
 
 ```bash
@@ -200,7 +194,6 @@ daphne -b 0.0.0.0 -p 8000 config.asgi:application
 ## Entry Points
 
 - App: <http://127.0.0.1:8000>
-- Admin: <http://127.0.0.1:8000/admin/>
 
 ## User Manual
 

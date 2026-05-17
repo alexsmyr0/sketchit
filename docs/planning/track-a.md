@@ -31,7 +31,7 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 - [ ] Ensure required timestamps exist across all persistent domain models.
 - [ ] Keep room, participant, game, round, and word relationships aligned with the PRD and SDS.
 - [ ] Seed a default word pack that allows room creation without manual setup.
-- [ ] Cover model constraints, admin registration, and seed behavior with tests.
+- [ ] Cover model constraints and seed behavior with tests.
 - [ ] Verification gate: migrations apply cleanly and model/seed tests prove the baseline schema is valid for room creation and game bootstrap.
 
 ---

@@ -171,4 +171,3 @@ If the app fails because MySQL or Redis is unavailable:
 ## Current Entry Points
 
 - App: [http://127.0.0.1:8000](http://127.0.0.1:8000)
-- Admin: [http://127.0.0.1:8000/admin/](http://127.0.0.1:8000/admin/)
