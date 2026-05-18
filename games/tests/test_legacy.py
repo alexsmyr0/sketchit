@@ -1329,6 +1329,12 @@ class RoundTimerCoordinatorTests(TransactionTestCase):
         game_runtime.reset_runtime_state_for_tests()
         self.fake_redis = fakeredis.FakeRedis()
         game_runtime._redis_client = self.fake_redis
+        # Services keeps its own redis client cache. Without patching it too,
+        # _set_remaining_drawer_pool writes the pool to real Redis while
+        # start_intermission reads from fakeredis and sees an empty pool, which
+        # collapses the intermission path into the game-end branch.
+        self._original_services_redis_client = game_services._redis_client
+        game_services._redis_client = self.fake_redis
 
         self._event_log_lock = threading.Lock()
         self.event_log: list[tuple[str, dict]] = []
@@ -1355,6 +1361,7 @@ class RoundTimerCoordinatorTests(TransactionTestCase):
     def tearDown(self):
         game_runtime.broadcast_room_event = self.original_room_broadcast
         game_runtime.broadcast_player_event = self.original_player_broadcast
+        game_services._redis_client = self._original_services_redis_client
         game_runtime.reset_runtime_state_for_tests()
         super().tearDown()
 
