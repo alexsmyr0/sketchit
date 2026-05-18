@@ -405,6 +405,7 @@ class StartGameServiceTests(TestCase):
 
         self.assertSetEqual(drawer_pool, expected_remaining)
 
+    @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
     def test_drawer_pool_updates_after_each_round_and_clears_on_game_finish(self):
         # A-07: the SPECTATING participant created in setUp would be promoted to
         # PLAYING at every round transition and would enter the drawer pool.
@@ -461,6 +462,7 @@ class StartGameServiceTests(TestCase):
         self.assertEqual(game.status, GameStatus.FINISHED)
         self.assertSetEqual(drawer_pool_after_game_finished, set())
 
+    @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
     def test_completed_round_creates_next_round_with_unused_drawer_and_word(self):
         # A-07: the SPECTATING participant created in setUp would be promoted at
         # the round transition and become a valid drawer candidate, which would
@@ -491,6 +493,7 @@ class StartGameServiceTests(TestCase):
         self.assertNotEqual(second_round.drawer_participant_id, spectator_id)
         self.assertNotEqual(second_round.selected_game_word_id, first_round.selected_game_word_id)
 
+    @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
     def test_game_finishes_after_each_eligible_drawer_draws_once(self):
         # A-07: the SPECTATING participant created in setUp would be promoted at
         # the round-1 transition and add a third eligible drawer, so the game
@@ -641,6 +644,7 @@ class StartGameServiceTests(TestCase):
             Player.ParticipationStatus.PLAYING,
         )
 
+    @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
     def test_round_progression_never_repeats_drawers_or_words_within_game(self):
         # A-07: the SPECTATING participant from setUp would be promoted at the
         # round-1 transition and become a fourth eligible drawer, so the first
