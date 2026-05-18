@@ -73,10 +73,18 @@ def _deadline_key(join_code: str, deadline_type: str) -> str:
 
 def set_drawer_pool(client: "_redis.Redis", join_code: str, player_ids: list[int]) -> None:
     key = _drawer_pool_key(join_code)
-    client.delete(key)
-    if player_ids:
-        client.sadd(key, *player_ids)
-        client.expire(key, ROOM_RUNTIME_TTL)
+    if not player_ids:
+        # No pipeline needed when we are just clearing the key.
+        client.delete(key)
+        return
+    # Delete + sadd + expire run inside a MULTI/EXEC transaction so a
+    # concurrent reader never observes an empty pool between the wipe
+    # and the repopulation.
+    with client.pipeline(transaction=True) as pipe:
+        pipe.delete(key)
+        pipe.sadd(key, *player_ids)
+        pipe.expire(key, ROOM_RUNTIME_TTL)
+        pipe.execute()
 
 def remove_from_drawer_pool(client: "_redis.Redis", join_code: str, player_id: int) -> None:
     client.srem(_drawer_pool_key(join_code), player_id)
@@ -94,11 +102,19 @@ def clear_drawer_pool(client: "_redis.Redis", join_code: str) -> None:
 
 def set_turn_state(client: "_redis.Redis", join_code: str, state_dict: dict[str, str | int]) -> None:
     key = _turn_state_key(join_code)
-    client.delete(key)
-    if state_dict:
-        # Convert all to strings/bytes for consistent hash storage
-        client.hset(key, mapping=state_dict)
-        client.expire(key, ROOM_RUNTIME_TTL)
+    if not state_dict:
+        # No pipeline needed when we are just clearing the key.
+        client.delete(key)
+        return
+    # Delete + hset + expire run inside a MULTI/EXEC transaction so a
+    # concurrent reader (e.g. start_intermission inspecting the pool
+    # before transitioning phase) never sees an empty hash between the
+    # wipe and the repopulation.
+    with client.pipeline(transaction=True) as pipe:
+        pipe.delete(key)
+        pipe.hset(key, mapping=state_dict)
+        pipe.expire(key, ROOM_RUNTIME_TTL)
+        pipe.execute()
 
 def update_turn_state_fields(
     client: "_redis.Redis",

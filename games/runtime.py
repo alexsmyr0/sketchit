@@ -1386,6 +1386,17 @@ def mark_guesser_correct(*, join_code: str, round_id: int, player_id: int) -> bo
                     )
 
                 correct_guesser_ids.add(player_id)
+                # All Redis writes for one "guesser is now correct" event
+                # are committed in a single MULTI/EXEC so a process crash
+                # between the turn-state update and the per-player guess
+                # state cannot leave Redis half-applied. WATCH on the
+                # turn-state key still guards against concurrent updates
+                # to correct_guesser_ids.
+                guess_state_key = game_redis._guess_state_key(join_code, round_id)
+                guess_state_record = json.dumps({
+                    "status": "correct",
+                    "recorded_at": timezone.now().isoformat(),
+                })
                 pipeline.multi()
                 pipeline.hset(
                     turn_state_key,
@@ -1396,18 +1407,10 @@ def mark_guesser_correct(*, join_code: str, round_id: int, player_id: int) -> bo
                     },
                 )
                 pipeline.expire(turn_state_key, game_redis.ROOM_RUNTIME_TTL)
+                pipeline.hset(guess_state_key, str(player_id), guess_state_record)
+                pipeline.expire(guess_state_key, game_redis.ROOM_RUNTIME_TTL)
                 pipeline.execute()
 
-                game_redis.set_guess_state(
-                    client,
-                    join_code,
-                    round_id,
-                    player_id,
-                    {
-                        "status": "correct",
-                        "recorded_at": timezone.now().isoformat(),
-                    },
-                )
                 return bool(eligible_guesser_ids) and eligible_guesser_ids.issubset(
                     correct_guesser_ids
                 )
