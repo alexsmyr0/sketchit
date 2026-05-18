@@ -76,9 +76,20 @@ async def _connect_and_assert_active_handshake(
     return messages
 
 
-@override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)
+@override_settings(
+    SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True,
+    CHANNEL_LAYERS={
+        "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
+    },
+)
 class DrawingEventTests(TransactionTestCase):
-    """Tests for drawer authorization and event broadcasting."""
+    """Tests for drawer authorization and event broadcasting.
+
+    Forces InMemoryChannelLayer to sidestep the redis.asyncio cleanup
+    cascade ("Future attached to a different loop") that flakes Redis-
+    layer consumer tests under suite load — same approach as
+    RoomConsumerConnectTests.
+    """
 
     def setUp(self):
         from games import runtime as game_runtime
@@ -423,9 +434,18 @@ class DrawingEventTests(TransactionTestCase):
         await viewer_socket.disconnect()
 
 
-@override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)
+@override_settings(
+    SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True,
+    CHANNEL_LAYERS={
+        "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
+    },
+)
 class SnapshotSyncTests(TransactionTestCase):
-    """Tests for canvas snapshot recovery on connection."""
+    """Tests for canvas snapshot recovery on connection.
+
+    InMemoryChannelLayer override matches DrawingEventTests / the other
+    consumer test classes; see that class for rationale.
+    """
 
     def setUp(self):
         from games import runtime as game_runtime

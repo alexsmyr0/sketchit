@@ -81,7 +81,12 @@ async def _connect_and_assert_active_handshake(
     return messages
 
 
-@override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)
+@override_settings(
+    SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True,
+    CHANNEL_LAYERS={
+        "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
+    },
+)
 class GuessPipelineTests(TransactionTestCase):
     def setUp(self):
         from games import runtime as game_runtime
