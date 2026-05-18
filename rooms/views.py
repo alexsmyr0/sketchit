@@ -34,12 +34,15 @@ class CreateRoomForm(forms.Form):
     # This form validates the JSON fields required to create a brand-new room.
     name = forms.CharField(max_length=255)
     visibility = forms.ChoiceField(choices=Room.Visibility.choices)
-    display_name = forms.CharField(max_length=24)
+    # min_length and strip make the "no empty names" rule explicit and reject
+    # whitespace-only input that would otherwise pass past the implicit
+    # required=True check on a stripped value.
+    display_name = forms.CharField(max_length=24, min_length=1, strip=True)
 
 
 class JoinRoomForm(forms.Form):
     # Joining only needs the guest's display name.
-    display_name = forms.CharField(max_length=24)
+    display_name = forms.CharField(max_length=24, min_length=1, strip=True)
 
 
 class UpdateLobbySettingsForm(forms.Form):
