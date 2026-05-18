@@ -40,10 +40,10 @@ The original coverage and source-ticket mapping remain canonical in:
 
 ## Summary Snapshot
 
-- Total tickets: `26`
+- Total tickets: `35`
 - Done: `7`
 - Partially Implemented: `3`
-- Not Started: `16`
+- Not Started: `25`
 
 ## Low-Blocking Claim Queue (Global)
 
@@ -61,6 +61,7 @@ Use this as the default claim order for the next wave of work:
 - Track K: `K-01` through `K-07`
 - Track N: `N-01` through `N-05`
 - Track G: `G-01` through `G-06`
+- Track D: `D-01` through `D-09`
 
 ## Ordered Tickets By Track
 
@@ -102,6 +103,18 @@ Use this as the default claim order for the next wave of work:
 - [ ] **G-05** P4 - End-To-End Multiplayer Verification & Bug Sweep | Full MVP verification, multi-client testing, and bug-fix sweep. (Depends on: N-04; K-05; K-06; K-07; A-08; G-03; G-04) | Blocks: G-06
 - [ ] **G-06** P4 - Shared Context Refresh & Final MVP Hardening | Final docs refresh, cleanup fixes, and planning consistency pass. (Depends on: A-05; A-08; G-05) | Blocks: None
 
+### Track D
+
+- [ ] **D-01** P1 - Room Game Mode Persistence | Persistent `game_mode` on `Room` with `normal`/`duo` choices and `Game`-row snapshot at start. (Depends on: A-01) | Blocks: D-02; D-03; D-08
+- [ ] **D-02** P1 - Lobby Mode Selection API & Settings Surface | Host-only `game_mode` edit in lobby settings plus inclusion in lobby-state and `room.state` broadcasts. (Depends on: A-03; D-01) | Blocks: D-03; D-08
+- [ ] **D-03** P2 - Duo Drawer Pair Selection & Round Schema | `Round.second_drawer_*` fields, paired drawer pool consumption, and dual role-specific round-start payloads. (Depends on: K-04; D-01) | Blocks: D-04; D-05; D-06; D-07
+- [ ] **D-04** P2 - Shared Canvas For Drawer Pair | Drawing events accepted from either drawer in a duo round over a single room-scoped canvas. (Depends on: N-04; D-03) | Blocks: D-08; D-09
+- [ ] **D-05** P2 - Drawer Pair Private Chat | Drawer-only `cochat.message` event routed solely between the two current drawers in duo rounds. (Depends on: N-02; D-03) | Blocks: D-08; D-09
+- [ ] **D-06** P3 - Scoring Adaptation For Duo Rounds | Split drawer bonus across both drawers and exclude both from the eligible guesser set. (Depends on: K-05; D-03) | Blocks: D-09
+- [ ] **D-07** P3 - Duo Drawer Disconnect Handling | Single-drawer continuation rule and `15`-second grace only when both drawers are disconnected. (Depends on: K-07; D-03; D-06) | Blocks: D-09
+- [ ] **D-08** P4 - Duo Mode Browser Experience | Host-only mode dropdown, dual-drawer HUD, drawer-only co-chat panel, and shared-canvas input UI. (Depends on: G-02; G-03; G-04; D-02; D-04; D-05) | Blocks: D-09
+- [ ] **D-09** P4 - Duo Mode End-To-End Verification | Multi-client manual run, automated baseline integration test, and bug-fix sweep for duo mode. (Depends on: D-04; D-05; D-06; D-07; D-08) | Blocks: None
+
 ## Cross-Document References
 
 - Source backlog and audit status: `docs/planning/tickets-by-topic.md`
@@ -109,3 +122,4 @@ Use this as the default claim order for the next wave of work:
 - Track K definitions: `docs/planning/track-k.md`
 - Track N definitions: `docs/planning/track-n.md`
 - Track G definitions: `docs/planning/track-g.md`
+- Track D definitions: `docs/planning/track-d.md`
