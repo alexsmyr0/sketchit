@@ -309,8 +309,19 @@ async def _connect_and_drain_initial_sync(
 # ---------------------------------------------------------------------------
 
 
+@override_settings(
+    CHANNEL_LAYERS={
+        "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
+    },
+)
 class RoomConsumerConnectTests(TransactionTestCase):
-    """Tests for the WebSocket connect / disconnect lifecycle."""
+    """Tests for the WebSocket connect / disconnect lifecycle.
+
+    Forces InMemoryChannelLayer so `self.channel_layer.groups` is available
+    for the group-membership assertions (RedisChannelLayer has no `.groups`).
+    InMemory is also a clean fit for these in-process tests and sidesteps the
+    redis.asyncio cleanup-across-event-loops cascade that flaked the runner.
+    """
 
     def setUp(self):
         self.channel_layer = get_channel_layer()
