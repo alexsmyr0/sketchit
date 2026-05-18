@@ -36,6 +36,10 @@ if TYPE_CHECKING:
 #: How long presence / canvas keys survive without any write activity.
 ROOM_KEY_TTL = 60 * 60 * 24  # 24 hours in seconds
 
+#: Hard cap on canvas stroke list size. Oldest strokes are dropped past
+#: this limit so a single long-running round cannot grow Redis without bound.
+MAX_CANVAS_STROKES = 10000
+
 
 # ---------------------------------------------------------------------------
 # Internal key builders
@@ -167,6 +171,7 @@ def append_canvas_stroke(
     """
     key = _canvas_key(join_code)
     client.rpush(key, data)
+    client.ltrim(key, -MAX_CANVAS_STROKES, -1)
     client.expire(key, ROOM_KEY_TTL)
 
 

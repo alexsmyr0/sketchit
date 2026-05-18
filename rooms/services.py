@@ -136,6 +136,7 @@ def _teardown_room_game_runtime(
     redis_client,
     join_code: str,
     include_cleanup_deadline: bool,
+    include_room_state: bool = False,
 ) -> None:
     """Delegate room-wide gameplay runtime cleanup to the games runtime module."""
 
@@ -145,6 +146,7 @@ def _teardown_room_game_runtime(
         join_code,
         redis_client=redis_client,
         include_cleanup_deadline=include_cleanup_deadline,
+        include_room_state=include_room_state,
     )
 
 
@@ -191,6 +193,7 @@ def _schedule_delete_runtime_cleanup_after_commit(*, redis_client, join_code: st
             redis_client=redis_client,
             join_code=join_code,
             include_cleanup_deadline=True,
+            include_room_state=True,
         )
     )
 

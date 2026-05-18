@@ -476,6 +476,10 @@ def room_lobby_state(request, join_code):
     session_key = _get_or_create_session_key(request)
     participant = room.participants.filter(session_key=session_key).first()
     if participant is None:
+        # Private rooms must look identical to non-existent rooms so a
+        # non-participant cannot enumerate join codes to discover them.
+        if room.visibility == Room.Visibility.PRIVATE:
+            return JsonResponse({"detail": "Room not found."}, status=404)
         return JsonResponse(
             {"detail": "This guest session is not a participant in this room."},
             status=403,

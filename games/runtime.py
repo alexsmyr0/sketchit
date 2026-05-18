@@ -294,11 +294,16 @@ def teardown_room_runtime(
     *,
     redis_client: redis.Redis | None = None,
     include_cleanup_deadline: bool = False,
+    include_room_state: bool = False,
 ) -> None:
     """Stop local timer workers and clear Redis runtime state for one room.
 
     This is used when a room is abandoned or deleted so stale timer threads do
     not keep broadcasting for gameplay that is no longer valid.
+
+    ``include_room_state`` extends teardown to room-scoped lobby state
+    (presence set, canvas snapshot). Only true on hard room delete; game-end
+    callers must leave room state intact so the lobby remains usable.
     """
 
     _cancel_round_timer(join_code)
@@ -316,6 +321,9 @@ def teardown_room_runtime(
     game_redis.clear_deadline(client, join_code, "leaderboard_end")
     if include_cleanup_deadline:
         game_redis.clear_deadline(client, join_code, "cleanup")
+    if include_room_state:
+        room_redis.clear_presence(client, join_code)
+        room_redis.clear_canvas_snapshot(client, join_code)
 
 
 def get_timer_status_for_tests(join_code: str) -> dict[str, bool]:

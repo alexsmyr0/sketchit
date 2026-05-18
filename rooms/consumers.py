@@ -386,8 +386,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         Only sends if there is an active round in progress.
         """
         # Check if a round is active before sending snapshot
-        client = get_redis_client()
-        turn_state = await database_sync_to_async(game_redis.get_turn_state)(client, self.join_code)
+        turn_state = await self._fetch_turn_state()
         if not turn_state:
             return
 
@@ -402,6 +401,12 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
     @database_sync_to_async
     def _get_redis_snapshot(self) -> list[bytes]:
         return room_redis.get_canvas_snapshot(get_redis_client(), self.join_code)
+
+    @database_sync_to_async
+    def _fetch_turn_state(self) -> dict:
+        # Create the redis client inside the sync wrapper so its connection is
+        # not shared across the async event loop and the sync thread pool.
+        return game_redis.get_turn_state(get_redis_client(), self.join_code)
 
     async def _handle_guess_submission(self, content: dict) -> None:
         """Process a guess submission from a participant."""
@@ -418,8 +423,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             return
 
         # 1. Fetch active round from Redis turn state
-        client = get_redis_client()
-        turn_state = await database_sync_to_async(game_redis.get_turn_state)(client, self.join_code)
+        turn_state = await self._fetch_turn_state()
         round_id_str = turn_state.get("round_id")
 
         if not round_id_str:
