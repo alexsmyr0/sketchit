@@ -224,7 +224,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         await self.channel_layer.group_add(self.player_group, self.channel_name)
 
         try:
-            await _mark_participant_connected(
+            status_changed = await _mark_participant_connected(
                 self.player.id,
                 self.join_code,
                 self.session_key,
@@ -239,11 +239,15 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             await self.close(code=4003)
             return
 
-        # The socket is accepted and the group broadcast has fired. We also
-        # send the initial snapshot directly so the connecting client gets
-        # current_player_id for self-labelling in the UI without waiting for
-        # a further group event.
+        # The socket is accepted and a room-wide ``room.state`` broadcast has
+        # been scheduled via on_commit (only when ``status_changed``). We send
+        # the snapshot directly anyway so the connecting client gets
+        # ``current_player_id`` for self-labelling without waiting on the
+        # group event. To avoid the same socket receiving the broadcast as a
+        # second duplicate ``room.state``, suppress the next one arriving via
+        # the room group — but only when a broadcast was actually scheduled.
         initial_room_state_event = await _get_initial_room_state_event(self.room.id, self.player.id)
+        self._suppress_next_room_state_broadcast = bool(status_changed)
         await self.send_json(initial_room_state_event)
 
         # Send canvas snapshot first, then round state
@@ -326,9 +330,21 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         })
 
     async def room_server_event(self, event: dict) -> None:
-        """Forward room-group server events to this socket client."""
+        """Forward room-group server events to this socket client.
+
+        On first connect we send ``room.state`` directly so the receiver gets
+        its own ``current_player_id``. The same connect path also queues a
+        room-group broadcast of the same event; we drop exactly one such
+        broadcast here so the socket never sees the duplicate.
+        """
         server_event = event.get("event")
         if not isinstance(server_event, dict):
+            return
+        if (
+            server_event.get("type") == "room.state"
+            and getattr(self, "_suppress_next_room_state_broadcast", False)
+        ):
+            self._suppress_next_room_state_broadcast = False
             return
         await self.send_json(server_event)
 
