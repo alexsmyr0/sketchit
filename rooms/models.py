@@ -22,6 +22,11 @@ class PlayerManager(models.Manager):
 MVP_DEFAULT_WORD_PACK_NAME = "Default Word Pack"
 
 
+class RoomGameMode(models.TextChoices):
+    NORMAL = "normal", "Normal"
+    DUO = "duo", "Duo"
+
+
 def get_mvp_default_word_pack_id():
     from words.models import WordPack
 
@@ -64,6 +69,11 @@ class Room(models.Model):
         choices=Status.choices,
         default=Status.LOBBY,
         db_index=True,
+    )
+    game_mode = models.CharField(
+        max_length=10,
+        choices=RoomGameMode.choices,
+        default=RoomGameMode.NORMAL,
     )
     max_players = models.PositiveSmallIntegerField(default=6)
     settings = models.JSONField(default=dict, blank=True)

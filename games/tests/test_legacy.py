@@ -5,6 +5,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import fakeredis
+from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from redis.exceptions import RedisError
@@ -24,7 +25,7 @@ from games.services import (
     evaluate_guess_for_round,
     start_game_for_room,
 )
-from rooms.models import Player, Room
+from rooms.models import Player, Room, RoomGameMode
 from rooms.services import leave_participant
 from words.models import Word, WordPack, WordPackEntry
 
@@ -241,6 +242,21 @@ class StartGameServiceTests(TestCase):
             list(game.snapshot_words.order_by("id").values_list("text", flat=True)),
             ["apple", "banana", "cherry"],
         )
+
+    def test_start_game_snapshots_room_game_mode_onto_game_row(self):
+        self.room.game_mode = RoomGameMode.DUO
+        self.room.save(update_fields=("game_mode", "updated_at"))
+
+        started_game = start_game_for_room(self.room)
+        game = started_game.game
+
+        self.assertEqual(game.game_mode, RoomGameMode.DUO)
+
+        self.room.game_mode = RoomGameMode.NORMAL
+        self.room.save(update_fields=("game_mode", "updated_at"))
+        game.refresh_from_db()
+
+        self.assertEqual(game.game_mode, RoomGameMode.DUO)
 
     def test_start_game_requires_two_eligible_participants(self):
         self.member.participation_status = Player.ParticipationStatus.SPECTATING
@@ -1031,6 +1047,31 @@ class StartGameServiceTests(TestCase):
             evaluate_guess_for_round(first_round, outsider, first_round.selected_game_word.text)
 
         self.assertEqual(Guess.objects.filter(round=first_round).count(), 0)
+
+
+class GameGameModeModelTests(TestCase):
+    def setUp(self):
+        self.room = Room.objects.create(
+            name="Game Mode Room",
+            join_code="GAMEMODE",
+            visibility=Room.Visibility.PRIVATE,
+        )
+
+    def test_game_model_defaults_game_mode_to_normal(self):
+        game = Game.objects.create(room=self.room)
+
+        self.assertEqual(game.game_mode, RoomGameMode.NORMAL)
+
+    def test_game_model_rejects_unknown_game_mode_value(self):
+        game = Game(
+            room=self.room,
+            game_mode="arcade",
+        )
+
+        with self.assertRaises(ValidationError) as raised:
+            game.full_clean()
+
+        self.assertIn("game_mode", raised.exception.message_dict)
 
 
 @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)

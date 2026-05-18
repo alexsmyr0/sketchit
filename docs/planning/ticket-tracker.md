@@ -41,9 +41,9 @@ The original coverage and source-ticket mapping remain canonical in:
 ## Summary Snapshot
 
 - Total tickets: `35`
-- Done: `7`
+- Done: `8`
 - Partially Implemented: `3`
-- Not Started: `25`
+- Not Started: `24`
 
 ## Low-Blocking Claim Queue (Global)
 
@@ -105,7 +105,7 @@ Use this as the default claim order for the next wave of work:
 
 ### Track D
 
-- [ ] **D-01** P1 - Room Game Mode Persistence | Persistent `game_mode` on `Room` with `normal`/`duo` choices and `Game`-row snapshot at start. (Depends on: A-01) | Blocks: D-02; D-03; D-08
+- [x] **D-01** P1 - Room Game Mode Persistence | Persistent `game_mode` on `Room` with `normal`/`duo` choices and `Game`-row snapshot at start. (Depends on: A-01) | Blocks: D-02; D-03; D-08
 - [ ] **D-02** P1 - Lobby Mode Selection API & Settings Surface | Host-only `game_mode` edit in lobby settings plus inclusion in lobby-state and `room.state` broadcasts. (Depends on: A-03; D-01) | Blocks: D-03; D-08
 - [ ] **D-03** P2 - Duo Drawer Pair Selection & Round Schema | `Round.second_drawer_*` fields, paired drawer pool consumption, and dual role-specific round-start payloads. (Depends on: K-04; D-01) | Blocks: D-04; D-05; D-06; D-07
 - [ ] **D-04** P2 - Shared Canvas For Drawer Pair | Drawing events accepted from either drawer in a duo round over a single room-scoped canvas. (Depends on: N-04; D-03) | Blocks: D-08; D-09
