@@ -1341,6 +1341,13 @@ class RoomConsumerConnectTests(TransactionTestCase):
         spectator_session_key, _, spectator = await _create_spectator_session_and_player()
 
         from games.models import Game, GameStatus, Round, GameWord
+        # The runtime sync-events helper guards on Room.status == IN_PROGRESS
+        # before emitting round.state, so a test that simulates an active
+        # round must also flip the room out of LOBBY or the spectator will
+        # never receive the connect-time round.state the test asserts on.
+        await database_sync_to_async(
+            Room.objects.filter(pk=self.room.pk).update
+        )(status=Room.Status.IN_PROGRESS)
         game = await database_sync_to_async(Game.objects.create)(room=self.room, status=GameStatus.IN_PROGRESS)
         game_word = await database_sync_to_async(GameWord.objects.create)(game=game, text="rocket")
         round_obj = await database_sync_to_async(Round.objects.create)(
