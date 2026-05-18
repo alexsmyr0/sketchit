@@ -246,14 +246,18 @@ Redis stores live room and round state that is transient, fast-changing, or only
 
 ### Existing Logical Runtime Keys
 
-These already exist in the repo and remain valid:
+These keys exist in the repo and remain valid:
 
 - `room:{join_code}:presence`
-  - Redis set
+  - Redis Set
   - connected session keys for the room
+- `room:{join_code}:presence:{session_key}:connections`
+  - Redis Set
+  - active socket connection IDs for one room/session pair; the session is removed from `:presence` only after its last connection drops
 - `room:{join_code}:canvas`
-  - Redis string
-  - latest canvas snapshot bytes for reconnect sync
+  - Redis List
+  - ordered drawing strokes since the current round began, used to replay the canvas for reconnecting clients
+  - hard-capped via `LTRIM` at `MAX_CANVAS_STROKES` (currently `10000`) so a long round cannot grow Redis without bound
 
 ### Required Additional Runtime State
 
@@ -262,20 +266,27 @@ The target design also requires logical runtime storage for:
 - active turn timing
 - eligible drawers remaining in the current game
 - per-round live guess state
-- pending room cleanup timing
+- per-round role payloads (drawer word, masked word for guessers)
+- pending room cleanup and round/intermission/leaderboard deadlines
 
-Recommended logical layout:
+Logical layout:
 
-- `room:{join_code}:turn`
+- `room:{join_code}:round:turn_state`
+  - Redis Hash
   - current round runtime snapshot
-  - contains `game_id`, `round_id`, `started_at`, `deadline_at`, and any active drawer disconnect deadline
-- `room:{join_code}:cycle`
+  - includes `phase`, `status`, `game_id`, `round_id`, `drawer_participant_id`, `deadline_at`, eligible/correct guesser ID lists, timer sequence counters, and (when applicable) the active drawer-disconnect deadline
+- `room:{join_code}:game:drawer_pool`
+  - Redis Set
   - remaining eligible drawer participant IDs for the current game
-- `room:{join_code}:round:{round_id}:guess-state`
-  - per-player live guess state for the active round
-  - tracks which players are already correct and any same-player duplicate history
-- `room:{join_code}:cleanup`
-  - room empty-grace deletion deadline
+- `room:{join_code}:round:{round_id}:guess_state`
+  - Redis Hash, keyed per player
+  - per-player live guess state for the active round; tracks which players are already correct and same-player duplicate history
+- `room:{join_code}:round:payload:{role}`
+  - Redis Hash
+  - transient per-round payloads keyed by `role` (e.g. `drawer`, `viewer`) — the full word for the drawer, the masked word for non-drawers
+- `room:{join_code}:deadline:{deadline_type}`
+  - Redis String (ISO-8601 timestamp)
+  - one of `round_end`, `intermission_end`, `leaderboard_end`, `cleanup`. `cleanup` is the room empty-grace deletion deadline; the others belong to the active turn lifecycle.
 
 `Room.empty_since` remains the durable backup for room cleanup state.
 Redis cleanup timing is an acceleration aid, not the only durable source.
