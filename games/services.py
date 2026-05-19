@@ -412,10 +412,7 @@ def _select_drawers_for_round(
     if game.game_mode != RoomGameMode.DUO or len(eligible_drawers) == 1:
         return random.choice(eligible_drawers), None
 
-    first_drawer = random.choice(eligible_drawers)
-    second_drawer = random.choice(
-        [participant for participant in eligible_drawers if participant.id != first_drawer.id]
-    )
+    first_drawer, second_drawer = random.sample(eligible_drawers, 2)
     return first_drawer, second_drawer
 
 
