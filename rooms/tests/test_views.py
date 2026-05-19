@@ -182,10 +182,17 @@ class CreateRoomViewTests(TestCase):
         self.assertEqual(Player.objects.count(), 0)
         self.assertIn("display_name", response.json()["errors"])
 
-    def test_create_room_returns_recoverable_conflict_when_session_already_owns_room(self):
+    def test_create_room_returns_recoverable_conflict_when_session_owns_connected_room(self):
         first_response = self.post_create_room()
 
         self.assertEqual(first_response.status_code, 201)
+
+        # Promote the existing Player to CONNECTED to simulate a live socket
+        # in another tab. A second create from the same session in that state
+        # must not yank the user out of the room they are actively in.
+        Player.objects.filter(session_key=self.client.session.session_key).update(
+            connection_status=Player.ConnectionStatus.CONNECTED,
+        )
 
         response = self.post_create_room(name="Second Room")
         response_data = response.json()
@@ -200,6 +207,42 @@ class CreateRoomViewTests(TestCase):
         )
         self.assertEqual(response_data["join_code"], existing_room.join_code)
         self.assertEqual(response_data["room_url"], f"/rooms/{existing_room.join_code}/")
+
+    @patch("rooms.views._get_room_runtime_redis_client")
+    def test_create_room_switches_when_session_owns_disconnected_player(
+        self,
+        get_redis_client,
+    ):
+        get_redis_client.return_value = fakeredis.FakeRedis()
+
+        first_response = self.post_create_room()
+        self.assertEqual(first_response.status_code, 201)
+        original_room = Room.objects.get()
+        original_player = Player.objects.get()
+        self.assertEqual(
+            original_player.connection_status,
+            Player.ConnectionStatus.DISCONNECTED,
+        )
+
+        # Closing the previous tab leaves the Player DISCONNECTED. Issuing
+        # Create Private Room from the entry page is then an explicit
+        # "abandon old room, give me a new one" request and must succeed.
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.post_create_room(name="Second Room")
+
+        response_data = response.json()
+        original_room.refresh_from_db()
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(Room.objects.count(), 2)
+        self.assertEqual(Player.objects.count(), 1)
+        self.assertFalse(Player.objects.filter(pk=original_player.id).exists())
+        new_player = Player.objects.get()
+        self.assertEqual(new_player.room.name, "Second Room")
+        self.assertEqual(response_data["join_code"], new_player.room.join_code)
+        self.assertEqual(response_data["room_url"], f"/rooms/{new_player.room.join_code}/")
+        self.assertEqual(original_room.status, Room.Status.EMPTY_GRACE)
+        self.assertIsNone(original_room.host_id)
 
     @patch("rooms.views._get_room_runtime_redis_client")
     def test_create_room_ignores_expired_same_session_membership(
@@ -337,7 +380,7 @@ class ConcurrentRoomOwnershipTests(TransactionTestCase):
             content_type="application/json",
         )
 
-    def test_concurrent_create_requests_for_same_session_create_only_one_membership(self):
+    def test_concurrent_create_requests_for_same_session_keep_one_membership(self):
         session_key = self._create_session_key()
         first_client = self._build_client_for_session(session_key)
         second_client = self._build_client_for_session(session_key)
@@ -395,19 +438,28 @@ class ConcurrentRoomOwnershipTests(TransactionTestCase):
         if errors:
             raise errors[0]
 
-        self.assertEqual(Room.objects.count(), 1)
-        self.assertEqual(Player.objects.count(), 1)
+        # Both requests succeed under the disconnected-switch contract: the
+        # first creates Room A + Player A, the second observes Player A in
+        # DISCONNECTED (default for a freshly-created Player with no socket
+        # yet) and treats Create as an explicit abandon-and-switch. Net
+        # result is exactly one live Player anchored to the second room
+        # with the first room transitioned to EMPTY_GRACE.
         self.assertCountEqual(
             [status for status, _payload in results],
-            [201, 409],
+            [201, 201],
         )
-        created_room = Room.objects.get()
-        conflict_payload = next(
-            payload for status, payload in results if status == 409
+        self.assertEqual(Player.objects.count(), 1)
+        self.assertEqual(Room.objects.count(), 2)
+        live_player = Player.objects.get()
+        live_room = live_player.room
+        self.assertEqual(live_room.name, "Second Room")
+        abandoned_room = Room.objects.exclude(pk=live_room.pk).get()
+        self.assertEqual(abandoned_room.status, Room.Status.EMPTY_GRACE)
+        self.assertIsNone(abandoned_room.host_id)
+        latest_payload = next(
+            payload for status, payload in results if payload.get("join_code") == live_room.join_code
         )
-        self.assertEqual(conflict_payload["join_code"], created_room.join_code)
-        self.assertEqual(conflict_payload["room_url"], f"/rooms/{created_room.join_code}/")
-        self.assertEqual(Player.objects.get().room_id, created_room.id)
+        self.assertEqual(latest_payload["room_url"], f"/rooms/{live_room.join_code}/")
 
 
 class JoinRoomViewTests(TestCase):

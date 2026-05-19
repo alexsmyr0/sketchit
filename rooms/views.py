@@ -277,13 +277,21 @@ def create_room(request):
             .first()
         )
         if existing_player is not None:
-            # One room per active session. Stale rows from expired Django
-            # sessions are removed above by purge_expired_participants_for_session,
-            # so any row still present here belongs to a session the browser is
-            # still using. Return the existing room as a recoverable conflict
-            # instead of silently deleting it; the client can offer "rejoin"
-            # using the returned join_code.
-            return _build_room_assignment_conflict_response(existing_player.room)
+            if existing_player.connection_status == Player.ConnectionStatus.CONNECTED:
+                # A live socket on the existing room means another tab is
+                # actively in that lobby. Surface the conflict so the client
+                # can bounce back rather than yank the user out from under
+                # their own active session.
+                return _build_room_assignment_conflict_response(existing_player.room)
+            # No live socket — the previous tab was closed or never finished
+            # connecting. Treat Create Private Room as an explicit "abandon
+            # the old room, give me a fresh one" request: leave the stale
+            # Player (handles host reassignment + empty-grace transition on
+            # the old room) and fall through to the normal create path.
+            leave_participant(
+                redis_client=room_runtime_redis_client,
+                player_id=existing_player.id,
+            )
 
         room = _create_room_with_unique_join_code(
             name=cleaned_data["name"],
