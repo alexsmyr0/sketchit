@@ -109,7 +109,7 @@ Use this as the default claim order for the next wave of work:
 - [ ] **D-02** P1 - Lobby Mode Selection API & Settings Surface | Host-only `game_mode` edit in lobby settings plus inclusion in lobby-state and `room.state` broadcasts. (Depends on: A-03; D-01) | Blocks: D-03; D-08
 - [x] **D-03** P2 - Duo Drawer Pair Selection & Round Schema | `Round.second_drawer_*` fields, paired drawer pool consumption, and dual role-specific round-start payloads. (Depends on: K-04; D-01) | Blocks: D-04; D-05; D-06; D-07
 - [ ] **D-04** P2 - Shared Canvas For Drawer Pair | Drawing events accepted from either drawer in a duo round over a single room-scoped canvas. (Depends on: N-04; D-03) | Blocks: D-08; D-09
-- [ ] **D-05** P2 - Drawer Pair Private Chat | Drawer-only `cochat.message` event routed solely between the two current drawers in duo rounds. (Depends on: N-02; D-03) | Blocks: D-08; D-09
+- [x] **D-05** P2 - Drawer Pair Private Chat | Drawer-only `cochat.message` event routed solely between the two current drawers in duo rounds. (Depends on: N-02; D-03) | Blocks: D-08; D-09
 - [ ] **D-06** P3 - Scoring Adaptation For Duo Rounds | Split drawer bonus across both drawers and exclude both from the eligible guesser set. (Depends on: K-05; D-03) | Blocks: D-09
 - [ ] **D-07** P3 - Duo Drawer Disconnect Handling | Single-drawer continuation rule and `15`-second grace only when both drawers are disconnected. (Depends on: K-07; D-03; D-06) | Blocks: D-09
 - [ ] **D-08** P4 - Duo Mode Browser Experience | Host-only mode dropdown, dual-drawer HUD, drawer-only co-chat panel, and shared-canvas input UI. (Depends on: G-02; G-03; G-04; D-02; D-04; D-05) | Blocks: D-09
