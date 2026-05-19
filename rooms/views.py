@@ -15,7 +15,7 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 import redis
 
 from games.services import StartGameError, start_game_for_room
-from rooms.models import Player, Room
+from rooms.models import Player, Room, RoomGameMode
 from rooms.services import (
     delete_room_if_empty_grace_expired,
     get_empty_room_cleanup_deadline,
@@ -47,8 +47,25 @@ class JoinRoomForm(forms.Form):
 
 
 class UpdateLobbySettingsForm(forms.Form):
-    name = forms.CharField(max_length=255, min_length=1, strip=True)
-    visibility = forms.ChoiceField(choices=Room.Visibility.choices)
+    name = forms.CharField(max_length=255, min_length=1, strip=True, required=False)
+    visibility = forms.ChoiceField(choices=Room.Visibility.choices, required=False)
+    game_mode = forms.ChoiceField(choices=RoomGameMode.choices, required=False)
+
+    def clean(self):
+        cleaned_data = super().clean()
+        for field_name in self.fields:
+            if field_name in self.data and not cleaned_data.get(field_name):
+                if field_name not in self._errors:
+                    self.add_error(
+                        field_name,
+                        forms.ValidationError(
+                            "This field is required.", code="required"
+                        ),
+                    )
+        return cleaned_data
+
+
+LOBBY_SETTINGS_FIELDS = frozenset(UpdateLobbySettingsForm.base_fields)
 
 
 def _get_room_runtime_redis_client() -> redis.Redis:
@@ -90,6 +107,44 @@ def _parse_json_payload(request):
         )
 
     return payload, None
+
+
+_LOBBY_FIELD_ERROR_CODES = {
+    field: f"invalid_{field}" for field in LOBBY_SETTINGS_FIELDS
+}
+
+
+def _build_form_error_response(form):
+    error_codes = {}
+    for field_name, errors in form.errors.as_data().items():
+        canonical_code = _LOBBY_FIELD_ERROR_CODES.get(field_name)
+        error_codes[field_name] = [
+            (
+                canonical_code
+                if canonical_code is not None
+                and error.code in {"invalid_choice", "required", "min_length", "max_length"}
+                else error.code
+            )
+            for error in errors
+        ]
+
+    return JsonResponse(
+        {
+            "errors": form.errors,
+            "error_codes": error_codes,
+        },
+        status=400,
+    )
+
+
+def _build_settings_error_response(*, code, message):
+    return JsonResponse(
+        {
+            "errors": {"settings": [message]},
+            "error_codes": {"settings": [code]},
+        },
+        status=400,
+    )
 
 
 def _get_or_create_session_key(request):
@@ -194,6 +249,7 @@ def _build_room_lobby_state_response(room):
                 "join_code": room.join_code,
                 "visibility": room.visibility,
                 "status": room.status,
+                "game_mode": room.game_mode,
             },
             "host": _serialize_host(room.host),
             "participants": [_serialize_participant(player) for player in participants],
@@ -552,18 +608,31 @@ def update_lobby_settings(request, join_code):
     if error_response is not None:
         return error_response
 
+    requested_settings_fields = LOBBY_SETTINGS_FIELDS.intersection(payload)
+    if not requested_settings_fields:
+        return _build_settings_error_response(
+            code="no_settings_fields",
+            message="At least one editable room setting is required.",
+        )
+
     form = UpdateLobbySettingsForm(payload)
     if not form.is_valid():
-        return JsonResponse({"errors": form.errors}, status=400)
+        return _build_form_error_response(form)
 
-    room.name = form.cleaned_data["name"]
-    room.visibility = form.cleaned_data["visibility"]
-    room.save(update_fields=["name", "visibility", "updated_at"])
+    update_fields = []
+    for field_name in ("name", "visibility", "game_mode"):
+        if field_name in payload:
+            new_value = form.cleaned_data[field_name]
+            if getattr(room, field_name) != new_value:
+                setattr(room, field_name, new_value)
+                update_fields.append(field_name)
 
-    schedule_room_state_broadcast_after_commit(
-        join_code=room.join_code,
-        room_id=room.id,
-    )
+    if update_fields:
+        room.save(update_fields=[*update_fields, "updated_at"])
+        schedule_room_state_broadcast_after_commit(
+            join_code=room.join_code,
+            room_id=room.id,
+        )
 
     return _build_room_lobby_state_response(room)
 

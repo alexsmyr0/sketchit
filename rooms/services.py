@@ -239,6 +239,7 @@ def _get_room_state_snapshot(*, room_id: int) -> dict:
             "join_code": room.join_code,
             "visibility": room.visibility,
             "status": room.status,
+            "game_mode": room.game_mode,
         },
         "host": _serialize_host_for_room_state(room.host),
         "participants": [

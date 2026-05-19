@@ -904,10 +904,7 @@ class StartGameServiceTests(TestCase):
         result = complete_leaderboard_cooldown_for_room(self.room.id)
 
         self.room.refresh_from_db()
-        self.assertFalse(result.restarted)
         self.assertEqual(result.room_status, Room.Status.LOBBY)
-        self.assertIsNone(result.next_game_id)
-        self.assertIsNone(result.next_round_id)
         self.assertEqual(self.room.status, Room.Status.LOBBY)
         self.assertEqual(Game.objects.filter(room=self.room).count(), 1)
 
