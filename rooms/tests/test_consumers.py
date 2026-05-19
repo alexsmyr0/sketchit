@@ -889,6 +889,7 @@ class RoomConsumerConnectTests(TransactionTestCase):
                 "join_code": self.room.join_code,
                 "visibility": self.room.visibility,
                 "status": self.room.status,
+                "game_mode": self.room.game_mode,
             },
         )
         self.assertEqual(

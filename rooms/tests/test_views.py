@@ -4,12 +4,15 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import fakeredis
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
 from django.conf import settings
 from django.contrib.sessions.backends.db import SessionStore
 from django.core.exceptions import ValidationError
-from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase
+from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
+from core.realtime_groups import room_group_name
 from games import redis as game_redis
 from games.models import Game, GameWord, Round
 from rooms.models import MVP_DEFAULT_WORD_PACK_NAME, Player, Room, RoomGameMode
@@ -927,6 +930,7 @@ class RoomLobbyStateViewTests(TestCase):
                 "join_code": self.room.join_code,
                 "visibility": self.room.visibility,
                 "status": self.room.status,
+                "game_mode": self.room.game_mode,
             },
         )
         self.assertEqual(
@@ -1448,6 +1452,7 @@ class UpdateLobbySettingsTests(TestCase):
                     "join_code": self.room.join_code,
                     "visibility": Room.Visibility.PRIVATE,
                     "status": Room.Status.LOBBY,
+                    "game_mode": RoomGameMode.NORMAL,
                 },
                 "host": {
                     "id": self.host_player.id,
@@ -1549,6 +1554,90 @@ class UpdateLobbySettingsTests(TestCase):
         self.room.refresh_from_db()
         self.assertEqual(self.room.name, "Quiet Room")
         self.assertEqual(self.room.visibility, Room.Visibility.PRIVATE)
+
+    def test_host_can_update_game_mode_with_only_game_mode_payload(self):
+        response = self.post_update_settings(
+            self.host_client,
+            {"game_mode": RoomGameMode.DUO},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.name, "Friday Sketches")
+        self.assertEqual(self.room.visibility, Room.Visibility.PUBLIC)
+        self.assertEqual(self.room.game_mode, RoomGameMode.DUO)
+        self.assertEqual(response.json()["room"]["game_mode"], RoomGameMode.DUO)
+
+    def test_member_cannot_update_game_mode(self):
+        response = self.post_update_settings(
+            self.member_client,
+            {"game_mode": RoomGameMode.DUO},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.game_mode, RoomGameMode.NORMAL)
+        self.assertEqual(
+            response.json()["detail"],
+            "Only the room host can update settings.",
+        )
+
+    def test_unknown_game_mode_returns_clear_error_code(self):
+        response = self.post_update_settings(
+            self.host_client,
+            {"game_mode": "arcade"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertIn("game_mode", data["errors"])
+        self.assertEqual(data["error_codes"]["game_mode"], ["invalid_game_mode"])
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.game_mode, RoomGameMode.NORMAL)
+
+    def test_game_mode_cannot_be_updated_in_progress(self):
+        self.room.status = Room.Status.IN_PROGRESS
+        self.room.save(update_fields=["status"])
+
+        response = self.post_update_settings(
+            self.host_client,
+            {"game_mode": RoomGameMode.DUO},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["detail"],
+            "Room settings can only be updated while in the lobby.",
+        )
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.game_mode, RoomGameMode.NORMAL)
+
+    @override_settings(
+        CHANNEL_LAYERS={
+            "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
+        },
+    )
+    def test_update_settings_broadcasts_room_state_with_game_mode(self):
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.flush)()
+        test_channel = async_to_sync(channel_layer.new_channel)()
+        async_to_sync(channel_layer.group_add)(
+            room_group_name(self.room.join_code),
+            test_channel,
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.post_update_settings(
+                self.host_client,
+                {"game_mode": RoomGameMode.DUO},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        message = async_to_sync(channel_layer.receive)(test_channel)
+        self.assertEqual(message["type"], "room.server_event")
+        event = message["event"]
+        self.assertEqual(event["type"], "room.state")
+        self.assertEqual(event["payload"]["room"]["game_mode"], RoomGameMode.DUO)
 
     def test_update_settings_requires_json_body(self):
         response = self.post_update_settings(
