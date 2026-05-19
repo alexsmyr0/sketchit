@@ -914,6 +914,9 @@ def _build_round_start_payloads(
         "round_id": round.id,
         "sequence_number": round.sequence_number,
         "drawer_participant_id": round.drawer_participant_id,
+        "drawer_nickname": round.drawer_nickname,
+        "second_drawer_participant_id": round.second_drawer_participant_id,
+        "second_drawer_nickname": round.second_drawer_nickname,
         "deadline_at": deadline_at.isoformat(),
         "duration_seconds": _round_duration_seconds(),
         "masked_word": masked_word,
@@ -990,6 +993,9 @@ def _build_round_state_payload(join_code: str, turn_state: dict[str, str]) -> di
         "game_id": _parse_int(turn_state.get("game_id")),
         "round_id": _parse_int(turn_state.get("round_id")),
         "drawer_participant_id": _parse_int(turn_state.get("drawer_participant_id")),
+        "second_drawer_participant_id": _parse_int(
+            turn_state.get("second_drawer_participant_id")
+        ),
         "deadline_at": deadline_at.isoformat(),
         "remaining_seconds": _remaining_seconds(deadline_at),
         "tick_sequence": _parse_int(turn_state.get(sequence_field)) or 0,
@@ -1126,10 +1132,17 @@ def get_sync_events_for_player(join_code: str, player_id: int) -> list[dict]:
             }
         )
 
-    drawer_id = round_state_payload.get("drawer_participant_id")
+    drawer_ids = {
+        drawer_id
+        for drawer_id in (
+            round_state_payload.get("drawer_participant_id"),
+            round_state_payload.get("second_drawer_participant_id"),
+        )
+        if drawer_id is not None
+    }
     round_id = round_state_payload.get("round_id")
     if round_state_payload["phase"] == "round":
-        if drawer_id is not None and drawer_id == player_id:
+        if player_id in drawer_ids:
             role = "drawer"
         elif _is_player_spectating(player_id):
             # A-07: spectators joined after the game started and cannot guess
@@ -1165,9 +1178,8 @@ def get_sync_events_for_player(join_code: str, player_id: int) -> list[dict]:
 
     if (
         round_state_payload["phase"] == "round"
-        and drawer_id is not None
         and round_id is not None
-        and drawer_id == player_id
+        and player_id in drawer_ids
     ):
         round = (
             Round.objects.select_related("selected_game_word")
@@ -1298,6 +1310,11 @@ def start_round_runtime(round_id: int) -> None:
                 if round.drawer_participant_id is not None
                 else ""
             ),
+            "second_drawer_participant_id": (
+                str(round.second_drawer_participant_id)
+                if round.second_drawer_participant_id is not None
+                else ""
+            ),
             "started_at": now_iso,
             "deadline_at": deadline_at.isoformat(),
             "eligible_guesser_ids": json.dumps(sorted(eligible_guesser_ids)),
@@ -1329,13 +1346,18 @@ def start_round_runtime(round_id: int) -> None:
         guesser_payload,
     )
 
-    if round.drawer_participant_id is not None:
+    for drawer_participant_id in (
+        round.drawer_participant_id,
+        round.second_drawer_participant_id,
+    ):
+        if drawer_participant_id is None:
+            continue
         # Keep role-specific reveal as a separate channelled event so guessers
         # never receive the full answer while allowing K-04 to build on this
         # start-round hook.
         broadcast_player_event(
             join_code,
-            round.drawer_participant_id,
+            drawer_participant_id,
             "round.drawer_word",
             {
                 "round_id": drawer_payload["round_id"],
@@ -1475,6 +1497,10 @@ def start_intermission(
     correct_guesser_ids = current_turn_state.get("correct_guesser_ids", "[]")
     game_id = current_turn_state.get("game_id", "")
     drawer_participant_id = current_turn_state.get("drawer_participant_id", "")
+    second_drawer_participant_id = current_turn_state.get(
+        "second_drawer_participant_id",
+        "",
+    )
     round_timer_sequence = current_turn_state.get("round_timer_sequence", "0")
 
     game_redis.set_turn_state(
@@ -1486,6 +1512,7 @@ def start_intermission(
             "game_id": game_id,
             "round_id": str(completed_round_id),
             "drawer_participant_id": drawer_participant_id,
+            "second_drawer_participant_id": second_drawer_participant_id,
             "completed_round_sequence": str(completed_round_sequence),
             "ended_at": ended_at_iso,
             "deadline_at": deadline_at.isoformat(),

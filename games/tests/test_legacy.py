@@ -328,6 +328,73 @@ class StartGameServiceTests(TestCase):
 
         self.assertEqual(game.game_mode, RoomGameMode.DUO)
 
+    def test_round_second_drawer_fields_are_nullable_for_normal_mode(self):
+        started_game = start_game_for_room(self.room)
+        first_round = started_game.first_round
+
+        self.assertIsNone(first_round.second_drawer_participant_id)
+        self.assertIsNone(first_round.second_drawer_nickname)
+
+    def test_round_rejects_same_primary_and_second_drawer(self):
+        game = Game.objects.create(room=self.room)
+        game_word = GameWord.objects.create(game=game, text="rocket")
+        round = Round(
+            game=game,
+            drawer_participant=self.host,
+            drawer_nickname=self.host.display_name,
+            second_drawer_participant=self.host,
+            second_drawer_nickname=self.host.display_name,
+            selected_game_word=game_word,
+            sequence_number=1,
+        )
+
+        with self.assertRaises(ValidationError) as raised:
+            round.full_clean()
+
+        self.assertIn("second_drawer_participant", raised.exception.message_dict)
+
+    def test_duo_start_game_selects_two_distinct_drawers_and_consumes_both(self):
+        self.spectator.delete()
+        third_player = Player.objects.create(
+            room=self.room,
+            session_key="third-duo-session",
+            display_name="Third Duo",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        self.room.game_mode = RoomGameMode.DUO
+        self.room.save(update_fields=("game_mode", "updated_at"))
+
+        started_game = start_game_for_room(self.room)
+        first_round = started_game.first_round
+        selected_drawer_ids = {
+            first_round.drawer_participant_id,
+            first_round.second_drawer_participant_id,
+        }
+        all_drawer_ids = {self.host.id, self.member.id, third_player.id}
+
+        self.assertEqual(started_game.game.game_mode, RoomGameMode.DUO)
+        self.assertEqual(len(selected_drawer_ids), 2)
+        self.assertSetEqual(selected_drawer_ids - {None}, selected_drawer_ids)
+        self.assertTrue(selected_drawer_ids.issubset(all_drawer_ids))
+        self.assertEqual(
+            first_round.second_drawer_nickname,
+            Player.objects.get(pk=first_round.second_drawer_participant_id).display_name,
+        )
+        self.assertSetEqual(
+            game_redis.get_drawer_pool(self._runtime_redis_client(), self.room.join_code),
+            all_drawer_ids - selected_drawer_ids,
+        )
+
+    def test_normal_mode_still_selects_only_one_drawer(self):
+        started_game = start_game_for_room(self.room)
+        first_round = started_game.first_round
+
+        self.assertIsNotNone(first_round.drawer_participant_id)
+        self.assertIsNone(first_round.second_drawer_participant_id)
+        self.assertIsNone(first_round.second_drawer_nickname)
+
     def test_start_game_requires_two_eligible_participants(self):
         self.member.participation_status = Player.ParticipationStatus.SPECTATING
         self.member.save(update_fields=("participation_status", "updated_at"))
@@ -417,6 +484,11 @@ class StartGameServiceTests(TestCase):
             if round_to_resolve.status is not None:
                 break
 
+        self.assertEqual(round_to_resolve.status, RoundStatus.COMPLETED)
+
+    def _complete_round_by_timer(self, round_to_resolve: Round) -> None:
+        complete_round_due_to_timer(round_to_resolve.id)
+        round_to_resolve.refresh_from_db()
         self.assertEqual(round_to_resolve.status, RoundStatus.COMPLETED)
 
     def _finish_two_player_game(self) -> Game:
@@ -547,6 +619,158 @@ class StartGameServiceTests(TestCase):
 
         self.assertEqual(game.status, GameStatus.FINISHED)
         self.assertSetEqual(drawer_pool_after_game_finished, set())
+
+    @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
+    def test_duo_even_participant_count_cycles_through_pairs_without_repeats(self):
+        self.spectator.delete()
+        third_player = Player.objects.create(
+            room=self.room,
+            session_key="third-even-duo-session",
+            display_name="Third Duo",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        fourth_player = Player.objects.create(
+            room=self.room,
+            session_key="fourth-even-duo-session",
+            display_name="Fourth Duo",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        self.room.game_mode = RoomGameMode.DUO
+        self.room.save(update_fields=("game_mode", "updated_at"))
+        all_drawer_ids = {self.host.id, self.member.id, third_player.id, fourth_player.id}
+
+        started_game = start_game_for_room(self.room)
+        game = started_game.game
+        first_round = started_game.first_round
+        first_pair = {
+            first_round.drawer_participant_id,
+            first_round.second_drawer_participant_id,
+        }
+
+        self.assertEqual(len(first_pair), 2)
+        self.assertSetEqual(
+            game_redis.get_drawer_pool(self._runtime_redis_client(), self.room.join_code),
+            all_drawer_ids - first_pair,
+        )
+
+        self._complete_round_by_timer(first_round)
+        second_round = game.rounds.get(sequence_number=2)
+        second_pair = {
+            second_round.drawer_participant_id,
+            second_round.second_drawer_participant_id,
+        }
+
+        self.assertEqual(len(second_pair), 2)
+        self.assertSetEqual(first_pair | second_pair, all_drawer_ids)
+        self.assertSetEqual(
+            game_redis.get_drawer_pool(self._runtime_redis_client(), self.room.join_code),
+            set(),
+        )
+
+        self._complete_round_by_timer(second_round)
+        game.refresh_from_db()
+
+        self.assertEqual(game.status, GameStatus.FINISHED)
+        self.assertEqual(game.rounds.count(), 2)
+        self.assertSetEqual(
+            game_redis.get_drawer_pool(self._runtime_redis_client(), self.room.join_code),
+            set(),
+        )
+
+    @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
+    def test_duo_odd_participant_count_uses_final_single_drawer_round(self):
+        self.spectator.delete()
+        third_player = Player.objects.create(
+            room=self.room,
+            session_key="third-odd-duo-session",
+            display_name="Third Duo",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        self.room.game_mode = RoomGameMode.DUO
+        self.room.save(update_fields=("game_mode", "updated_at"))
+        all_drawer_ids = {self.host.id, self.member.id, third_player.id}
+
+        started_game = start_game_for_room(self.room)
+        game = started_game.game
+        first_round = started_game.first_round
+        first_pair = {
+            first_round.drawer_participant_id,
+            first_round.second_drawer_participant_id,
+        }
+
+        self.assertEqual(len(first_pair), 2)
+        self._complete_round_by_timer(first_round)
+
+        second_round = game.rounds.get(sequence_number=2)
+        self.assertIsNotNone(second_round.drawer_participant_id)
+        self.assertIsNone(second_round.second_drawer_participant_id)
+        self.assertIsNone(second_round.second_drawer_nickname)
+        self.assertSetEqual(
+            {second_round.drawer_participant_id},
+            all_drawer_ids - first_pair,
+        )
+        self.assertSetEqual(
+            game_redis.get_drawer_pool(self._runtime_redis_client(), self.room.join_code),
+            set(),
+        )
+
+        self._complete_round_by_timer(second_round)
+        game.refresh_from_db()
+
+        self.assertEqual(game.status, GameStatus.FINISHED)
+        self.assertEqual(game.rounds.count(), 2)
+
+    @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
+    def test_duo_mid_game_joiner_enters_following_pool_without_repeating_drawer(self):
+        self.spectator.delete()
+        third_player = Player.objects.create(
+            room=self.room,
+            session_key="third-joiner-duo-session",
+            display_name="Third Duo",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        self.room.game_mode = RoomGameMode.DUO
+        self.room.save(update_fields=("game_mode", "updated_at"))
+
+        started_game = start_game_for_room(self.room)
+        game = started_game.game
+        first_round = started_game.first_round
+        first_pair = {
+            first_round.drawer_participant_id,
+            first_round.second_drawer_participant_id,
+        }
+        joiner = Player.objects.create(
+            room=self.room,
+            session_key="mid-game-duo-joiner-session",
+            display_name="Joiner",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.SPECTATING,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+
+        self._complete_round_by_timer(first_round)
+        joiner.refresh_from_db()
+        second_round = game.rounds.get(sequence_number=2)
+        second_drawer_ids = {
+            drawer_id
+            for drawer_id in (
+                second_round.drawer_participant_id,
+                second_round.second_drawer_participant_id,
+            )
+            if drawer_id is not None
+        }
+
+        self.assertEqual(joiner.participation_status, Player.ParticipationStatus.PLAYING)
+        self.assertIn(joiner.id, second_drawer_ids)
+        self.assertTrue(second_drawer_ids.isdisjoint(first_pair))
 
     @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
     def test_completed_round_creates_next_round_with_unused_drawer_and_word(self):
@@ -1142,6 +1366,14 @@ class SyncEventsForSpectatorTests(TestCase):
             participation_status=Player.ParticipationStatus.PLAYING,
             session_expires_at=session_expires_at,
         )
+        self.second_drawer = Player.objects.create(
+            room=self.room,
+            session_key="second-drawer-session",
+            display_name="Second Drawer",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=session_expires_at,
+        )
         # Mid-game joiner — spectating the current turn.
         self.spectator = Player.objects.create(
             room=self.room,
@@ -1171,6 +1403,7 @@ class SyncEventsForSpectatorTests(TestCase):
                 "game_id": "1",
                 "round_id": "1",
                 "drawer_participant_id": str(self.drawer.id),
+                "second_drawer_participant_id": str(self.second_drawer.id),
                 "deadline_at": deadline_at,
                 "eligible_guesser_ids": f"[{self.guesser.id}]",
                 "correct_guesser_ids": "[]",
@@ -1183,8 +1416,20 @@ class SyncEventsForSpectatorTests(TestCase):
         game_redis.set_round_payloads(
             self.fake_redis,
             self.room.join_code,
-            drawer_payload={"role": "drawer", "word": "apple"},
-            guesser_payload={"role": "guesser", "masked_word": "_____"},
+            drawer_payload={
+                "role": "drawer",
+                "word": "apple",
+                "drawer_participant_id": self.drawer.id,
+                "second_drawer_participant_id": self.second_drawer.id,
+                "second_drawer_nickname": self.second_drawer.display_name,
+            },
+            guesser_payload={
+                "role": "guesser",
+                "masked_word": "_____",
+                "drawer_participant_id": self.drawer.id,
+                "second_drawer_participant_id": self.second_drawer.id,
+                "second_drawer_nickname": self.second_drawer.display_name,
+            },
         )
 
     def tearDown(self):
@@ -1194,6 +1439,18 @@ class SyncEventsForSpectatorTests(TestCase):
     def _event_types(self, events: list[dict]) -> list[str]:
         """Return just the type strings from an event list for easy assertion."""
         return [e["type"] for e in events]
+
+    def _assert_payload_does_not_expose_word(self, payload: object, word: str) -> None:
+        if isinstance(payload, dict):
+            self.assertNotIn("word", payload)
+            for value in payload.values():
+                self._assert_payload_does_not_expose_word(value, word)
+            return
+        if isinstance(payload, list):
+            for value in payload:
+                self._assert_payload_does_not_expose_word(value, word)
+            return
+        self.assertNotEqual(payload, word)
 
     def test_spectator_receives_round_state_and_timer_events(self):
         # A spectator must always get the phase snapshot so the client can
@@ -1257,6 +1514,59 @@ class SyncEventsForSpectatorTests(TestCase):
         types = self._event_types(events)
         self.assertIn("round.started", types)
         self.assertIn("round.drawer_word", types)
+
+    def test_second_drawer_receives_full_word_payload(self):
+        events = game_runtime.get_sync_events_for_player(
+            self.room.join_code, self.second_drawer.id
+        )
+
+        round_started = next(event for event in events if event["type"] == "round.started")
+        drawer_word = next(event for event in events if event["type"] == "round.drawer_word")
+
+        self.assertEqual(round_started["payload"]["role"], "drawer")
+        self.assertEqual(round_started["payload"]["word"], "apple")
+        self.assertEqual(drawer_word["payload"]["word"], "apple")
+
+    def test_non_drawer_payload_names_both_drawers_without_full_word(self):
+        events = game_runtime.get_sync_events_for_player(
+            self.room.join_code, self.guesser.id
+        )
+
+        round_started = next(event for event in events if event["type"] == "round.started")
+
+        self.assertEqual(round_started["payload"]["role"], "guesser")
+        self.assertEqual(round_started["payload"]["drawer_participant_id"], self.drawer.id)
+        self.assertEqual(
+            round_started["payload"]["second_drawer_participant_id"],
+            self.second_drawer.id,
+        )
+        self.assertEqual(
+            round_started["payload"]["second_drawer_nickname"],
+            self.second_drawer.display_name,
+        )
+        self.assertEqual(round_started["payload"]["masked_word"], "_____")
+        self._assert_payload_does_not_expose_word(round_started["payload"], "apple")
+
+    def test_second_drawer_disconnect_reconnect_is_deferred_without_corrupting_turn_state(self):
+        game_runtime.handle_participant_disconnected(
+            join_code=self.room.join_code,
+            participant_id=self.second_drawer.id,
+        )
+        game_runtime.handle_participant_reconnected(
+            join_code=self.room.join_code,
+            participant_id=self.second_drawer.id,
+        )
+
+        turn_state = game_redis.get_turn_state(self.fake_redis, self.room.join_code)
+
+        self.assertEqual(turn_state["phase"], "round")
+        self.assertEqual(turn_state["status"], "drawing")
+        self.assertEqual(turn_state["drawer_participant_id"], str(self.drawer.id))
+        self.assertEqual(
+            turn_state["second_drawer_participant_id"],
+            str(self.second_drawer.id),
+        )
+        self.assertFalse(turn_state.get("drawer_disconnect_deadline_at"))
 
 
 @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)
@@ -1465,6 +1775,18 @@ class RoundTimerCoordinatorTests(TransactionTestCase):
                 if current_event_type == event_type
             ]
 
+    def _assert_payload_does_not_expose_word(self, payload: object, word: str) -> None:
+        if isinstance(payload, dict):
+            self.assertNotIn("word", payload)
+            for value in payload.values():
+                self._assert_payload_does_not_expose_word(value, word)
+            return
+        if isinstance(payload, list):
+            for value in payload:
+                self._assert_payload_does_not_expose_word(value, word)
+            return
+        self.assertNotEqual(payload, word)
+
     def _guessers_for_round(self, round: Round) -> list[Player]:
         return list(
             Player.objects.filter(
@@ -1593,8 +1915,117 @@ class RoundTimerCoordinatorTests(TransactionTestCase):
         self.assertEqual(drawer_payload["word"], first_round.selected_game_word.text)
         self.assertEqual(guesser_payload["masked_word"], drawer_payload["masked_word"])
         self.assertNotEqual(guesser_payload["masked_word"], first_round.selected_game_word.text)
-        self.assertNotIn("word", guesser_payload)
+        self._assert_payload_does_not_expose_word(
+            guesser_payload,
+            first_round.selected_game_word.text,
+        )
         self.assertEqual(guesser_round_started_payload, guesser_payload)
+
+    def test_duo_round_start_emits_full_word_to_both_drawers_only(self):
+        third_player = Player.objects.create(
+            room=self.room,
+            session_key="duo-runtime-third-session",
+            display_name="Third Runtime",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        fourth_player = Player.objects.create(
+            room=self.room,
+            session_key="duo-runtime-fourth-session",
+            display_name="Fourth Runtime",
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+        self.room.game_mode = RoomGameMode.DUO
+        self.room.save(update_fields=("game_mode", "updated_at"))
+
+        started_game = start_game_for_room(self.room)
+        first_round = Round.objects.select_related("selected_game_word").get(
+            pk=started_game.first_round.id
+        )
+        drawer_ids = {
+            first_round.drawer_participant_id,
+            first_round.second_drawer_participant_id,
+        }
+        non_drawer_ids = {
+            self.host.id,
+            self.member.id,
+            third_player.id,
+            fourth_player.id,
+        } - drawer_ids
+
+        def _both_drawer_words_emitted() -> bool:
+            emitted_drawer_ids = {
+                player_id
+                for player_id, _payload in self._player_event_payloads(
+                    "round.drawer_word"
+                )
+            }
+            return drawer_ids.issubset(emitted_drawer_ids)
+
+        self._wait_for(_both_drawer_words_emitted, timeout_seconds=3)
+
+        drawer_payload = game_redis.get_round_payload(
+            self.fake_redis,
+            self.room.join_code,
+            "drawer",
+        )
+        guesser_payload = game_redis.get_round_payload(
+            self.fake_redis,
+            self.room.join_code,
+            "guesser",
+        )
+        drawer_word_events = self._player_event_payloads("round.drawer_word")
+        latest_drawer_words = {
+            player_id: payload
+            for player_id, payload in drawer_word_events
+            if player_id in drawer_ids
+        }
+        guesser_broadcast_payload = self._event_payloads("round.started")[-1]
+
+        self.assertEqual(len(drawer_ids), 2)
+        self.assertEqual(drawer_payload["role"], "drawer")
+        self.assertEqual(drawer_payload["word"], first_round.selected_game_word.text)
+        self.assertEqual(
+            drawer_payload["second_drawer_participant_id"],
+            first_round.second_drawer_participant_id,
+        )
+        self.assertEqual(guesser_payload["role"], "guesser")
+        self.assertEqual(
+            guesser_payload["second_drawer_participant_id"],
+            first_round.second_drawer_participant_id,
+        )
+        self.assertEqual(guesser_broadcast_payload, guesser_payload)
+        self._assert_payload_does_not_expose_word(
+            guesser_payload,
+            first_round.selected_game_word.text,
+        )
+        for drawer_id in drawer_ids:
+            self.assertEqual(
+                latest_drawer_words[drawer_id]["word"],
+                first_round.selected_game_word.text,
+            )
+            drawer_sync_events = game_runtime.get_sync_events_for_player(
+                self.room.join_code,
+                drawer_id,
+            )
+            drawer_started = next(
+                event for event in drawer_sync_events if event["type"] == "round.started"
+            )
+            self.assertEqual(drawer_started["payload"]["word"], first_round.selected_game_word.text)
+
+        for non_drawer_id in non_drawer_ids:
+            non_drawer_sync_events = game_runtime.get_sync_events_for_player(
+                self.room.join_code,
+                non_drawer_id,
+            )
+            for event in non_drawer_sync_events:
+                self._assert_payload_does_not_expose_word(
+                    event.get("payload", {}),
+                    first_round.selected_game_word.text,
+                )
 
     def test_runtime_sync_events_return_role_specific_round_started_payloads(self):
         started_game = start_game_for_room(self.room)

@@ -17,6 +17,13 @@ from rooms.services import get_empty_room_cleanup_deadline
 from words.models import Word, WordPack, WordPackEntry
 
 
+def _assert_datetimes_within(test_case, first, second, *, seconds=1):
+    test_case.assertLessEqual(
+        abs((first - second).total_seconds()),
+        seconds,
+    )
+
+
 def _ensure_default_word_pack_for_tests():
     """Create the MVP default word pack for tests that exercise room defaults.
 
@@ -142,9 +149,10 @@ class CreateRoomViewTests(TestCase):
             player.connection_status,
             Player.ConnectionStatus.DISCONNECTED,
         )
-        self.assertEqual(
-            player.session_expires_at.replace(microsecond=0),
-            self.client.session.get_expiry_date().replace(microsecond=0),
+        _assert_datetimes_within(
+            self,
+            player.session_expires_at,
+            self.client.session.get_expiry_date(),
         )
 
         self.assertEqual(response_data["join_code"], room.join_code)
@@ -505,9 +513,10 @@ class JoinRoomViewTests(TestCase):
             player.connection_status,
             Player.ConnectionStatus.DISCONNECTED,
         )
-        self.assertEqual(
-            player.session_expires_at.replace(microsecond=0),
-            self.client.session.get_expiry_date().replace(microsecond=0),
+        _assert_datetimes_within(
+            self,
+            player.session_expires_at,
+            self.client.session.get_expiry_date(),
         )
         self.assertEqual(response_data["join_code"], self.room.join_code)
         self.assertEqual(response_data["room_url"], f"/rooms/{self.room.join_code}/")
@@ -537,9 +546,10 @@ class JoinRoomViewTests(TestCase):
         self.assertEqual(second_response.status_code, 200)
         self.assertEqual(Player.objects.count(), 1)
         self.assertEqual(player.display_name, "Alex")
-        self.assertEqual(
-            player.session_expires_at.replace(microsecond=0),
-            self.client.session.get_expiry_date().replace(microsecond=0),
+        _assert_datetimes_within(
+            self,
+            player.session_expires_at,
+            self.client.session.get_expiry_date(),
         )
         self.assertEqual(
             player.connection_status,
