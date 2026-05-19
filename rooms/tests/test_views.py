@@ -182,10 +182,17 @@ class CreateRoomViewTests(TestCase):
         self.assertEqual(Player.objects.count(), 0)
         self.assertIn("display_name", response.json()["errors"])
 
-    def test_create_room_returns_recoverable_conflict_when_session_already_owns_room(self):
+    def test_create_room_returns_recoverable_conflict_when_session_owns_connected_room(self):
         first_response = self.post_create_room()
 
         self.assertEqual(first_response.status_code, 201)
+
+        # Promote the existing Player to CONNECTED to simulate a live socket
+        # in another tab. A second create from the same session in that state
+        # must not yank the user out of the room they are actively in.
+        Player.objects.filter(session_key=self.client.session.session_key).update(
+            connection_status=Player.ConnectionStatus.CONNECTED,
+        )
 
         response = self.post_create_room(name="Second Room")
         response_data = response.json()
@@ -200,6 +207,42 @@ class CreateRoomViewTests(TestCase):
         )
         self.assertEqual(response_data["join_code"], existing_room.join_code)
         self.assertEqual(response_data["room_url"], f"/rooms/{existing_room.join_code}/")
+
+    @patch("rooms.views._get_room_runtime_redis_client")
+    def test_create_room_switches_when_session_owns_disconnected_player(
+        self,
+        get_redis_client,
+    ):
+        get_redis_client.return_value = fakeredis.FakeRedis()
+
+        first_response = self.post_create_room()
+        self.assertEqual(first_response.status_code, 201)
+        original_room = Room.objects.get()
+        original_player = Player.objects.get()
+        self.assertEqual(
+            original_player.connection_status,
+            Player.ConnectionStatus.DISCONNECTED,
+        )
+
+        # Closing the previous tab leaves the Player DISCONNECTED. Issuing
+        # Create Private Room from the entry page is then an explicit
+        # "abandon old room, give me a new one" request and must succeed.
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.post_create_room(name="Second Room")
+
+        response_data = response.json()
+        original_room.refresh_from_db()
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(Room.objects.count(), 2)
+        self.assertEqual(Player.objects.count(), 1)
+        self.assertFalse(Player.objects.filter(pk=original_player.id).exists())
+        new_player = Player.objects.get()
+        self.assertEqual(new_player.room.name, "Second Room")
+        self.assertEqual(response_data["join_code"], new_player.room.join_code)
+        self.assertEqual(response_data["room_url"], f"/rooms/{new_player.room.join_code}/")
+        self.assertEqual(original_room.status, Room.Status.EMPTY_GRACE)
+        self.assertIsNone(original_room.host_id)
 
     @patch("rooms.views._get_room_runtime_redis_client")
     def test_create_room_ignores_expired_same_session_membership(
@@ -337,7 +380,7 @@ class ConcurrentRoomOwnershipTests(TransactionTestCase):
             content_type="application/json",
         )
 
-    def test_concurrent_create_requests_for_same_session_create_only_one_membership(self):
+    def test_concurrent_create_requests_for_same_session_keep_one_membership(self):
         session_key = self._create_session_key()
         first_client = self._build_client_for_session(session_key)
         second_client = self._build_client_for_session(session_key)
@@ -395,19 +438,28 @@ class ConcurrentRoomOwnershipTests(TransactionTestCase):
         if errors:
             raise errors[0]
 
-        self.assertEqual(Room.objects.count(), 1)
-        self.assertEqual(Player.objects.count(), 1)
+        # Both requests succeed under the disconnected-switch contract: the
+        # first creates Room A + Player A, the second observes Player A in
+        # DISCONNECTED (default for a freshly-created Player with no socket
+        # yet) and treats Create as an explicit abandon-and-switch. Net
+        # result is exactly one live Player anchored to the second room
+        # with the first room transitioned to EMPTY_GRACE.
         self.assertCountEqual(
             [status for status, _payload in results],
-            [201, 409],
+            [201, 201],
         )
-        created_room = Room.objects.get()
-        conflict_payload = next(
-            payload for status, payload in results if status == 409
+        self.assertEqual(Player.objects.count(), 1)
+        self.assertEqual(Room.objects.count(), 2)
+        live_player = Player.objects.get()
+        live_room = live_player.room
+        self.assertEqual(live_room.name, "Second Room")
+        abandoned_room = Room.objects.exclude(pk=live_room.pk).get()
+        self.assertEqual(abandoned_room.status, Room.Status.EMPTY_GRACE)
+        self.assertIsNone(abandoned_room.host_id)
+        latest_payload = next(
+            payload for status, payload in results if payload.get("join_code") == live_room.join_code
         )
-        self.assertEqual(conflict_payload["join_code"], created_room.join_code)
-        self.assertEqual(conflict_payload["room_url"], f"/rooms/{created_room.join_code}/")
-        self.assertEqual(Player.objects.get().room_id, created_room.id)
+        self.assertEqual(latest_payload["room_url"], f"/rooms/{live_room.join_code}/")
 
 
 class JoinRoomViewTests(TestCase):
@@ -519,17 +571,22 @@ class JoinRoomViewTests(TestCase):
         self.assertEqual(Player.objects.count(), 1)
         self.assertEqual(response.json()["detail"], "This room is full.")
 
-    def test_join_room_returns_recoverable_conflict_for_valid_other_room_assignment(self):
+    @patch("rooms.views._get_room_runtime_redis_client")
+    def test_join_room_switches_session_to_target_when_already_in_other_room(
+        self,
+        get_redis_client,
+    ):
+        # Naming a different target join code on /join/ is an explicit switch
+        # request — leave the current room and join the named target instead of
+        # bouncing back with a 409 (which would silently override the user's
+        # chosen destination).
+        fake_redis = fakeredis.FakeRedis()
+        get_redis_client.return_value = fake_redis
+
         other_room = Room.objects.create(
             name="Other Room",
             join_code="ZXCV5678",
             visibility=Room.Visibility.PUBLIC,
-        )
-        Player.objects.create(
-            room=other_room,
-            session_key="session-123",
-            display_name="Alex",
-            session_expires_at=self.client.session.get_expiry_date(),
         )
 
         session = self.client.session
@@ -537,19 +594,38 @@ class JoinRoomViewTests(TestCase):
         session["marker"] = "keep"
         session.save()
 
-        Player.objects.filter(room=other_room).update(session_key=session.session_key)
+        existing_player = Player.objects.create(
+            room=other_room,
+            session_key=session.session_key,
+            display_name="Alex",
+            session_expires_at=self.client.session.get_expiry_date(),
+        )
+        # The leaving Player above was the only member of other_room, so the
+        # switch should land it in EMPTY_GRACE rather than deleting it
+        # outright (the cleanup job runs separately).
+        other_room.host = existing_player
+        other_room.save(update_fields=["host", "updated_at"])
 
-        response = self.post_join_room()
+        response = self._post_join_room_and_execute_on_commit()
         response_data = response.json()
 
-        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response_data["join_code"], self.room.join_code)
+        self.assertEqual(response_data["room_url"], f"/rooms/{self.room.join_code}/")
+
+        # Exactly one Player remains — the new participant in the target room.
         self.assertEqual(Player.objects.count(), 1)
-        self.assertEqual(
-            response_data["detail"],
-            "This guest session is already assigned to a room.",
-        )
-        self.assertEqual(response_data["join_code"], other_room.join_code)
-        self.assertEqual(response_data["room_url"], f"/rooms/{other_room.join_code}/")
+        new_player = Player.objects.get()
+        self.assertEqual(new_player.room_id, self.room.id)
+        self.assertEqual(new_player.session_key, session.session_key)
+        self.assertFalse(Player.objects.filter(room=other_room).exists())
+
+        # The vacated other_room should have entered empty-grace (or be
+        # cleaned up already if the deadline elapsed). Either way its host
+        # link is gone and it is no longer in LOBBY.
+        other_room.refresh_from_db()
+        self.assertEqual(other_room.status, Room.Status.EMPTY_GRACE)
+        self.assertIsNone(other_room.host_id)
 
     @patch("rooms.views._get_room_runtime_redis_client")
     def test_join_room_ignores_expired_same_session_membership_in_another_room(
@@ -923,6 +999,42 @@ class RoomLobbyStateViewTests(TestCase):
             response.json()["detail"],
             "This guest session is not a participant in this room.",
         )
+
+    def test_non_member_session_gets_404_for_private_room_lobby_state(self):
+        """Private rooms must look identical to non-existent rooms.
+
+        The Bucket A audit returned a 403 here, which leaks the existence
+        of the room to anyone who knows or guesses its join code. For
+        PRIVATE rooms the response must be the same 404 a totally
+        unknown join code would produce.
+        """
+        private_room = Room.objects.create(
+            name="Private Room",
+            join_code="PRIVATE1",
+            visibility=Room.Visibility.PRIVATE,
+        )
+
+        outsider_client = self.client_class()
+        # Anchor the outsider session in a *different* public room so the
+        # request goes through the normal "session exists but is not in
+        # this room" branch rather than the no-session-cookie path.
+        outsider_session_key = self._ensure_session_key(outsider_client)
+        decoy_room = Room.objects.create(
+            name="Decoy Room",
+            join_code="DECOY123",
+            visibility=Room.Visibility.PUBLIC,
+        )
+        Player.objects.create(
+            room=decoy_room,
+            session_key=outsider_session_key,
+            display_name="Outsider",
+            session_expires_at=outsider_client.session.get_expiry_date(),
+        )
+
+        response = outsider_client.get(f"/rooms/{private_room.join_code}/")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"], "Room not found.")
 
     def test_room_lobby_state_returns_status_as_stored(self):
         self.room.status = Room.Status.IN_PROGRESS

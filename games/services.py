@@ -854,19 +854,41 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
             score_updates=(),
         )
 
+    normalized_guess_text = guess.normalized_text
+    normalized_target_text = _normalize_guess_text(locked_round.selected_game_word.text)
+
     if locked_round.drawer_participant_id == guessing_player.id:
+        # SDS §Guess Evaluation Rules — the drawer cannot score from guessing
+        # their own word, but the outcome shape (correct / duplicate /
+        # near_match / incorrect) still reflects what they typed. Evaluate
+        # against the same outcome order non-drawers see, with no side
+        # effects: do not flip ``guess.is_correct``, do not award points, do
+        # not end the round.
+        if normalized_guess_text == normalized_target_text:
+            drawer_outcome = GuessOutcome.CORRECT
+        elif _is_same_player_duplicate_guess(
+            round_id=locked_round.id,
+            player_id=guessing_player.id,
+            normalized_guess_text=normalized_guess_text,
+            excluded_guess_id=guess.id,
+        ):
+            drawer_outcome = GuessOutcome.DUPLICATE
+        elif _is_near_match_guess(
+            normalized_guess_text=normalized_guess_text,
+            normalized_target_text=normalized_target_text,
+        ):
+            drawer_outcome = GuessOutcome.NEAR_MATCH
+        else:
+            drawer_outcome = GuessOutcome.INCORRECT
         return _build_guess_evaluation_result(
             guess=guess,
             locked_round=locked_round,
-            outcome=GuessOutcome.INCORRECT,
+            outcome=drawer_outcome,
             is_correct=False,
             round_completed_now=False,
             winning_player_id=None,
             score_updates=(),
         )
-
-    normalized_guess_text = guess.normalized_text
-    normalized_target_text = _normalize_guess_text(locked_round.selected_game_word.text)
 
     if _is_player_already_correct_for_round(
         round_id=locked_round.id,

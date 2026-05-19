@@ -309,8 +309,19 @@ async def _connect_and_drain_initial_sync(
 # ---------------------------------------------------------------------------
 
 
+@override_settings(
+    CHANNEL_LAYERS={
+        "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
+    },
+)
 class RoomConsumerConnectTests(TransactionTestCase):
-    """Tests for the WebSocket connect / disconnect lifecycle."""
+    """Tests for the WebSocket connect / disconnect lifecycle.
+
+    Forces InMemoryChannelLayer so `self.channel_layer.groups` is available
+    for the group-membership assertions (RedisChannelLayer has no `.groups`).
+    InMemory is also a clean fit for these in-process tests and sidesteps the
+    redis.asyncio cleanup-across-event-loops cascade that flaked the runner.
+    """
 
     def setUp(self):
         self.channel_layer = get_channel_layer()
@@ -1125,8 +1136,27 @@ class RoomConsumerConnectTests(TransactionTestCase):
 
         await drawer_socket.disconnect()
 
-        grace_state = await self._receive_until_type(observer_socket, "round.state")
-        self.assertEqual(grace_state["payload"]["status"], "drawer_disconnected_grace")
+        # The observer can still have an earlier ``round.state`` buffered from
+        # the game-start broadcast (status="drawing"), so we cannot accept the
+        # first matching event — that races against which player the runtime
+        # randomly picked as drawer. Skip stale round.state events until the
+        # drawer-disconnect grace one shows up.
+        grace_state = None
+        for _ in range(40):
+            try:
+                event = await observer_socket.receive_json_from(timeout=1)
+            except TimeoutError:
+                continue
+            if (
+                event.get("type") == "round.state"
+                and event["payload"].get("status") == "drawer_disconnected_grace"
+            ):
+                grace_state = event
+                break
+        self.assertIsNotNone(
+            grace_state,
+            "Observer did not receive a round.state with status=drawer_disconnected_grace",
+        )
         self.assertTrue(grace_state["payload"].get("drawer_disconnect_deadline_at"))
 
         round_status = None
@@ -1330,6 +1360,13 @@ class RoomConsumerConnectTests(TransactionTestCase):
         spectator_session_key, _, spectator = await _create_spectator_session_and_player()
 
         from games.models import Game, GameStatus, Round, GameWord
+        # The runtime sync-events helper guards on Room.status == IN_PROGRESS
+        # before emitting round.state, so a test that simulates an active
+        # round must also flip the room out of LOBBY or the spectator will
+        # never receive the connect-time round.state the test asserts on.
+        await database_sync_to_async(
+            Room.objects.filter(pk=self.room.pk).update
+        )(status=Room.Status.IN_PROGRESS)
         game = await database_sync_to_async(Game.objects.create)(room=self.room, status=GameStatus.IN_PROGRESS)
         game_word = await database_sync_to_async(GameWord.objects.create)(game=game, text="rocket")
         round_obj = await database_sync_to_async(Round.objects.create)(

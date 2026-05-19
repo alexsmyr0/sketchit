@@ -32,18 +32,22 @@ _redis_client = None
 
 class CreateRoomForm(forms.Form):
     # This form validates the JSON fields required to create a brand-new room.
-    name = forms.CharField(max_length=255)
+    # min_length and strip make the "no empty names" rule explicit and reject
+    # whitespace-only input that would otherwise pass past the implicit
+    # required=True check on a stripped value. The Room model mirrors the rule
+    # via MinLengthValidator for direct-ORM defense in depth.
+    name = forms.CharField(max_length=255, min_length=1, strip=True)
     visibility = forms.ChoiceField(choices=Room.Visibility.choices)
-    display_name = forms.CharField(max_length=24)
+    display_name = forms.CharField(max_length=24, min_length=1, strip=True)
 
 
 class JoinRoomForm(forms.Form):
     # Joining only needs the guest's display name.
-    display_name = forms.CharField(max_length=24)
+    display_name = forms.CharField(max_length=24, min_length=1, strip=True)
 
 
 class UpdateLobbySettingsForm(forms.Form):
-    name = forms.CharField(max_length=255)
+    name = forms.CharField(max_length=255, min_length=1, strip=True)
     visibility = forms.ChoiceField(choices=Room.Visibility.choices)
 
 
@@ -273,20 +277,21 @@ def create_room(request):
             .first()
         )
         if existing_player is not None:
-            # A DISCONNECTED row in a LOBBY room is a stale remnant from a
-            # previous session that left without using the Leave button (tab
-            # close, back nav, hard refresh that didn't reconnect).  Clean it
-            # up now so the session can create a fresh room.
-            if (
-                existing_player.connection_status == Player.ConnectionStatus.DISCONNECTED
-                and existing_player.room.status == Room.Status.LOBBY
-            ):
-                leave_participant(
-                    redis_client=room_runtime_redis_client,
-                    player_id=existing_player.id,
-                )
-            else:
+            if existing_player.connection_status == Player.ConnectionStatus.CONNECTED:
+                # A live socket on the existing room means another tab is
+                # actively in that lobby. Surface the conflict so the client
+                # can bounce back rather than yank the user out from under
+                # their own active session.
                 return _build_room_assignment_conflict_response(existing_player.room)
+            # No live socket — the previous tab was closed or never finished
+            # connecting. Treat Create Private Room as an explicit "abandon
+            # the old room, give me a fresh one" request: leave the stale
+            # Player (handles host reassignment + empty-grace transition on
+            # the old room) and fall through to the normal create path.
+            leave_participant(
+                redis_client=room_runtime_redis_client,
+                player_id=existing_player.id,
+            )
 
         room = _create_room_with_unique_join_code(
             name=cleaned_data["name"],
@@ -380,24 +385,19 @@ def join_room(request, join_code):
         )
         if player is not None:
             if player.room_id != room.id:
-                # A DISCONNECTED row in a LOBBY room is a stale remnant the
-                # session left behind (tab close, hard refresh without reconnect).
-                # Clean it up so the session can join the requested room instead
-                # of receiving a 409 that points back to an abandoned lobby.
-                if (
-                    player.connection_status == Player.ConnectionStatus.DISCONNECTED
-                    and player.room.status == Room.Status.LOBBY
-                ):
-                    leave_participant(
-                        redis_client=room_runtime_redis_client,
-                        player_id=player.id,
-                    )
-                    player = None
-                else:
-                    # Keep the conflict semantics, but include a recovery target
-                    # so the entry page can send the guest back to the room they
-                    # still validly own instead of leaving them stuck at a dead end.
-                    return _build_room_assignment_conflict_response(player.room)
+                # Explicit cross-room join: the caller named a different target
+                # join code, so honour that intent — leave the current room and
+                # fall through to the normal new-participant creation path
+                # below. leave_participant handles host reassignment in the
+                # abandoned room, empty-grace transition if it becomes vacant,
+                # and drawer-disconnect grace if a game was mid-round. The
+                # one-room-per-session conflict only applies to create_room,
+                # where the user has not named a specific room to switch to.
+                leave_participant(
+                    redis_client=room_runtime_redis_client,
+                    player_id=player.id,
+                )
+                player = None
             else:
                 # Rejoining the same room should not create a duplicate participant
                 # or change the original display name, but it should refresh the

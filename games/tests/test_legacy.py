@@ -142,6 +142,76 @@ class RoomRuntimeTeardownTests(SimpleTestCase):
         )
         self.assertIsNone(game_redis.get_deadline(self.redis_client, join_code, "cleanup"))
 
+    def test_teardown_room_runtime_with_include_room_state_clears_presence_and_canvas(self):
+        """``include_room_state=True`` is the hard-delete path's extra wipe.
+
+        The flag is intentionally opt-in: game-end callers must leave the
+        lobby state intact (so other tabs stay connected), but a room being
+        hard-deleted must shed presence and canvas state too. This test
+        proves the flag actually clears both.
+        """
+        from rooms import redis as room_redis
+
+        join_code = "ROOMSTAT"
+        room_redis.add_presence(self.redis_client, join_code, "session-a")
+        room_redis.add_presence(self.redis_client, join_code, "session-b")
+        room_redis.append_canvas_stroke(
+            self.redis_client, join_code, b'{"type":"stroke","payload":{}}'
+        )
+
+        # Sanity check: state exists before teardown.
+        self.assertTrue(
+            room_redis.get_presence(self.redis_client, join_code),
+        )
+        self.assertTrue(
+            room_redis.get_canvas_snapshot(self.redis_client, join_code),
+        )
+
+        game_runtime.teardown_room_runtime(
+            join_code,
+            redis_client=self.redis_client,
+            include_room_state=True,
+        )
+
+        self.assertEqual(
+            room_redis.get_presence(self.redis_client, join_code),
+            set(),
+        )
+        self.assertEqual(
+            room_redis.get_canvas_snapshot(self.redis_client, join_code),
+            [],
+        )
+
+    def test_teardown_room_runtime_without_include_room_state_keeps_presence_and_canvas(self):
+        """Default teardown (game-end path) must preserve lobby presence.
+
+        Game-end and round-transition cleanups call teardown_room_runtime
+        without ``include_room_state``. Existing connected sockets in the
+        room should keep showing connected; canvas snapshot should keep
+        whatever was there. This is the inverse of the flag-on test.
+        """
+        from rooms import redis as room_redis
+
+        join_code = "STAYALIV"
+        room_redis.add_presence(self.redis_client, join_code, "session-a")
+        room_redis.append_canvas_stroke(
+            self.redis_client, join_code, b'{"type":"stroke","payload":{}}'
+        )
+
+        game_runtime.teardown_room_runtime(
+            join_code,
+            redis_client=self.redis_client,
+        )
+
+        self.assertEqual(
+            room_redis.get_presence(self.redis_client, join_code),
+            {"session-a"},
+        )
+        self.assertEqual(
+            len(room_redis.get_canvas_snapshot(self.redis_client, join_code)),
+            1,
+        )
+
 
 # The targeted test label ``games.tests.test_runtime_cleanup`` resolves against
 # the ``games.tests`` module, so expose the teardown test class under that
@@ -421,6 +491,7 @@ class StartGameServiceTests(TestCase):
 
         self.assertSetEqual(drawer_pool, expected_remaining)
 
+    @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
     def test_drawer_pool_updates_after_each_round_and_clears_on_game_finish(self):
         # A-07: the SPECTATING participant created in setUp would be promoted to
         # PLAYING at every round transition and would enter the drawer pool.
@@ -477,6 +548,7 @@ class StartGameServiceTests(TestCase):
         self.assertEqual(game.status, GameStatus.FINISHED)
         self.assertSetEqual(drawer_pool_after_game_finished, set())
 
+    @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
     def test_completed_round_creates_next_round_with_unused_drawer_and_word(self):
         # A-07: the SPECTATING participant created in setUp would be promoted at
         # the round transition and become a valid drawer candidate, which would
@@ -507,6 +579,7 @@ class StartGameServiceTests(TestCase):
         self.assertNotEqual(second_round.drawer_participant_id, spectator_id)
         self.assertNotEqual(second_round.selected_game_word_id, first_round.selected_game_word_id)
 
+    @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
     def test_game_finishes_after_each_eligible_drawer_draws_once(self):
         # A-07: the SPECTATING participant created in setUp would be promoted at
         # the round-1 transition and add a third eligible drawer, so the game
@@ -614,6 +687,7 @@ class StartGameServiceTests(TestCase):
         self.assertEqual(self.room.status, Room.Status.LOBBY)
         self.assertEqual(Game.objects.filter(room=self.room).count(), 1)
 
+    @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
     def test_round_progression_never_repeats_drawers_or_words_within_game(self):
         # A-07: the SPECTATING participant from setUp would be promoted at the
         # round-1 transition and become a fourth eligible drawer, so the first
@@ -1327,6 +1401,12 @@ class RoundTimerCoordinatorTests(TransactionTestCase):
         game_runtime.reset_runtime_state_for_tests()
         self.fake_redis = fakeredis.FakeRedis()
         game_runtime._redis_client = self.fake_redis
+        # Services keeps its own redis client cache. Without patching it too,
+        # _set_remaining_drawer_pool writes the pool to real Redis while
+        # start_intermission reads from fakeredis and sees an empty pool, which
+        # collapses the intermission path into the game-end branch.
+        self._original_services_redis_client = game_services._redis_client
+        game_services._redis_client = self.fake_redis
 
         self._event_log_lock = threading.Lock()
         self.event_log: list[tuple[str, dict]] = []
@@ -1353,6 +1433,7 @@ class RoundTimerCoordinatorTests(TransactionTestCase):
     def tearDown(self):
         game_runtime.broadcast_room_event = self.original_room_broadcast
         game_runtime.broadcast_player_event = self.original_player_broadcast
+        game_services._redis_client = self._original_services_redis_client
         game_runtime.reset_runtime_state_for_tests()
         super().tearDown()
 
@@ -2153,11 +2234,34 @@ class RoundTimerCoordinatorTests(TransactionTestCase):
             return first_round.status == RoundStatus.COMPLETED
 
         self._wait_for(_round_completed, timeout_seconds=2)
-        time.sleep(0.2)
+
+        # Poll for the round-timer worker to release rather than sleeping a
+        # fixed 0.2s — under suite load that fixed wait flaked when the
+        # cancellation took slightly longer than the sleep window.
+        def _round_timer_released() -> bool:
+            return not game_runtime.get_timer_status_for_tests(
+                self.room.join_code
+            )["round_timer_running"]
+        self._wait_for(_round_timer_released, timeout_seconds=2)
         timer_status = game_runtime.get_timer_status_for_tests(self.room.join_code)
         self.assertFalse(timer_status["round_timer_running"])
 
-        time.sleep(1.3)
+        # The original test then slept 1.3s — past the 1.2s round deadline —
+        # to assert the cancelled timer did not race-fire a timer_expired
+        # event. Poll the event log instead so a stray fire fails the test
+        # promptly; otherwise we wait the full window and the assertNotIn
+        # below confirms nothing slipped through.
+        race_window_deadline = time.time() + 1.3
+        while time.time() < race_window_deadline:
+            stray_timer_expired = any(
+                payload.get("reason") == "timer_expired"
+                and payload["round_id"] == first_round.id
+                for payload in self._event_payloads("round.ended")
+            )
+            if stray_timer_expired:
+                break
+            time.sleep(0.05)
+
         ended_reasons = [
             payload["reason"]
             for payload in self._event_payloads("round.ended")

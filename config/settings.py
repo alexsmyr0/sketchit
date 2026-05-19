@@ -117,6 +117,14 @@ CHANNEL_LAYERS = {
     }
 }
 
+# Make the guest-session lifetime explicit so it stays aligned with
+# Player.session_expires_at (which mirrors request.session.get_expiry_date()).
+# Default 24 hours suits the rejoin window for a real-time game; override
+# with DJANGO_SESSION_COOKIE_AGE for longer-lived environments.
+SESSION_COOKIE_AGE = int(
+    os.getenv("DJANGO_SESSION_COOKIE_AGE", str(60 * 60 * 24))
+)
+
 AUTH_PASSWORD_VALIDATORS = [
     {
         "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",

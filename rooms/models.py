@@ -1,3 +1,4 @@
+from django.core.validators import MinLengthValidator
 from django.db import models
 from django.utils import timezone
 
@@ -57,7 +58,11 @@ class Room(models.Model):
         IN_PROGRESS = "in_progress", "In progress"
         EMPTY_GRACE = "empty_grace", "Empty grace"
 
-    name = models.CharField(max_length=255)
+    # MinLengthValidator(1) keeps the durable side honest if a future code path
+    # writes the model directly without going through CreateRoomForm /
+    # UpdateLobbySettingsForm. The form fields enforce the same rule at the
+    # HTTP edge so users see a friendly error before the row is touched.
+    name = models.CharField(max_length=255, validators=[MinLengthValidator(1)])
     join_code = models.CharField(max_length=8, unique=True)
     visibility = models.CharField(
         max_length=10,

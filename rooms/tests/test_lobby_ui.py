@@ -78,10 +78,10 @@ class RoomLobbyUITests(TestCase):
         self.assertIn('id="guest-view" class="guest-view" hidden', content)
         self.assertNotIn('id="host-controls" class="host-controls" hidden', content)
         
-        # Verify join URL
-        # Note: test server host might varies, checking for relative path link
-        expected_join_path = reverse('join-room', args=[self.room.join_code])
-        self.assertContains(response, expected_join_path)
+        # Verify invite URL. The template now renders a homepage link with
+        # a ?code=<join_code> query param so the landing-page JS can pre-fill
+        # the join form, rather than a direct POST to /rooms/<code>/join/.
+        self.assertContains(response, f"?code={self.room.join_code}")
 
     def test_lobby_template_keeps_host_controls_hidden_for_guest(self):
         response = self.guest_client.get(reverse("room-lobby-state", args=[self.room.join_code]), HTTP_ACCEPT="text/html")
