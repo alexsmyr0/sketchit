@@ -934,6 +934,89 @@ body {
     color: var(--text-secondary);
 }
 
+.lobby-mode-display {
+    margin: 1rem 0 0;
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    text-align: center;
+}
+
+.lobby-mode-display #lobby-mode-value {
+    font-weight: 600;
+    color: var(--accent-primary);
+}
+
+.drawer-pair-label {
+    margin: 0.25rem 0 0;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    text-align: center;
+    font-weight: 500;
+}
+
+.cochat-panel {
+    border-top: 1px solid #f1f2f6;
+    padding: 1rem 1.5rem;
+    background: #fdf4ff;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    max-height: 220px;
+}
+
+.cochat-panel h3 {
+    margin: 0;
+    font-size: 0.95rem;
+    color: var(--accent-primary);
+}
+
+.cochat-history {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    overflow-y: auto;
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    max-height: 120px;
+}
+
+.cochat-message {
+    font-size: 0.85rem;
+    word-break: break-word;
+}
+
+.cochat-message[data-self="true"] .cochat-sender {
+    color: var(--accent-primary);
+}
+
+.cochat-message[data-error="true"] {
+    color: var(--danger);
+}
+
+.cochat-sender {
+    font-weight: 600;
+}
+
+.cochat-input-group {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.cochat-input-group input {
+    flex-grow: 1;
+    padding: 0.5rem;
+    border: 1px solid #dfe6e9;
+    border-radius: 8px;
+    font-family: inherit;
+}
+
+.cochat-input-group input:disabled {
+    background: #f1f2f6;
+    color: var(--text-secondary);
+}
+
 /* Toasts / Messages */
 .message {
     padding: 1rem;

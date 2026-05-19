@@ -193,3 +193,103 @@ class RoomLobbyUITests(TestCase):
             join_code=self.room.join_code,
             room_id=self.room.id
         )
+
+    def test_lobby_template_renders_game_mode_dropdown_inside_host_controls(self):
+        response = self.host_client.get(
+            reverse("room-lobby-state", args=[self.room.join_code]),
+            HTTP_ACCEPT="text/html",
+        )
+        content = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('id="edit-game-mode"', content)
+        self.assertIn('value="normal"', content)
+        self.assertIn('value="duo"', content)
+        # Dropdown lives inside host-controls so non-hosts cannot see or change it.
+        host_controls_start = content.find('id="host-controls"')
+        dropdown_index = content.find('id="edit-game-mode"')
+        self.assertGreater(host_controls_start, -1)
+        self.assertGreater(dropdown_index, host_controls_start)
+
+    def test_lobby_template_renders_public_mode_display_for_all_participants(self):
+        for client in (self.host_client, self.guest_client):
+            response = client.get(
+                reverse("room-lobby-state", args=[self.room.join_code]),
+                HTTP_ACCEPT="text/html",
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertContains(response, 'id="lobby-mode-display"')
+            self.assertContains(response, 'id="lobby-mode-value"')
+            self.assertContains(response, "Normal (1 drawer)")
+
+    def test_lobby_template_reflects_duo_mode_when_room_is_in_duo(self):
+        self.room.game_mode = "duo"
+        self.room.save(update_fields=["game_mode", "updated_at"])
+
+        response = self.host_client.get(
+            reverse("room-lobby-state", args=[self.room.join_code]),
+            HTTP_ACCEPT="text/html",
+        )
+        content = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        # Dropdown default selection should follow the persisted mode.
+        self.assertIn('value="duo" selected', content)
+        self.assertIn("Duo (2 drawers)", content)
+
+    def test_lobby_template_renders_cochat_panel_hidden_by_default(self):
+        response = self.host_client.get(
+            reverse("room-lobby-state", args=[self.room.join_code]),
+            HTTP_ACCEPT="text/html",
+        )
+        content = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'id="cochat-panel"')
+        self.assertContains(response, 'id="cochat-input"')
+        self.assertContains(response, 'id="cochat-send-button"')
+        # Panel must start hidden so guessers never see chat scaffolding.
+        self.assertIn('id="cochat-panel" class="cochat-panel" hidden', content)
+
+    @patch("rooms.views.schedule_room_state_broadcast_after_commit")
+    def test_update_settings_accepts_game_mode_duo(self, mock_broadcast):
+        url = reverse("update-lobby-settings", args=[self.room.join_code])
+        payload = {
+            "name": self.room.name,
+            "visibility": self.room.visibility,
+            "game_mode": "duo",
+        }
+
+        response = self.host_client.post(
+            url,
+            data=json.dumps(payload),
+            content_type="application/json",
+            HTTP_X_CSRFTOKEN="dummy_token",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.game_mode, "duo")
+        mock_broadcast.assert_called_once_with(
+            join_code=self.room.join_code,
+            room_id=self.room.id,
+        )
+
+    def test_update_settings_rejects_unknown_game_mode(self):
+        url = reverse("update-lobby-settings", args=[self.room.join_code])
+        payload = {
+            "name": self.room.name,
+            "visibility": self.room.visibility,
+            "game_mode": "trio",
+        }
+
+        response = self.host_client.post(
+            url,
+            data=json.dumps(payload),
+            content_type="application/json",
+            HTTP_X_CSRFTOKEN="dummy_token",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.game_mode, "normal")

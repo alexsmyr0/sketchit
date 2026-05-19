@@ -130,6 +130,7 @@ function buildRoomState({
     hostId = 7,
     hostName = "Host Alex",
     participants = null,
+    gameMode = "normal",
 } = {}) {
     const participantList = participants ?? [
         {
@@ -152,6 +153,7 @@ function buildRoomState({
             join_code: "ROOM1234",
             visibility: "private",
             status: roomStatus,
+            game_mode: gameMode,
         },
         host: {
             id: hostId,
@@ -200,13 +202,21 @@ async function loadRoomLobbyScript({
     const saveSettingsButton = new MockButtonElement({ textContent: "Save Settings" });
     const editRoomName = new MockInputElement({ value: "Sketch Room" });
     const editVisibility = new MockSelectElement({ value: "private" });
+    const editGameMode = new MockSelectElement({ value: "normal" });
+    const lobbyModeDisplay = new MockElement();
+    const lobbyModeValue = new MockElement({ textContent: "Normal (1 drawer)" });
+    const drawerPairLabel = new MockElement({ hidden: true });
+    const cochatPanel = new MockElement({ hidden: true });
+    const cochatHistory = new MockElement();
+    const cochatInput = new MockInputElement({ value: "" });
+    const cochatSendButton = new MockButtonElement({ textContent: "Send" });
     const startGameButton = new MockButtonElement({ textContent: "Start Game" });
     const minPlayersHint = new MockElement({ hidden: true });
     const copyUrlButton = new MockButtonElement({ textContent: "[copy]" });
     const joinUrlInput = new MockInputElement({ value: "http://localhost:8000/rooms/join/ROOM1234/" });
     const roomStatusBadge = new MockElement({ textContent: roomStatusText });
     const settingsForm = new MockElement();
-    settingsForm.elements = [editRoomName, editVisibility, saveSettingsButton];
+    settingsForm.elements = [editRoomName, editVisibility, editGameMode, saveSettingsButton];
 
     const roundNumber = new MockElement({ textContent: "Round 1" });
     const timerDisplay = new MockElement({ textContent: "90" });
@@ -261,6 +271,14 @@ async function loadRoomLobbyScript({
         ["settings-form", settingsForm],
         ["edit-room-name", editRoomName],
         ["edit-visibility", editVisibility],
+        ["edit-game-mode", editGameMode],
+        ["lobby-mode-display", lobbyModeDisplay],
+        ["lobby-mode-value", lobbyModeValue],
+        ["drawer-pair-label", drawerPairLabel],
+        ["cochat-panel", cochatPanel],
+        ["cochat-history", cochatHistory],
+        ["cochat-input", cochatInput],
+        ["cochat-send-button", cochatSendButton],
         ["start-game-button", startGameButton],
         ["min-players-hint", minPlayersHint],
         ["host-controls", hostControls],
@@ -399,6 +417,10 @@ async function loadRoomLobbyScript({
             },
             addEventListener(eventName, listener) {
                 listeners.set(`window:${eventName}`, listener);
+            },
+            requestAnimationFrame(callback) {
+                queueMicrotask(callback);
+                return 0;
             },
         },
     };
@@ -1071,3 +1093,223 @@ test("round.started did not erase reconnect snapshot replay for the same round",
 
     assert.equal(clearCountAfterRoundStarted, clearCountBeforeRoundStarted);
 });
+
+
+test("D-08 lobby mode display updates live when room.state arrives", async () => {
+    const harness = await loadRoomLobbyScript();
+
+    harness.client.updateLobbyUI(buildRoomState({ gameMode: "normal" }));
+    assert.equal(harness.elementsById.get("lobby-mode-value").textContent, "Normal (1 drawer)");
+
+    harness.client.updateLobbyUI(buildRoomState({ gameMode: "duo" }));
+    assert.equal(harness.elementsById.get("lobby-mode-value").textContent, "Duo (2 drawers)");
+});
+
+
+test("D-08 host updateSettings sends selected game_mode to the settings endpoint", async () => {
+    const harness = await loadRoomLobbyScript();
+    harness.client.updateLobbyUI(buildRoomState());
+
+    harness.elementsById.get("edit-room-name").value = "Sketch Room";
+    harness.elementsById.get("edit-visibility").value = "private";
+    harness.elementsById.get("edit-game-mode").value = "duo";
+
+    await harness.client.updateSettings();
+
+    const settingsCall = harness.fetchCalls.find((call) => call.url.includes("/settings/"));
+    assert.ok(settingsCall, "expected a fetch call to the settings endpoint");
+    const body = JSON.parse(settingsCall.options.body);
+    assert.equal(body.game_mode, "duo");
+    assert.equal(body.name, "Sketch Room");
+    assert.equal(body.visibility, "private");
+});
+
+
+test("D-08 cochat panel stays hidden for non-drawer guessers in a duo round", async () => {
+    const harness = await loadRoomLobbyScript({ currentPlayerId: 9 });
+    harness.client.updateLobbyUI(buildRoomState({ roomStatus: "in_progress", gameMode: "duo" }));
+
+    harness.client.handleServerEvent({
+        type: "round.started",
+        payload: {
+            round_id: 1,
+            role: "guesser",
+            drawer_participant_id: 7,
+            drawer_nickname: "Host Alex",
+            second_drawer_participant_id: 42,
+            second_drawer_nickname: "Casey",
+            duration_seconds: 90,
+            sequence_number: 1,
+            masked_word: "_____",
+        },
+    });
+
+    assert.equal(harness.elementsById.get("cochat-panel").hidden, true);
+    assert.equal(harness.elementsById.get("cochat-input").disabled, true);
+    assert.equal(harness.elementsById.get("cochat-send-button").disabled, true);
+});
+
+
+test("D-08 cochat panel shows for either drawer in a duo round", async () => {
+    // Local player is the SECOND drawer; co-chat must still open for them.
+    const harness = await loadRoomLobbyScript({ currentPlayerId: 42 });
+    harness.client.updateLobbyUI(buildRoomState({
+        roomStatus: "in_progress",
+        gameMode: "duo",
+        participants: [
+            { id: 7, display_name: "Host Alex", connection_status: "connected", participation_status: "playing" },
+            { id: 42, display_name: "Casey", connection_status: "connected", participation_status: "playing" },
+        ],
+    }));
+
+    harness.client.handleServerEvent({
+        type: "round.started",
+        payload: {
+            round_id: 1,
+            role: "drawer",
+            drawer_participant_id: 7,
+            drawer_nickname: "Host Alex",
+            second_drawer_participant_id: 42,
+            second_drawer_nickname: "Casey",
+            duration_seconds: 90,
+            sequence_number: 1,
+            masked_word: "_____",
+        },
+    });
+
+    assert.equal(harness.elementsById.get("cochat-panel").hidden, false);
+    assert.equal(harness.client.isDrawer, true);
+    // Drawer pair label should name both drawers in the gameplay HUD.
+    const label = harness.elementsById.get("drawer-pair-label");
+    assert.equal(label.hidden, false);
+    assert.ok(label.textContent.includes("Host Alex"));
+    assert.ok(label.textContent.includes("Casey"));
+});
+
+
+test("D-08 second drawer can send drawing events on the shared canvas", async () => {
+    const harness = await loadRoomLobbyScript({ currentPlayerId: 42 });
+    harness.client.updateLobbyUI(buildRoomState({
+        roomStatus: "in_progress",
+        gameMode: "duo",
+        participants: [
+            { id: 7, display_name: "Host Alex", connection_status: "connected", participation_status: "playing" },
+            { id: 42, display_name: "Casey", connection_status: "connected", participation_status: "playing" },
+        ],
+    }));
+
+    harness.client.handleServerEvent({
+        type: "round.started",
+        payload: {
+            round_id: 1,
+            role: "drawer",
+            drawer_participant_id: 7,
+            second_drawer_participant_id: 42,
+            duration_seconds: 90,
+            sequence_number: 1,
+            masked_word: "_____",
+        },
+    });
+
+    assert.equal(harness.client.canSendDrawingEvents(), true);
+});
+
+
+test("D-08 sending cochat.message forwards over the room socket and echoes locally", async () => {
+    const harness = await loadRoomLobbyScript({ currentPlayerId: 7 });
+    harness.client.updateLobbyUI(buildRoomState({
+        roomStatus: "in_progress",
+        gameMode: "duo",
+    }));
+
+    harness.client.handleServerEvent({
+        type: "round.started",
+        payload: {
+            round_id: 1,
+            role: "drawer",
+            drawer_participant_id: 7,
+            second_drawer_participant_id: 42,
+            duration_seconds: 90,
+            sequence_number: 1,
+            masked_word: "_____",
+        },
+    });
+
+    harness.elementsById.get("cochat-input").value = "draw a cat with stripes";
+    harness.client.sendCochatMessage();
+
+    const socket = harness.socketInstances[0];
+    const cochatSend = socket.sent
+        .map((line) => JSON.parse(line))
+        .find((message) => message.type === "cochat.message");
+    assert.ok(cochatSend, "expected the client to send cochat.message");
+    assert.equal(cochatSend.payload.text, "draw a cat with stripes");
+    assert.equal(harness.elementsById.get("cochat-input").value, "");
+    // Local self-echo so the drawer sees their own message immediately.
+    assert.equal(harness.elementsById.get("cochat-history").children.length, 1);
+});
+
+
+test("D-08 inbound cochat.message from peer drawer is rendered", async () => {
+    const harness = await loadRoomLobbyScript({ currentPlayerId: 7 });
+    harness.client.updateLobbyUI(buildRoomState({
+        roomStatus: "in_progress",
+        gameMode: "duo",
+    }));
+    harness.client.handleServerEvent({
+        type: "round.started",
+        payload: {
+            round_id: 1,
+            role: "drawer",
+            drawer_participant_id: 7,
+            second_drawer_participant_id: 42,
+            duration_seconds: 90,
+            sequence_number: 1,
+            masked_word: "_____",
+        },
+    });
+
+    harness.client.handleServerEvent({
+        type: "cochat.message",
+        payload: {
+            sender_player_id: 42,
+            sender_nickname: "Casey",
+            text: "I will start the outline",
+        },
+    });
+
+    assert.equal(harness.elementsById.get("cochat-history").children.length, 1);
+});
+
+
+test("D-08 cochat resets and hides when the round ends or game finishes", async () => {
+    const harness = await loadRoomLobbyScript({ currentPlayerId: 7 });
+    harness.client.updateLobbyUI(buildRoomState({
+        roomStatus: "in_progress",
+        gameMode: "duo",
+    }));
+    harness.client.handleServerEvent({
+        type: "round.started",
+        payload: {
+            round_id: 1,
+            role: "drawer",
+            drawer_participant_id: 7,
+            second_drawer_participant_id: 42,
+            duration_seconds: 90,
+            sequence_number: 1,
+            masked_word: "_____",
+        },
+    });
+    harness.elementsById.get("cochat-input").value = "ignore";
+    harness.client.sendCochatMessage();
+    assert.equal(harness.elementsById.get("cochat-history").children.length, 1);
+
+    harness.client.handleServerEvent({
+        type: "round.intermission_started",
+        payload: { duration_seconds: 10 },
+    });
+
+    assert.equal(harness.elementsById.get("cochat-panel").hidden, true);
+    assert.equal(harness.elementsById.get("cochat-history").children.length, 0);
+});
+

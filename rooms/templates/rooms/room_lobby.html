@@ -76,6 +76,13 @@
                                 <option value="private" {% if room.visibility == "private" %}selected{% endif %}>Private</option>
                             </select>
                         </div>
+                        <div class="field">
+                            <label for="edit-game-mode">Game Mode</label>
+                            <select id="edit-game-mode">
+                                <option value="normal" {% if room.game_mode == "normal" %}selected{% endif %}>Normal (1 drawer)</option>
+                                <option value="duo" {% if room.game_mode == "duo" %}selected{% endif %}>Duo (2 drawers)</option>
+                            </select>
+                        </div>
                         <button id="save-settings-button" type="submit" class="action-button secondary">Save Settings</button>
                     </form>
 
@@ -93,6 +100,10 @@
                     <p id="guest-view-message">Waiting for the host to start the game...</p>
                     <div id="guest-view-loader" class="loader"></div>
                 </div>
+
+                <p id="lobby-mode-display" class="lobby-mode-display">
+                    Mode: <span id="lobby-mode-value">{% if room.game_mode == "duo" %}Duo (2 drawers){% else %}Normal (1 drawer){% endif %}</span>
+                </p>
 
                 <p id="lobby-error" class="message error" hidden></p>
                 <p id="lobby-status" class="message status" hidden></p>
@@ -140,6 +151,7 @@
                     <header class="game-hud">
                         <div id="word-display" class="word-display">_ _ _ _</div>
                         <p id="drawer-hint" class="drawer-hint" hidden>You are drawing!</p>
+                        <p id="drawer-pair-label" class="drawer-pair-label" hidden></p>
                     </header>
                     
                     <div class="canvas-container">
@@ -174,7 +186,16 @@
                             <!-- Populated by JS -->
                         </ul>
                     </div>
-                    
+
+                    <div id="cochat-panel" class="cochat-panel" hidden>
+                        <h3>Drawer Chat</h3>
+                        <ul id="cochat-history" class="cochat-history"></ul>
+                        <div id="cochat-input-group" class="cochat-input-group">
+                            <input id="cochat-input" type="text" maxlength="280" placeholder="Chat with your fellow drawer..." autocomplete="off">
+                            <button id="cochat-send-button" type="button" class="icon-button">Send</button>
+                        </div>
+                    </div>
+
                     <div id="guess-input-container" class="guess-input-group">
                         <input id="guess-input" type="text" placeholder="Type your guess here..." autocomplete="off">
                         <button id="submit-guess-button" class="icon-button">Send</button>
