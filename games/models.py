@@ -103,6 +103,18 @@ class Round(TimestampedModel):
         null=True,
     )
     drawer_nickname = models.CharField(max_length=24)
+    second_drawer_participant = models.ForeignKey(
+        "rooms.Player",
+        on_delete=models.SET_NULL,
+        related_name="second_drawn_rounds",
+        blank=True,
+        null=True,
+    )
+    second_drawer_nickname = models.CharField(
+        max_length=24,
+        blank=True,
+        null=True,
+    )
     selected_game_word = models.OneToOneField(
         GameWord,
         on_delete=models.PROTECT,
@@ -135,6 +147,7 @@ class Round(TimestampedModel):
         game_id = self.__dict__.get("game_id")
         selected_game_word_id = self.__dict__.get("selected_game_word_id")
         drawer_participant_id = self.__dict__.get("drawer_participant_id")
+        second_drawer_participant_id = self.__dict__.get("second_drawer_participant_id")
 
         if self.ended_at and self.ended_at < self.started_at:
             errors["ended_at"] = "ended_at cannot be earlier than started_at."
@@ -158,6 +171,24 @@ class Round(TimestampedModel):
             and self.drawer_participant.room != self.game.room
         ):
             errors["drawer_participant"] = "drawer_participant must belong to the game's room."
+
+        if (
+            second_drawer_participant_id is not None
+            and game_id is not None
+            and self.second_drawer_participant.room != self.game.room
+        ):
+            errors["second_drawer_participant"] = (
+                "second_drawer_participant must belong to the game's room."
+            )
+
+        if (
+            drawer_participant_id is not None
+            and second_drawer_participant_id is not None
+            and drawer_participant_id == second_drawer_participant_id
+        ):
+            errors["second_drawer_participant"] = (
+                "second_drawer_participant must be distinct from drawer_participant."
+            )
 
         if errors:
             raise ValidationError(errors)

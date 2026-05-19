@@ -73,14 +73,14 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 - Odd-count fallback that runs a final single-drawer turn and ends the game when only one eligible drawer remains
 - Role-specific round-start payloads that name both drawers for duo rounds
 
-- [ ] Add `second_drawer_participant` and `second_drawer_nickname` to the `Round` model with nullable defaults so normal-mode rounds are unaffected.
-- [ ] Ship the migration adding the new round fields.
-- [ ] Update drawer pool consumption so a duo round removes both selected drawers from the remaining pool at round start.
-- [ ] Fall back to a single-drawer turn when the remaining pool only has one eligible drawer left and end the game after that turn.
-- [ ] Keep mid-game joiner eligibility rules consistent with single-drawer turn rules for the current and following round.
-- [ ] Extend role-specific round-start payloads so both drawers receive the full word while non-drawers receive only the masked or partial word information.
-- [ ] Cover pair selection, pool consumption, odd-count fallback, and dual role-payload behavior with service tests.
-- [ ] Verification gate: a duo game cycles through paired drawers, never repeats a participant as a drawer within the same game, and ends cleanly when the pool runs out.
+- [x] Add `second_drawer_participant` and `second_drawer_nickname` to the `Round` model with nullable defaults so normal-mode rounds are unaffected.
+- [x] Ship the migration adding the new round fields.
+- [x] Update drawer pool consumption so a duo round removes both selected drawers from the remaining pool at round start.
+- [x] Fall back to a single-drawer turn when the remaining pool only has one eligible drawer left and end the game after that turn.
+- [x] Keep mid-game joiner eligibility rules consistent with single-drawer turn rules for the current and following round.
+- [x] Extend role-specific round-start payloads so both drawers receive the full word while non-drawers receive only the masked or partial word information.
+- [x] Cover pair selection, pool consumption, odd-count fallback, and dual role-payload behavior with service tests.
+- [x] Verification gate: a duo game cycles through paired drawers, never repeats a participant as a drawer within the same game, and ends cleanly when the pool runs out.
 
 ---
 

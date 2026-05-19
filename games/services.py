@@ -12,7 +12,7 @@ from redis.exceptions import RedisError
 from games import redis as game_redis
 from games.models import Game, GameStatus, GameWord, Guess, Round, RoundStatus
 from rooms import redis as room_redis
-from rooms.models import Player, Room
+from rooms.models import Player, Room, RoomGameMode
 
 
 class StartGameError(Exception):
@@ -391,11 +391,39 @@ def _get_remaining_eligible_drawers(game: Game) -> list[Player]:
             flat=True,
         )
     )
+    already_drawn_participant_ids.update(
+        game.rounds.exclude(second_drawer_participant_id__isnull=True).values_list(
+            "second_drawer_participant_id",
+            flat=True,
+        )
+    )
     return [
         participant
         for participant in eligible_drawers
         if participant.id not in already_drawn_participant_ids
     ]
+
+
+def _select_drawers_for_round(
+    *,
+    game: Game,
+    eligible_drawers: list[Player],
+) -> tuple[Player, Player | None]:
+    if game.game_mode != RoomGameMode.DUO or len(eligible_drawers) == 1:
+        return random.choice(eligible_drawers), None
+
+    first_drawer, second_drawer = random.sample(eligible_drawers, 2)
+    return first_drawer, second_drawer
+
+
+def _drawer_ids_for_round(
+    first_drawer: Player,
+    second_drawer: Player | None,
+) -> set[int]:
+    drawer_ids = {first_drawer.id}
+    if second_drawer is not None:
+        drawer_ids.add(second_drawer.id)
+    return drawer_ids
 
 
 def _get_round_eligible_guesser_ids(round: Round) -> list[int]:
@@ -561,23 +589,33 @@ def _progress_game_after_round_completion(completed_round: Round) -> Round | Non
             "Cannot continue game because no unused snapshot words remain."
         )
 
-    next_drawer = random.choice(remaining_drawers)
-    _set_remaining_drawer_pool(
-        join_code=join_code,
-        participant_ids=[
-            participant_id
-            for participant_id in remaining_drawer_ids
-            if participant_id != next_drawer.id
-        ],
+    next_drawer, second_drawer = _select_drawers_for_round(
+        game=locked_game,
+        eligible_drawers=remaining_drawers,
     )
+    selected_drawer_ids = _drawer_ids_for_round(next_drawer, second_drawer)
+    next_remaining_drawer_ids = [
+        participant_id
+        for participant_id in remaining_drawer_ids
+        if participant_id not in selected_drawer_ids
+    ]
     next_word = random.choice(available_words)
-    return Round.objects.create(
+    next_round = Round.objects.create(
         game=locked_game,
         drawer_participant=next_drawer,
         drawer_nickname=next_drawer.display_name,
+        second_drawer_participant=second_drawer,
+        second_drawer_nickname=(
+            second_drawer.display_name if second_drawer is not None else None
+        ),
         selected_game_word=next_word,
         sequence_number=next_round_sequence_number,
     )
+    _set_remaining_drawer_pool(
+        join_code=join_code,
+        participant_ids=next_remaining_drawer_ids,
+    )
+    return next_round
 
 
 @transaction.atomic
@@ -628,22 +666,31 @@ def start_game_for_room(room: Room) -> StartedGame:
     )
     snapshot_words = list(game.snapshot_words.order_by("id"))
 
-    first_drawer = random.choice(eligible_participants)
+    first_drawer, second_drawer = _select_drawers_for_round(
+        game=game,
+        eligible_drawers=eligible_participants,
+    )
+    selected_drawer_ids = _drawer_ids_for_round(first_drawer, second_drawer)
+    remaining_drawer_ids = [
+        participant.id
+        for participant in eligible_participants
+        if participant.id not in selected_drawer_ids
+    ]
     first_word = random.choice(snapshot_words)
     first_round = Round.objects.create(
         game=game,
         drawer_participant=first_drawer,
         drawer_nickname=first_drawer.display_name,
+        second_drawer_participant=second_drawer,
+        second_drawer_nickname=(
+            second_drawer.display_name if second_drawer is not None else None
+        ),
         selected_game_word=first_word,
         sequence_number=1,
     )
     _set_remaining_drawer_pool(
         join_code=locked_room.join_code,
-        participant_ids=[
-            participant.id
-            for participant in eligible_participants
-            if participant.id != first_drawer.id
-        ],
+        participant_ids=remaining_drawer_ids,
     )
     _clear_round_runtime_payloads(locked_room.join_code)
 
