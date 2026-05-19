@@ -32,11 +32,12 @@ _redis_client = None
 
 class CreateRoomForm(forms.Form):
     # This form validates the JSON fields required to create a brand-new room.
-    name = forms.CharField(max_length=255)
-    visibility = forms.ChoiceField(choices=Room.Visibility.choices)
     # min_length and strip make the "no empty names" rule explicit and reject
     # whitespace-only input that would otherwise pass past the implicit
-    # required=True check on a stripped value.
+    # required=True check on a stripped value. The Room model mirrors the rule
+    # via MinLengthValidator for direct-ORM defense in depth.
+    name = forms.CharField(max_length=255, min_length=1, strip=True)
+    visibility = forms.ChoiceField(choices=Room.Visibility.choices)
     display_name = forms.CharField(max_length=24, min_length=1, strip=True)
 
 
@@ -46,7 +47,7 @@ class JoinRoomForm(forms.Form):
 
 
 class UpdateLobbySettingsForm(forms.Form):
-    name = forms.CharField(max_length=255)
+    name = forms.CharField(max_length=255, min_length=1, strip=True)
     visibility = forms.ChoiceField(choices=Room.Visibility.choices)
 
 
