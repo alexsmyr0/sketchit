@@ -314,6 +314,28 @@ class AppendCanvasStrokeTests(SimpleTestCase):
         result = room_redis.get_canvas_snapshot(client, JOIN_CODE)
         self.assertEqual(result, [b"data-1", b"data-2"])
 
+    def test_append_canvas_stroke_trims_to_max_strokes_cap(self):
+        """LTRIM keeps the list bounded so one runaway round cannot grow Redis.
+
+        Lowers the cap to a small value via patch so the test stays cheap;
+        the production cap (currently 10000) shares the same code path.
+        """
+        from unittest.mock import patch
+
+        client = make_client()
+        with patch.object(room_redis, "MAX_CANVAS_STROKES", 5):
+            for index in range(8):
+                room_redis.append_canvas_stroke(
+                    client, JOIN_CODE, f"stroke-{index}".encode()
+                )
+
+            result = room_redis.get_canvas_snapshot(client, JOIN_CODE)
+
+        # Oldest 3 strokes (indices 0-2) dropped; newest 5 (indices 3-7) kept.
+        self.assertEqual(len(result), 5)
+        self.assertEqual(result[0], b"stroke-3")
+        self.assertEqual(result[-1], b"stroke-7")
+
 
 class GetCanvasSnapshotTests(SimpleTestCase):
     def test_get_canvas_snapshot_returns_stored_list_of_bytes(self):

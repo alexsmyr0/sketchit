@@ -948,6 +948,42 @@ class RoomLobbyStateViewTests(TestCase):
             "This guest session is not a participant in this room.",
         )
 
+    def test_non_member_session_gets_404_for_private_room_lobby_state(self):
+        """Private rooms must look identical to non-existent rooms.
+
+        The Bucket A audit returned a 403 here, which leaks the existence
+        of the room to anyone who knows or guesses its join code. For
+        PRIVATE rooms the response must be the same 404 a totally
+        unknown join code would produce.
+        """
+        private_room = Room.objects.create(
+            name="Private Room",
+            join_code="PRIVATE1",
+            visibility=Room.Visibility.PRIVATE,
+        )
+
+        outsider_client = self.client_class()
+        # Anchor the outsider session in a *different* public room so the
+        # request goes through the normal "session exists but is not in
+        # this room" branch rather than the no-session-cookie path.
+        outsider_session_key = self._ensure_session_key(outsider_client)
+        decoy_room = Room.objects.create(
+            name="Decoy Room",
+            join_code="DECOY123",
+            visibility=Room.Visibility.PUBLIC,
+        )
+        Player.objects.create(
+            room=decoy_room,
+            session_key=outsider_session_key,
+            display_name="Outsider",
+            session_expires_at=outsider_client.session.get_expiry_date(),
+        )
+
+        response = outsider_client.get(f"/rooms/{private_room.join_code}/")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"], "Room not found.")
+
     def test_room_lobby_state_returns_status_as_stored(self):
         self.room.status = Room.Status.IN_PROGRESS
         self.room.save(update_fields=["status"])
