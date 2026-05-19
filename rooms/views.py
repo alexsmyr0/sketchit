@@ -377,12 +377,19 @@ def join_room(request, join_code):
         )
         if player is not None:
             if player.room_id != room.id:
-                # One room per active session. Stale rows from expired Django
-                # sessions are removed above by purge_expired_participants_for_session,
-                # so any row still present here belongs to a live session.
-                # Return the existing room as a recoverable conflict so the
-                # entry page can route the guest back to it.
-                return _build_room_assignment_conflict_response(player.room)
+                # Explicit cross-room join: the caller named a different target
+                # join code, so honour that intent — leave the current room and
+                # fall through to the normal new-participant creation path
+                # below. leave_participant handles host reassignment in the
+                # abandoned room, empty-grace transition if it becomes vacant,
+                # and drawer-disconnect grace if a game was mid-round. The
+                # one-room-per-session conflict only applies to create_room,
+                # where the user has not named a specific room to switch to.
+                leave_participant(
+                    redis_client=room_runtime_redis_client,
+                    player_id=player.id,
+                )
+                player = None
             else:
                 # Rejoining the same room should not create a duplicate participant
                 # or change the original display name, but it should refresh the
