@@ -129,6 +129,21 @@ def is_present(client: "_redis.Redis", join_code: str, session_key: str) -> bool
     return bool(client.sismember(_presence_key(join_code), session_key))
 
 
+def is_connection_present(
+    client: "_redis.Redis",
+    join_code: str,
+    session_key: str,
+    connection_id: str,
+) -> bool:
+    """Return ``True`` if one socket connection is still registered."""
+    return bool(
+        client.sismember(
+            _presence_connections_key(join_code, session_key),
+            connection_id,
+        )
+    )
+
+
 def clear_presence(client: "_redis.Redis", join_code: str) -> None:
     """Delete the entire presence set for *join_code*.
 

@@ -310,7 +310,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
 
     async def _handle_drawing_event(self, content: dict) -> None:
         """Process and broadcast drawer-authorized drawing events."""
-        if not await self._is_active_drawer():
+        if not await self._can_send_drawing_event():
             # Silently ignore unauthorized drawing attempts
             return
 
@@ -452,8 +452,8 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
     def _is_active_drawer(self) -> bool:
         """Return True if the connected player is the active drawer.
 
-        This check is performed against Redis turn state to avoid database
-        load during high-frequency drawing events.
+        This preserves the existing single active drawer role used by
+        non-drawing rules such as guess rejection.
         """
         # 1. Match player ID against Redis turn state
         client = get_redis_client()
@@ -467,6 +467,34 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             return False
 
         return self.player.id == int(drawer_participant_id)
+
+    @database_sync_to_async
+    def _can_send_drawing_event(self) -> bool:
+        """Return True if this socket belongs to a current drawing participant."""
+        client = get_redis_client()
+        if not room_redis.is_present(client, self.join_code, self.session_key):
+            return False
+        if not room_redis.is_connection_present(
+            client,
+            self.join_code,
+            self.session_key,
+            self.channel_name,
+        ):
+            return False
+
+        turn_state = game_redis.get_turn_state(client, self.join_code)
+        if turn_state.get("phase") != "round":
+            return False
+
+        drawing_participant_ids = {
+            int(raw_id)
+            for raw_id in (
+                turn_state.get("drawer_participant_id"),
+                turn_state.get("second_drawer_participant_id"),
+            )
+            if raw_id
+        }
+        return self.player.id in drawing_participant_ids
 
     @database_sync_to_async
     def _is_spectator(self) -> bool:

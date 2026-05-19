@@ -17,7 +17,7 @@ from rooms.models import Player, Room
 from games.models import Game, GameStatus, GameWord, Round
 from rooms.tests.test_consumers import (
     _ws_url, _session_headers, _create_room_member, _TEST_APP,
-    _receive_until_type, _connect_and_drain_initial_sync,
+    _receive_until_type, _connect_and_drain_initial_sync, _drain_output_queue_safe,
 )
 from rooms import consumers as room_consumers
 from rooms import redis as room_redis
@@ -115,12 +115,29 @@ class DrawingEventTests(TransactionTestCase):
             word_pack=self.word_pack,
         )
         
-        # Create two participants with proper synchronization
+        # Create participants with proper synchronization
         self.drawer_session_key = async_to_sync(_create_room_member)(self.room.id, "Drawer")
         self.drawer_player = Player.objects.get(room=self.room, session_key=self.drawer_session_key)
         
         self.viewer_session_key = async_to_sync(_create_room_member)(self.room.id, "Viewer")
         self.viewer_player = Player.objects.get(room=self.room, session_key=self.viewer_session_key)
+
+        self.second_drawer_session_key = async_to_sync(_create_room_member)(
+            self.room.id,
+            "Second Drawer",
+        )
+        self.second_drawer_player = Player.objects.get(
+            room=self.room,
+            session_key=self.second_drawer_session_key,
+        )
+
+        self.spectator_session_key = async_to_sync(_create_room_member)(self.room.id, "Spectator")
+        self.spectator_player = Player.objects.get(
+            room=self.room,
+            session_key=self.spectator_session_key,
+        )
+        self.spectator_player.participation_status = Player.ParticipationStatus.SPECTATING
+        self.spectator_player.save(update_fields=("participation_status",))
 
         # Create mandatory Game and Round objects for runtime sync
         self.game = Game.objects.create(room=self.room, status=GameStatus.IN_PROGRESS)
@@ -133,15 +150,19 @@ class DrawingEventTests(TransactionTestCase):
             sequence_number=1,
         )
 
-    def _seed_active_round_state(self):
+    def _seed_active_round_state(self, *, duo: bool = False):
         from games import redis as game_redis
         from django.utils import timezone
         from datetime import timedelta
         state = {
             "phase": "round",
+            "status": "drawing",
             "round_id": str(self.round.id),
             "game_id": str(self.game.id),
             "drawer_participant_id": str(self.drawer_player.id),
+            "second_drawer_participant_id": (
+                str(self.second_drawer_player.id) if duo else ""
+            ),
             "deadline_at": (timezone.now() + timedelta(seconds=60)).isoformat(),
         }
         game_redis.set_turn_state(self.fake_redis, self.room.join_code, state)
@@ -355,6 +376,374 @@ class DrawingEventTests(TransactionTestCase):
         self.assertTrue(await drawer_socket.receive_nothing())
 
         await drawer_socket.disconnect()
+        await viewer_socket.disconnect()
+
+    async def test_duo_round_accepts_drawing_from_either_drawer_on_shared_canvas(self):
+        self._seed_active_round_state(duo=True)
+        drawer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.drawer_session_key),
+        )
+        second_drawer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.second_drawer_session_key),
+        )
+        viewer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.viewer_session_key),
+        )
+
+        await _connect_and_assert_active_handshake(self, drawer_socket, self.room.join_code)
+        await _connect_and_assert_active_handshake(
+            self,
+            second_drawer_socket,
+            self.room.join_code,
+        )
+        await _connect_and_assert_active_handshake(self, viewer_socket, self.room.join_code)
+        await _receive_until_type(drawer_socket, "room.state")
+        await _receive_until_type(drawer_socket, "room.state")
+
+        primary_payload = {"lines": [[0, 0], [4, 4]], "color": "blue"}
+        secondary_payload = {"lines": [[9, 1], [9, 8]], "color": "green"}
+
+        await drawer_socket.send_json_to({
+            "type": "drawing.stroke",
+            "payload": primary_payload,
+        })
+        await _receive_until_type(second_drawer_socket, "drawing.stroke")
+        await _receive_until_type(viewer_socket, "drawing.stroke")
+
+        await second_drawer_socket.send_json_to({
+            "type": "drawing.stroke",
+            "payload": secondary_payload,
+        })
+        primary_received = await _receive_until_type(drawer_socket, "drawing.stroke")
+        viewer_received = await _receive_until_type(viewer_socket, "drawing.stroke")
+
+        self.assertEqual(primary_received["payload"], secondary_payload)
+        self.assertEqual(viewer_received["payload"], secondary_payload)
+        self.assertNotIn("drawer_participant_id", viewer_received["payload"])
+        self.assertNotIn("second_drawer_participant_id", viewer_received["payload"])
+
+        snapshot = [
+            json.loads(item.decode())
+            for item in room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code)
+        ]
+        self.assertEqual(
+            snapshot,
+            [
+                {"type": "drawing.stroke", "payload": primary_payload},
+                {"type": "drawing.stroke", "payload": secondary_payload},
+            ],
+        )
+
+        late_viewer_key = await _create_room_member(self.room.id, "Late Viewer")
+        late_viewer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(late_viewer_key),
+        )
+        await _connect_and_assert_active_handshake(
+            self,
+            late_viewer_socket,
+            self.room.join_code,
+            replayed_drawing=snapshot,
+        )
+
+        await drawer_socket.disconnect()
+        await second_drawer_socket.disconnect()
+        await viewer_socket.disconnect()
+        await late_viewer_socket.disconnect()
+
+    async def test_duo_round_rejects_non_drawers_and_spectators(self):
+        self._seed_active_round_state(duo=True)
+        drawer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.drawer_session_key),
+        )
+        guesser_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.viewer_session_key),
+        )
+        spectator_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.spectator_session_key),
+        )
+
+        await _connect_and_assert_active_handshake(self, drawer_socket, self.room.join_code)
+        await _connect_and_assert_active_handshake(self, guesser_socket, self.room.join_code)
+        await _connect_and_assert_active_handshake(self, spectator_socket, self.room.join_code)
+        await _receive_until_type(drawer_socket, "room.state")
+        await _receive_until_type(drawer_socket, "room.state")
+
+        await guesser_socket.send_json_to({
+            "type": "drawing.stroke",
+            "payload": {"from": "guesser"},
+        })
+        await spectator_socket.send_json_to({
+            "type": "drawing.stroke",
+            "payload": {"from": "spectator"},
+        })
+
+        self.assertTrue(await drawer_socket.receive_nothing())
+        self.assertEqual(
+            room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code),
+            [],
+        )
+
+        await drawer_socket.disconnect()
+        await guesser_socket.disconnect()
+        await spectator_socket.disconnect()
+
+    async def test_duo_round_broadcasts_second_drawer_events_to_all_viewers(self):
+        self._seed_active_round_state(duo=True)
+        third_viewer_key = await _create_room_member(self.room.id, "Viewer 2")
+        drawer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.drawer_session_key),
+        )
+        second_drawer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.second_drawer_session_key),
+        )
+        viewer1_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.viewer_session_key),
+        )
+        viewer2_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(third_viewer_key),
+        )
+
+        await _connect_and_assert_active_handshake(self, drawer_socket, self.room.join_code)
+        await _connect_and_assert_active_handshake(
+            self,
+            second_drawer_socket,
+            self.room.join_code,
+        )
+        await _connect_and_assert_active_handshake(self, viewer1_socket, self.room.join_code)
+        await _connect_and_assert_active_handshake(self, viewer2_socket, self.room.join_code)
+        await _receive_until_type(drawer_socket, "room.state")
+        await _receive_until_type(drawer_socket, "room.state")
+        await _receive_until_type(drawer_socket, "room.state")
+
+        payload = {"lines": [[2, 3], [5, 8]], "brush": "marker"}
+        await second_drawer_socket.send_json_to({
+            "type": "drawing.stroke",
+            "payload": payload,
+        })
+
+        primary_received = await _receive_until_type(drawer_socket, "drawing.stroke")
+        viewer1_received = await _receive_until_type(viewer1_socket, "drawing.stroke")
+        viewer2_received = await _receive_until_type(viewer2_socket, "drawing.stroke")
+
+        self.assertEqual(primary_received["payload"], payload)
+        self.assertEqual(viewer1_received["payload"], payload)
+        self.assertEqual(viewer2_received["payload"], payload)
+
+        await drawer_socket.disconnect()
+        await second_drawer_socket.disconnect()
+        await viewer1_socket.disconnect()
+        await viewer2_socket.disconnect()
+
+    async def test_duo_round_second_drawer_can_end_stroke_and_clear_canvas(self):
+        self._seed_active_round_state(duo=True)
+        stroke_data = {"type": "drawing.stroke", "payload": {"seed": "line"}}
+        room_redis.append_canvas_stroke(
+            self.fake_redis,
+            self.room.join_code,
+            json.dumps(stroke_data).encode(),
+        )
+        second_drawer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.second_drawer_session_key),
+        )
+        viewer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.viewer_session_key),
+        )
+
+        await _connect_and_assert_active_handshake(
+            self,
+            second_drawer_socket,
+            self.room.join_code,
+            replayed_drawing=[stroke_data],
+        )
+        await _connect_and_assert_active_handshake(
+            self,
+            viewer_socket,
+            self.room.join_code,
+            replayed_drawing=[stroke_data],
+        )
+
+        await second_drawer_socket.send_json_to({
+            "type": "drawing.end_stroke",
+            "payload": {},
+        })
+        end_stroke = await _receive_until_type(viewer_socket, "drawing.end_stroke")
+        self.assertEqual(end_stroke["payload"], {})
+        self.assertEqual(
+            json.loads(
+                room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code)[-1].decode()
+            ),
+            {"type": "drawing.end_stroke", "payload": {}},
+        )
+
+        await second_drawer_socket.send_json_to({"type": "drawing.clear"})
+        clear_event = await _receive_until_type(viewer_socket, "drawing.clear")
+        self.assertEqual(clear_event["payload"], {})
+        self.assertEqual(
+            room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code),
+            [],
+        )
+
+        await second_drawer_socket.disconnect()
+        await viewer_socket.disconnect()
+
+    async def test_duo_round_disconnected_drawer_socket_cannot_draw(self):
+        self._seed_active_round_state(duo=True)
+        second_drawer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.second_drawer_session_key),
+        )
+        viewer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.viewer_session_key),
+        )
+
+        await _connect_and_assert_active_handshake(
+            self,
+            second_drawer_socket,
+            self.room.join_code,
+        )
+        await _connect_and_assert_active_handshake(self, viewer_socket, self.room.join_code)
+
+        room_redis.clear_session_presence(
+            self.fake_redis,
+            self.room.join_code,
+            self.second_drawer_session_key,
+        )
+        await database_sync_to_async(
+            Player.objects.filter(pk=self.second_drawer_player.id).update
+        )(connection_status=Player.ConnectionStatus.DISCONNECTED)
+
+        await second_drawer_socket.send_json_to({
+            "type": "drawing.stroke",
+            "payload": {"should": "not-broadcast"},
+        })
+
+        self.assertTrue(await viewer_socket.receive_nothing())
+        self.assertEqual(
+            room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code),
+            [],
+        )
+
+        await second_drawer_socket.disconnect()
+        await viewer_socket.disconnect()
+
+    async def test_duo_round_stale_same_session_second_drawer_socket_cannot_draw(self):
+        self._seed_active_round_state(duo=True)
+        stale_drawer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.second_drawer_session_key),
+        )
+        active_drawer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.second_drawer_session_key),
+        )
+        viewer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.viewer_session_key),
+        )
+
+        await _connect_and_assert_active_handshake(
+            self,
+            stale_drawer_socket,
+            self.room.join_code,
+        )
+        connection_key = room_redis._presence_connections_key(
+            self.room.join_code,
+            self.second_drawer_session_key,
+        )
+        stale_connection_ids = self.fake_redis.smembers(connection_key)
+        self.assertEqual(len(stale_connection_ids), 1)
+        stale_connection_id = next(iter(stale_connection_ids))
+        if isinstance(stale_connection_id, bytes):
+            stale_connection_id = stale_connection_id.decode()
+
+        await _connect_and_assert_active_handshake(
+            self,
+            active_drawer_socket,
+            self.room.join_code,
+        )
+        await _connect_and_assert_active_handshake(self, viewer_socket, self.room.join_code)
+
+        self.assertTrue(
+            room_redis.is_present(
+                self.fake_redis,
+                self.room.join_code,
+                self.second_drawer_session_key,
+            )
+        )
+        self.assertEqual(self.fake_redis.scard(connection_key), 2)
+        room_redis.remove_presence(
+            self.fake_redis,
+            self.room.join_code,
+            self.second_drawer_session_key,
+            connection_id=stale_connection_id,
+        )
+        self.assertTrue(
+            room_redis.is_present(
+                self.fake_redis,
+                self.room.join_code,
+                self.second_drawer_session_key,
+            )
+        )
+        self.assertFalse(
+            room_redis.is_connection_present(
+                self.fake_redis,
+                self.room.join_code,
+                self.second_drawer_session_key,
+                stale_connection_id,
+            )
+        )
+        self.assertEqual(self.fake_redis.scard(connection_key), 1)
+
+        await _drain_output_queue_safe(stale_drawer_socket)
+        await _drain_output_queue_safe(active_drawer_socket)
+        await _drain_output_queue_safe(viewer_socket)
+
+        await stale_drawer_socket.send_json_to({
+            "type": "drawing.stroke",
+            "payload": {"should": "not-broadcast"},
+        })
+
+        self.assertTrue(await active_drawer_socket.receive_nothing())
+        self.assertTrue(await viewer_socket.receive_nothing())
+        self.assertEqual(
+            room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code),
+            [],
+        )
+
+        await stale_drawer_socket.disconnect()
+        await active_drawer_socket.disconnect()
         await viewer_socket.disconnect()
 
     async def test_drawing_clear_deletes_redis_snapshot(self):
