@@ -70,6 +70,9 @@ class UpdateLobbySettingsForm(forms.Form):
         return game_mode
 
 
+LOBBY_SETTINGS_FIELDS = frozenset({"name", "visibility", "game_mode"})
+
+
 def _get_room_runtime_redis_client() -> redis.Redis:
     """Return a cached Redis client for room lifecycle runtime helpers.
 
@@ -117,7 +120,8 @@ def _build_form_error_response(form):
         error_codes[field_name] = [
             (
                 "invalid_game_mode"
-                if field_name == "game_mode" and error.code == "invalid_choice"
+                if field_name == "game_mode"
+                and error.code in {"invalid_choice", "required"}
                 else error.code
             )
             for error in errors
@@ -127,6 +131,16 @@ def _build_form_error_response(form):
         {
             "errors": form.errors,
             "error_codes": error_codes,
+        },
+        status=400,
+    )
+
+
+def _build_settings_error_response(*, code, message):
+    return JsonResponse(
+        {
+            "errors": {"settings": [message]},
+            "error_codes": {"settings": [code]},
         },
         status=400,
     )
@@ -593,6 +607,13 @@ def update_lobby_settings(request, join_code):
     if error_response is not None:
         return error_response
 
+    requested_settings_fields = LOBBY_SETTINGS_FIELDS.intersection(payload)
+    if not requested_settings_fields:
+        return _build_settings_error_response(
+            code="no_settings_fields",
+            message="At least one editable room setting is required.",
+        )
+
     form = UpdateLobbySettingsForm(payload)
     if not form.is_valid():
         return _build_form_error_response(form)
@@ -600,11 +621,18 @@ def update_lobby_settings(request, join_code):
     update_fields = []
     for field_name in ("name", "visibility", "game_mode"):
         if field_name in payload:
-            setattr(room, field_name, form.cleaned_data[field_name])
-            update_fields.append(field_name)
+            new_value = form.cleaned_data[field_name]
+            if getattr(room, field_name) != new_value:
+                setattr(room, field_name, new_value)
+                update_fields.append(field_name)
 
-    if update_fields:
-        room.save(update_fields=[*update_fields, "updated_at"])
+    if not update_fields:
+        return _build_settings_error_response(
+            code="empty_settings_update",
+            message="At least one room setting must change.",
+        )
+
+    room.save(update_fields=[*update_fields, "updated_at"])
 
     schedule_room_state_broadcast_after_commit(
         join_code=room.join_code,
