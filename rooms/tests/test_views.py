@@ -6,12 +6,13 @@ from unittest.mock import patch
 import fakeredis
 from django.conf import settings
 from django.contrib.sessions.backends.db import SessionStore
+from django.core.exceptions import ValidationError
 from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase
 from django.utils import timezone
 
 from games import redis as game_redis
 from games.models import Game, GameWord, Round
-from rooms.models import MVP_DEFAULT_WORD_PACK_NAME, Player, Room
+from rooms.models import MVP_DEFAULT_WORD_PACK_NAME, Player, Room, RoomGameMode
 from rooms.services import get_empty_room_cleanup_deadline
 from words.models import Word, WordPack, WordPackEntry
 
@@ -283,6 +284,30 @@ class RoomWordPackModelTests(TestCase):
         )
 
         self.assertEqual(room.word_pack_id, expected_default_word_pack.id)
+
+
+class RoomGameModeModelTests(TestCase):
+    def test_room_model_defaults_game_mode_to_normal(self):
+        room = Room.objects.create(
+            name="Mode Room",
+            join_code="MODE1234",
+            visibility=Room.Visibility.PRIVATE,
+        )
+
+        self.assertEqual(room.game_mode, RoomGameMode.NORMAL)
+
+    def test_room_model_rejects_unknown_game_mode_value(self):
+        room = Room(
+            name="Mode Room",
+            join_code="MODE5678",
+            visibility=Room.Visibility.PRIVATE,
+            game_mode="arcade",
+        )
+
+        with self.assertRaises(ValidationError) as raised:
+            room.full_clean()
+
+        self.assertIn("game_mode", raised.exception.message_dict)
 
 
 class ConcurrentRoomOwnershipTests(TransactionTestCase):

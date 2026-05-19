@@ -2,6 +2,8 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 
+from rooms.models import RoomGameMode
+
 
 class TimestampedModel(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
@@ -33,6 +35,11 @@ class Game(TimestampedModel):
         max_length=16,
         choices=GameStatus,
         default=GameStatus.IN_PROGRESS,
+    )
+    game_mode = models.CharField(
+        max_length=10,
+        choices=RoomGameMode.choices,
+        default=RoomGameMode.NORMAL,
     )
     started_at = models.DateTimeField(default=timezone.now)
     ended_at = models.DateTimeField(blank=True, null=True)
