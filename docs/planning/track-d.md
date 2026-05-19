@@ -27,12 +27,12 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 - Game-time snapshot of the room's mode onto the `Game` row so mid-game lobby edits cannot affect an active game
 - Model-layer validation rejecting unknown modes
 
-- [ ] Add `game_mode` CharField on `Room` with choices `normal` and `duo` defaulting to `normal`.
-- [ ] Ship the migration adding the field and backfilling existing rows.
-- [ ] Snapshot the selected mode onto the `Game` row at game start so the active game is decoupled from later room edits.
-- [ ] Reject invalid mode values at the model layer.
-- [ ] Cover model defaults, choice validation, and the `Game` snapshot behavior with tests.
-- [ ] Verification gate: migrations apply cleanly and a started game records the room's mode independent of subsequent room edits.
+- [x] Add `game_mode` CharField on `Room` with choices `normal` and `duo` defaulting to `normal`.
+- [x] Ship the migration adding the field and backfilling existing rows.
+- [x] Snapshot the selected mode onto the `Game` row at game start so the active game is decoupled from later room edits.
+- [x] Reject invalid mode values at the model layer.
+- [x] Cover model defaults, choice validation, and the `Game` snapshot behavior with tests.
+- [x] Verification gate: migrations apply cleanly and a started game records the room's mode independent of subsequent room edits.
 
 ---
 

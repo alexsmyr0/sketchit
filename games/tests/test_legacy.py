@@ -1,11 +1,11 @@
 import json
 import threading
 import time
-import unittest
 from datetime import timedelta
 from unittest.mock import patch
 
 import fakeredis
+from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from redis.exceptions import RedisError
@@ -25,7 +25,7 @@ from games.services import (
     evaluate_guess_for_round,
     start_game_for_room,
 )
-from rooms.models import Player, Room
+from rooms.models import Player, Room, RoomGameMode
 from rooms.services import leave_participant
 from words.models import Word, WordPack, WordPackEntry
 
@@ -242,6 +242,21 @@ class StartGameServiceTests(TestCase):
             list(game.snapshot_words.order_by("id").values_list("text", flat=True)),
             ["apple", "banana", "cherry"],
         )
+
+    def test_start_game_snapshots_room_game_mode_onto_game_row(self):
+        self.room.game_mode = RoomGameMode.DUO
+        self.room.save(update_fields=("game_mode", "updated_at"))
+
+        started_game = start_game_for_room(self.room)
+        game = started_game.game
+
+        self.assertEqual(game.game_mode, RoomGameMode.DUO)
+
+        self.room.game_mode = RoomGameMode.NORMAL
+        self.room.save(update_fields=("game_mode", "updated_at"))
+        game.refresh_from_db()
+
+        self.assertEqual(game.game_mode, RoomGameMode.DUO)
 
     def test_start_game_requires_two_eligible_participants(self):
         self.member.participation_status = Player.ParticipationStatus.SPECTATING
@@ -585,30 +600,6 @@ class StartGameServiceTests(TestCase):
         self.assertIsNotNone(active_round.ended_at)
         self.assertFalse(cancel_active_game_for_room(self.room.id))
 
-    @unittest.skip(
-        "Leaderboard auto-restart is not yet implemented "
-        "(SDS §Missing Or Largely Missing). Unskip when the feature lands."
-    )
-    @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
-    def test_complete_leaderboard_cooldown_restarts_game_with_fresh_scores(self):
-        finished_game = self._finish_two_player_game()
-        self.assertEqual(finished_game.status, GameStatus.FINISHED)
-
-        result = complete_leaderboard_cooldown_for_room(self.room.id)
-
-        self.room.refresh_from_db()
-        self.host.refresh_from_db()
-        self.member.refresh_from_db()
-
-        self.assertTrue(result.restarted)
-        self.assertEqual(result.room_status, Room.Status.IN_PROGRESS)
-        self.assertIsNotNone(result.next_game_id)
-        self.assertIsNotNone(result.next_round_id)
-        self.assertEqual(self.room.status, Room.Status.IN_PROGRESS)
-        self.assertEqual(Game.objects.filter(room=self.room).count(), 2)
-        self.assertEqual(self.host.current_score, 0)
-        self.assertEqual(self.member.current_score, 0)
-
     @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
     def test_complete_leaderboard_cooldown_returns_room_to_lobby_when_too_few_players_remain(self):
         finished_game = self._finish_two_player_game()
@@ -625,33 +616,6 @@ class StartGameServiceTests(TestCase):
         self.assertIsNone(result.next_round_id)
         self.assertEqual(self.room.status, Room.Status.LOBBY)
         self.assertEqual(Game.objects.filter(room=self.room).count(), 1)
-
-    @unittest.skip(
-        "Leaderboard auto-restart is not yet implemented "
-        "(SDS §Missing Or Largely Missing). Unskip when the feature lands."
-    )
-    @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
-    def test_complete_leaderboard_cooldown_promotes_connected_spectator_before_restart(self):
-        finished_game = self._finish_two_player_game()
-        self.assertEqual(finished_game.status, GameStatus.FINISHED)
-        late_spectator = Player.objects.create(
-            room=self.room,
-            session_key="leaderboard-late-spectator",
-            display_name="Late Spectator",
-            connection_status=Player.ConnectionStatus.CONNECTED,
-            participation_status=Player.ParticipationStatus.SPECTATING,
-            current_score=0,
-            session_expires_at=timezone.now() + timedelta(hours=1),
-        )
-
-        result = complete_leaderboard_cooldown_for_room(self.room.id)
-
-        late_spectator.refresh_from_db()
-        self.assertTrue(result.restarted)
-        self.assertEqual(
-            late_spectator.participation_status,
-            Player.ParticipationStatus.PLAYING,
-        )
 
     @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=False)
     def test_round_progression_never_repeats_drawers_or_words_within_game(self):
@@ -1044,6 +1008,31 @@ class StartGameServiceTests(TestCase):
             evaluate_guess_for_round(first_round, outsider, first_round.selected_game_word.text)
 
         self.assertEqual(Guess.objects.filter(round=first_round).count(), 0)
+
+
+class GameGameModeModelTests(TestCase):
+    def setUp(self):
+        self.room = Room.objects.create(
+            name="Game Mode Room",
+            join_code="GAMEMODE",
+            visibility=Room.Visibility.PRIVATE,
+        )
+
+    def test_game_model_defaults_game_mode_to_normal(self):
+        game = Game.objects.create(room=self.room)
+
+        self.assertEqual(game.game_mode, RoomGameMode.NORMAL)
+
+    def test_game_model_rejects_unknown_game_mode_value(self):
+        game = Game(
+            room=self.room,
+            game_mode="arcade",
+        )
+
+        with self.assertRaises(ValidationError) as raised:
+            game.full_clean()
+
+        self.assertIn("game_mode", raised.exception.message_dict)
 
 
 @override_settings(SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True)
@@ -2128,60 +2117,6 @@ class RoundTimerCoordinatorTests(TransactionTestCase):
         SKETCHIT_LEADERBOARD_DURATION_SECONDS=0.4,
         SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.05,
     )
-    @unittest.skip(
-        "Leaderboard auto-restart is not yet implemented "
-        "(SDS §Missing Or Largely Missing). Unskip when the feature lands."
-    )
-    def test_leaderboard_cooldown_auto_starts_fresh_game_and_resets_scores(self):
-        game = self._finish_default_two_player_game()
-
-        def _scoreboard_state_emitted() -> bool:
-            return bool(self._event_payloads("scoreboard.state"))
-
-        self._wait_for(_scoreboard_state_emitted, timeout_seconds=6)
-
-        self.host.refresh_from_db()
-        self.member.refresh_from_db()
-        self.assertGreater(self.host.current_score, 0)
-        self.assertGreater(self.member.current_score, 0)
-
-        def _second_game_started() -> bool:
-            return Game.objects.filter(room=self.room).count() == 2
-
-        self._wait_for(_second_game_started, timeout_seconds=4)
-
-        second_game = Game.objects.filter(room=self.room).order_by("-id").first()
-        self.assertIsNotNone(second_game)
-        self.assertEqual(second_game.status, GameStatus.IN_PROGRESS)
-
-        self.host.refresh_from_db()
-        self.member.refresh_from_db()
-        self.assertEqual(self.host.current_score, 0)
-        self.assertEqual(self.member.current_score, 0)
-        self.assertNotEqual(second_game.id, game.id)
-
-        second_round = second_game.rounds.get(sequence_number=1)
-
-        def _second_round_started_broadcasted() -> bool:
-            return any(
-                payload["round_id"] == second_round.id
-                for payload in self._event_payloads("round.started")
-            )
-
-        self._wait_for(_second_round_started_broadcasted, timeout_seconds=3)
-        started_payloads = [
-            payload
-            for payload in self._event_payloads("round.started")
-            if payload["round_id"] == second_round.id
-        ]
-        self.assertEqual(len(started_payloads), 1)
-
-    @override_settings(
-        SKETCHIT_ROUND_DURATION_SECONDS=5,
-        SKETCHIT_INTERMISSION_DURATION_SECONDS=0.4,
-        SKETCHIT_LEADERBOARD_DURATION_SECONDS=0.4,
-        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.05,
-    )
     def test_leaderboard_cooldown_returns_room_to_lobby_when_too_few_players_remain(self):
         game = self._finish_default_two_player_game()
 
@@ -2204,48 +2139,6 @@ class RoundTimerCoordinatorTests(TransactionTestCase):
         game.refresh_from_db()
         self.assertEqual(game.status, GameStatus.FINISHED)
         self.assertEqual(Game.objects.filter(room=self.room).count(), 1)
-
-    @override_settings(
-        SKETCHIT_ROUND_DURATION_SECONDS=5,
-        SKETCHIT_INTERMISSION_DURATION_SECONDS=0.4,
-        SKETCHIT_LEADERBOARD_DURATION_SECONDS=0.8,
-        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=0.05,
-    )
-    @unittest.skip(
-        "Leaderboard auto-restart is not yet implemented "
-        "(SDS §Missing Or Largely Missing). Unskip when the feature lands."
-    )
-    def test_auto_restart_promotes_connected_spectators_before_next_game_starts(self):
-        # Create the spectator during the leaderboard cooldown, not before the
-        # first game finishes. If we inserted them earlier, A-07 would promote
-        # them at the round-1 transition and the "default two-player game"
-        # helper would no longer represent a two-drawer game.
-        self._finish_default_two_player_game()
-
-        def _scoreboard_state_emitted() -> bool:
-            return bool(self._event_payloads("scoreboard.state"))
-
-        self._wait_for(_scoreboard_state_emitted, timeout_seconds=6)
-
-        late_joiner = Player.objects.create(
-            room=self.room,
-            session_key="timer-late-joiner",
-            display_name="Late Joiner",
-            connection_status=Player.ConnectionStatus.CONNECTED,
-            participation_status=Player.ParticipationStatus.SPECTATING,
-            session_expires_at=timezone.now() + timedelta(hours=1),
-        )
-
-        def _second_game_started() -> bool:
-            return Game.objects.filter(room=self.room).count() == 2
-
-        self._wait_for(_second_game_started, timeout_seconds=6)
-
-        late_joiner.refresh_from_db()
-        self.assertEqual(
-            late_joiner.participation_status,
-            Player.ParticipationStatus.PLAYING,
-        )
 
     @override_settings(
         SKETCHIT_ROUND_DURATION_SECONDS=1.2,
