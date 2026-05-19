@@ -27,6 +27,7 @@ from channels.db import database_sync_to_async
 from channels.layers import get_channel_layer
 from channels.routing import URLRouter
 from channels.testing import WebsocketCommunicator
+from django.conf import settings
 from django.contrib.sessions.backends.db import SessionStore
 from django.test import Client
 from django.test import TransactionTestCase, override_settings
@@ -37,7 +38,7 @@ from games import runtime as game_runtime
 from games.models import Round
 from games.services import evaluate_guess_for_round, start_game_for_room
 from rooms.consumers import _room_group_name
-from rooms.models import Player, Room
+from rooms.models import Player, Room, RoomGameMode
 from rooms.services import leave_participant
 from words.models import Word, WordPack, WordPackEntry
 
@@ -145,6 +146,25 @@ def _join_room_via_http(*, join_code: str, display_name: str) -> tuple[int, byte
     response = client.post(
         f"/rooms/{join_code}/join/",
         data=json.dumps({"display_name": display_name}),
+        content_type="application/json",
+    )
+    return response.status_code, response.content
+
+
+@database_sync_to_async
+def _update_room_settings_via_http(
+    *,
+    join_code: str,
+    session_key: str,
+    payload: dict,
+) -> tuple[int, bytes]:
+    """Update room settings through HTTP using an existing session identity."""
+
+    client = Client()
+    client.cookies[settings.SESSION_COOKIE_NAME] = session_key
+    response = client.post(
+        f"/rooms/{join_code}/settings/",
+        data=json.dumps(payload),
         content_type="application/json",
     )
     return response.status_code, response.content
@@ -889,6 +909,7 @@ class RoomConsumerConnectTests(TransactionTestCase):
                 "join_code": self.room.join_code,
                 "visibility": self.room.visibility,
                 "status": self.room.status,
+                "game_mode": self.room.game_mode,
             },
         )
         self.assertEqual(
@@ -912,6 +933,46 @@ class RoomConsumerConnectTests(TransactionTestCase):
         )
 
         await communicator.disconnect()
+
+    async def test_settings_update_broadcasts_game_mode_to_connected_participant(self):
+        member_session_key = await _create_room_member(self.room.id, "Bob")
+        member_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(member_session_key),
+        )
+
+        await _connect_and_receive_initial_room_state(
+            member_socket,
+            self.room.join_code,
+        )
+        await _drain_output_queue_safe(member_socket)
+
+        status_code, response_content = await _update_room_settings_via_http(
+            join_code=self.room.join_code,
+            session_key=self.session_key,
+            payload={"game_mode": RoomGameMode.DUO},
+        )
+
+        self.assertEqual(status_code, 200, response_content)
+        room_state = await _receive_until_type(member_socket, "room.state")
+        self.assertEqual(room_state["type"], "room.state")
+        self.assertEqual(
+            room_state["payload"]["room"],
+            {
+                "name": self.room.name,
+                "join_code": self.room.join_code,
+                "visibility": self.room.visibility,
+                "status": self.room.status,
+                "game_mode": RoomGameMode.DUO,
+            },
+        )
+        self.assertEqual(
+            set(room_state["payload"]),
+            {"room", "host", "participants"},
+        )
+
+        await member_socket.disconnect()
 
     async def test_http_join_broadcasts_room_state_to_connected_peers(self):
         communicator = WebsocketCommunicator(

@@ -1,15 +1,19 @@
 import json
+import asyncio
 from threading import Event, Thread
 from datetime import timedelta
 from unittest.mock import patch
 
 import fakeredis
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
 from django.conf import settings
 from django.contrib.sessions.backends.db import SessionStore
 from django.core.exceptions import ValidationError
-from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase
+from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
+from core.realtime_groups import room_group_name
 from games import redis as game_redis
 from games.models import Game, GameWord, Round
 from rooms.models import MVP_DEFAULT_WORD_PACK_NAME, Player, Room, RoomGameMode
@@ -927,6 +931,7 @@ class RoomLobbyStateViewTests(TestCase):
                 "join_code": self.room.join_code,
                 "visibility": self.room.visibility,
                 "status": self.room.status,
+                "game_mode": self.room.game_mode,
             },
         )
         self.assertEqual(
@@ -1430,6 +1435,61 @@ class UpdateLobbySettingsTests(TestCase):
             content_type=content_type,
         )
 
+    async def _receive_channel_message_or_none(self, channel_layer, channel_name):
+        try:
+            return await asyncio.wait_for(
+                channel_layer.receive(channel_name),
+                timeout=0.05,
+            )
+        except asyncio.TimeoutError:
+            return None
+
+    def _watch_room_state_group(self):
+        channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.flush)()
+        test_channel = async_to_sync(channel_layer.new_channel)()
+        async_to_sync(channel_layer.group_add)(
+            room_group_name(self.room.join_code),
+            test_channel,
+        )
+        return channel_layer, test_channel
+
+    def _assert_no_room_state_broadcast(self, channel_layer, test_channel):
+        self.assertIsNone(
+            async_to_sync(self._receive_channel_message_or_none)(
+                channel_layer,
+                test_channel,
+            )
+        )
+
+    def _assert_rejected_update_does_not_broadcast(
+        self,
+        client,
+        payload,
+        *,
+        expected_status,
+    ):
+        channel_layer, test_channel = self._watch_room_state_group()
+        before_room = Room.objects.get(pk=self.room.pk)
+        before_values = {
+            "name": before_room.name,
+            "visibility": before_room.visibility,
+            "status": before_room.status,
+            "game_mode": before_room.game_mode,
+        }
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.post_update_settings(client, payload)
+
+        self.assertEqual(response.status_code, expected_status)
+        self._assert_no_room_state_broadcast(channel_layer, test_channel)
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.name, before_values["name"])
+        self.assertEqual(self.room.visibility, before_values["visibility"])
+        self.assertEqual(self.room.status, before_values["status"])
+        self.assertEqual(self.room.game_mode, before_values["game_mode"])
+        return response
+
     def test_host_can_update_settings(self):
         response = self.post_update_settings(
             self.host_client,
@@ -1448,6 +1508,7 @@ class UpdateLobbySettingsTests(TestCase):
                     "join_code": self.room.join_code,
                     "visibility": Room.Visibility.PRIVATE,
                     "status": Room.Status.LOBBY,
+                    "game_mode": RoomGameMode.NORMAL,
                 },
                 "host": {
                     "id": self.host_player.id,
@@ -1549,6 +1610,298 @@ class UpdateLobbySettingsTests(TestCase):
         self.room.refresh_from_db()
         self.assertEqual(self.room.name, "Quiet Room")
         self.assertEqual(self.room.visibility, Room.Visibility.PRIVATE)
+
+    def test_host_can_update_name_only(self):
+        response = self.post_update_settings(
+            self.host_client,
+            {"name": "Quiet Room"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.name, "Quiet Room")
+        self.assertEqual(self.room.visibility, Room.Visibility.PUBLIC)
+        self.assertEqual(self.room.game_mode, RoomGameMode.NORMAL)
+
+    def test_host_can_update_visibility_only(self):
+        response = self.post_update_settings(
+            self.host_client,
+            {"visibility": Room.Visibility.PRIVATE},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.name, "Friday Sketches")
+        self.assertEqual(self.room.visibility, Room.Visibility.PRIVATE)
+        self.assertEqual(self.room.game_mode, RoomGameMode.NORMAL)
+
+    def test_host_can_update_game_mode_with_only_game_mode_payload(self):
+        response = self.post_update_settings(
+            self.host_client,
+            {"game_mode": RoomGameMode.DUO},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.name, "Friday Sketches")
+        self.assertEqual(self.room.visibility, Room.Visibility.PUBLIC)
+        self.assertEqual(self.room.game_mode, RoomGameMode.DUO)
+        self.assertEqual(response.json()["room"]["game_mode"], RoomGameMode.DUO)
+
+    def test_empty_settings_payload_returns_clear_error_code(self):
+        response = self.post_update_settings(self.host_client, {})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["error_codes"]["settings"],
+            ["no_settings_fields"],
+        )
+
+    def test_unknown_only_settings_payload_returns_clear_error_code(self):
+        response = self.post_update_settings(
+            self.host_client,
+            {"word_pack": self.word_pack.id},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["error_codes"]["settings"],
+            ["no_settings_fields"],
+        )
+
+    def test_noop_settings_payload_succeeds_idempotently(self):
+        response = self.post_update_settings(
+            self.host_client,
+            {
+                "name": self.room.name,
+                "visibility": self.room.visibility,
+                "game_mode": self.room.game_mode,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["room"]["name"], self.room.name)
+        self.assertEqual(body["room"]["visibility"], self.room.visibility)
+        self.assertEqual(body["room"]["game_mode"], self.room.game_mode)
+
+    @override_settings(
+        CHANNEL_LAYERS={
+            "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
+        },
+    )
+    def test_empty_settings_payload_does_not_mutate_or_broadcast(self):
+        response = self._assert_rejected_update_does_not_broadcast(
+            self.host_client,
+            {},
+            expected_status=400,
+        )
+
+        self.assertEqual(
+            response.json()["error_codes"]["settings"],
+            ["no_settings_fields"],
+        )
+
+    @override_settings(
+        CHANNEL_LAYERS={
+            "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
+        },
+    )
+    def test_unknown_only_settings_payload_does_not_mutate_or_broadcast(self):
+        response = self._assert_rejected_update_does_not_broadcast(
+            self.host_client,
+            {"word_pack": self.word_pack.id},
+            expected_status=400,
+        )
+
+        self.assertEqual(
+            response.json()["error_codes"]["settings"],
+            ["no_settings_fields"],
+        )
+
+    @override_settings(
+        CHANNEL_LAYERS={
+            "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
+        },
+    )
+    def test_noop_settings_payload_does_not_mutate_or_broadcast(self):
+        self._assert_rejected_update_does_not_broadcast(
+            self.host_client,
+            {"game_mode": self.room.game_mode},
+            expected_status=200,
+        )
+
+    def test_member_cannot_update_game_mode(self):
+        response = self.post_update_settings(
+            self.member_client,
+            {"game_mode": RoomGameMode.DUO},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.game_mode, RoomGameMode.NORMAL)
+        self.assertEqual(
+            response.json()["detail"],
+            "Only the room host can update settings.",
+        )
+
+    @override_settings(
+        CHANNEL_LAYERS={
+            "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
+        },
+    )
+    def test_member_game_mode_update_does_not_mutate_or_broadcast(self):
+        self._assert_rejected_update_does_not_broadcast(
+            self.member_client,
+            {"game_mode": RoomGameMode.DUO},
+            expected_status=403,
+        )
+
+    def test_unknown_game_mode_returns_clear_error_code(self):
+        response = self.post_update_settings(
+            self.host_client,
+            {"game_mode": "arcade"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertIn("game_mode", data["errors"])
+        self.assertEqual(data["error_codes"]["game_mode"], ["invalid_game_mode"])
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.game_mode, RoomGameMode.NORMAL)
+
+    @override_settings(
+        CHANNEL_LAYERS={
+            "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
+        },
+    )
+    def test_unknown_game_mode_does_not_mutate_or_broadcast(self):
+        response = self._assert_rejected_update_does_not_broadcast(
+            self.host_client,
+            {"game_mode": "arcade"},
+            expected_status=400,
+        )
+
+        self.assertEqual(
+            response.json()["error_codes"]["game_mode"],
+            ["invalid_game_mode"],
+        )
+
+    def test_blank_game_mode_returns_clear_error_code(self):
+        response = self.post_update_settings(
+            self.host_client,
+            {"game_mode": ""},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["error_codes"]["game_mode"],
+            ["invalid_game_mode"],
+        )
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.game_mode, RoomGameMode.NORMAL)
+
+    def test_null_game_mode_returns_clear_error_code(self):
+        response = self.post_update_settings(
+            self.host_client,
+            {"game_mode": None},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["error_codes"]["game_mode"],
+            ["invalid_game_mode"],
+        )
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.game_mode, RoomGameMode.NORMAL)
+
+    @override_settings(
+        CHANNEL_LAYERS={
+            "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
+        },
+    )
+    def test_blank_game_mode_does_not_mutate_or_broadcast(self):
+        response = self._assert_rejected_update_does_not_broadcast(
+            self.host_client,
+            {"game_mode": ""},
+            expected_status=400,
+        )
+
+        self.assertEqual(
+            response.json()["error_codes"]["game_mode"],
+            ["invalid_game_mode"],
+        )
+
+    @override_settings(
+        CHANNEL_LAYERS={
+            "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
+        },
+    )
+    def test_null_game_mode_does_not_mutate_or_broadcast(self):
+        response = self._assert_rejected_update_does_not_broadcast(
+            self.host_client,
+            {"game_mode": None},
+            expected_status=400,
+        )
+
+        self.assertEqual(
+            response.json()["error_codes"]["game_mode"],
+            ["invalid_game_mode"],
+        )
+
+    def test_game_mode_cannot_be_updated_in_progress(self):
+        self.room.status = Room.Status.IN_PROGRESS
+        self.room.save(update_fields=["status"])
+
+        response = self.post_update_settings(
+            self.host_client,
+            {"game_mode": RoomGameMode.DUO},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["detail"],
+            "Room settings can only be updated while in the lobby.",
+        )
+        self.room.refresh_from_db()
+        self.assertEqual(self.room.game_mode, RoomGameMode.NORMAL)
+
+    @override_settings(
+        CHANNEL_LAYERS={
+            "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
+        },
+    )
+    def test_in_progress_game_mode_update_does_not_mutate_or_broadcast(self):
+        self.room.status = Room.Status.IN_PROGRESS
+        self.room.save(update_fields=["status"])
+
+        self._assert_rejected_update_does_not_broadcast(
+            self.host_client,
+            {"game_mode": RoomGameMode.DUO},
+            expected_status=409,
+        )
+
+    @override_settings(
+        CHANNEL_LAYERS={
+            "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
+        },
+    )
+    def test_update_settings_broadcasts_room_state_with_game_mode(self):
+        channel_layer, test_channel = self._watch_room_state_group()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.post_update_settings(
+                self.host_client,
+                {"game_mode": RoomGameMode.DUO},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        message = async_to_sync(channel_layer.receive)(test_channel)
+        self.assertEqual(message["type"], "room.server_event")
+        event = message["event"]
+        self.assertEqual(event["type"], "room.state")
+        self.assertEqual(event["payload"]["room"]["game_mode"], RoomGameMode.DUO)
+        self._assert_no_room_state_broadcast(channel_layer, test_channel)
 
     def test_update_settings_requires_json_body(self):
         response = self.post_update_settings(
