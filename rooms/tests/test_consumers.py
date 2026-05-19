@@ -1136,8 +1136,27 @@ class RoomConsumerConnectTests(TransactionTestCase):
 
         await drawer_socket.disconnect()
 
-        grace_state = await self._receive_until_type(observer_socket, "round.state")
-        self.assertEqual(grace_state["payload"]["status"], "drawer_disconnected_grace")
+        # The observer can still have an earlier ``round.state`` buffered from
+        # the game-start broadcast (status="drawing"), so we cannot accept the
+        # first matching event — that races against which player the runtime
+        # randomly picked as drawer. Skip stale round.state events until the
+        # drawer-disconnect grace one shows up.
+        grace_state = None
+        for _ in range(40):
+            try:
+                event = await observer_socket.receive_json_from(timeout=1)
+            except TimeoutError:
+                continue
+            if (
+                event.get("type") == "round.state"
+                and event["payload"].get("status") == "drawer_disconnected_grace"
+            ):
+                grace_state = event
+                break
+        self.assertIsNotNone(
+            grace_state,
+            "Observer did not receive a round.state with status=drawer_disconnected_grace",
+        )
         self.assertTrue(grace_state["payload"].get("drawer_disconnect_deadline_at"))
 
         round_status = None
