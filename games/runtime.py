@@ -728,16 +728,7 @@ def _leaderboard_timer_worker(
         teardown_room_runtime(join_code)
         return
 
-    result = complete_leaderboard_cooldown_for_room(game.room_id)
-    if result.restarted and result.next_round_id is not None:
-        # The restart transaction already scheduled the next round runtime on
-        # commit, so only the room.state broadcast belongs here.
-        schedule_room_state_broadcast_after_commit(
-            join_code=join_code,
-            room_id=game.room_id,
-        )
-        return
-
+    complete_leaderboard_cooldown_for_room(game.room_id)
     schedule_room_state_broadcast_after_commit(
         join_code=join_code,
         room_id=game.room_id,

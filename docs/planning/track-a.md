@@ -166,23 +166,22 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 
 ---
 
-#### A-08: Game Finish, Leaderboard Cooldown, And Auto-Restart
+#### A-08: Game Finish, Leaderboard Cooldown, And Return-To-Lobby
 **Priority**: Critical  
 **Phase**: P3 Full Game Rules  
 **Depends On**: `K-04`, `K-05`, `A-07`, `K-07`  
-**Impacts**: Complete room-owned game loop and replayability inside one room  
+**Impacts**: Complete room-owned game loop with manual replay inside one room  
 **Blocks**: `G-05`, `G-06`
 
 **Deliverables**:
-- Game completion detection
-- `20`-second leaderboard state
-- Automatic next-game start when players remain
-- Score reset between games
+- Game completion detection when the eligible drawer pool is exhausted
+- `20`-second authoritative leaderboard cooldown window after game finish
+- Automatic return to lobby after the cooldown; host manually starts the next game
 
-- [ ] Finish a game when the remaining eligible drawer pool is exhausted.
-- [ ] Cancel a game if all players leave during active play.
-- [ ] Publish the authoritative leaderboard window for `20` seconds after game finish.
-- [ ] Automatically start a fresh game with reset scores if players remain after the cooldown.
-- [ ] Keep room/game state transitions compatible with room cleanup and reconnect rules.
-- [ ] Add service and integration tests for finish, cancel, leaderboard, and auto-restart behavior.
-- [ ] Verification gate: one room can move from lobby through a completed game and into the next game automatically.
+- [x] Finish a game when the remaining eligible drawer pool is exhausted.
+- [x] Cancel a game if all players leave during active play.
+- [x] Publish the authoritative leaderboard window for `20` seconds after game finish.
+- [x] Return the room to `lobby` status after the cooldown so the host can manually start the next game.
+- [x] Keep room/game state transitions compatible with room cleanup and reconnect rules.
+- [x] Add service and integration tests for finish, cancel, leaderboard, and return-to-lobby behavior.
+- [x] Verification gate: one room can move from lobby through a completed game, hold the `20`-second leaderboard cooldown, and return to lobby ready for the host to start the next game.

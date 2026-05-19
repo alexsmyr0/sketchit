@@ -107,9 +107,6 @@ class LeaderboardSnapshot:
 @dataclass(frozen=True)
 class LeaderboardCooldownResult:
     room_status: str
-    restarted: bool
-    next_game_id: int | None
-    next_round_id: int | None
 
 
 MIN_GUESSER_SCORE = 20
@@ -728,12 +725,11 @@ def cancel_active_game_for_room(room_id: int) -> bool:
 
 @transaction.atomic
 def complete_leaderboard_cooldown_for_room(room_id: int) -> LeaderboardCooldownResult:
-    """Advance a finished room out of the A8 leaderboard cooldown.
+    """Return a finished room to the lobby after the A8 leaderboard cooldown.
 
-    This helper is intentionally conservative. It only restarts when the room
-    is still marked IN_PROGRESS and the latest game is FINISHED. That prevents
-    a stray timer callback from starting a new game after the room already
-    moved to lobby or empty_grace for some other reason.
+    Conservative on purpose: only acts when the room is still IN_PROGRESS and
+    the latest game is FINISHED, so a stray timer callback cannot drag a room
+    out of lobby or empty_grace.
     """
 
     locked_room = Room.objects.select_for_update().select_related("word_pack").get(pk=room_id)
@@ -749,29 +745,12 @@ def complete_leaderboard_cooldown_for_room(room_id: int) -> LeaderboardCooldownR
         or latest_game is None
         or latest_game.status != GameStatus.FINISHED
     ):
-        return LeaderboardCooldownResult(
-            room_status=locked_room.status,
-            restarted=False,
-            next_game_id=None,
-            next_round_id=None,
-        )
-
-    from rooms.services import promote_mid_game_spectators_to_players
-
-    # Mid-game joiners may still be marked SPECTATING when the leaderboard
-    # starts. Promote them before the restart eligibility check so the next
-    # game treats them exactly like the rest of the room.
-    promote_mid_game_spectators_to_players(room_id=locked_room.id)
+        return LeaderboardCooldownResult(room_status=locked_room.status)
 
     locked_room.status = Room.Status.LOBBY
     locked_room.save(update_fields=["status", "updated_at"])
 
-    return LeaderboardCooldownResult(
-        room_status=Room.Status.LOBBY,
-        restarted=False,
-        next_game_id=None,
-        next_round_id=None,
-    )
+    return LeaderboardCooldownResult(room_status=Room.Status.LOBBY)
 
 
 @transaction.atomic
