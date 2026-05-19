@@ -31,7 +31,7 @@ from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 
 from core.realtime_groups import player_group_name, room_group_name
-from rooms.models import Player, Room
+from rooms.models import Player, Room, RoomGameMode
 from rooms.services import connect_participant, disconnect_participant
 from rooms import redis as room_redis
 from games import redis as game_redis
@@ -106,6 +106,17 @@ def _room_group_name(join_code: str) -> str:
 def _player_group_name(join_code: str, player_id: int) -> str:
     """Return the per-player channel group for one room participant."""
     return player_group_name(join_code, player_id)
+
+
+def _parse_int(raw_value: object) -> int | None:
+    """Best-effort integer parsing for Redis-backed runtime fields."""
+
+    if raw_value in (None, ""):
+        return None
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        return None
 
 
 @database_sync_to_async
@@ -292,6 +303,8 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                 await self.send_json(event)
         elif message_type in ("drawing.stroke", "drawing.end_stroke", "drawing.clear"):
             await self._handle_drawing_event(content)
+        elif message_type == "cochat.message":
+            await self._handle_cochat_message(content)
         elif message_type == "guess.submit":
             await self._handle_guess_submission(content)
 
@@ -347,6 +360,93 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             self._suppress_next_room_state_broadcast = False
             return
         await self.send_json(server_event)
+
+    async def _handle_cochat_message(self, content: dict) -> None:
+        """Route a private drawer-pair chat message during an active duo round."""
+
+        target_player_id, round_id = await self._get_cochat_target()
+        if target_player_id is None or round_id is None:
+            await self._send_cochat_error(
+                "Co-chat is only available to the active drawer pair during a duo round."
+            )
+            return
+
+        payload = content.get("payload", {})
+        text = payload.get("text") if isinstance(payload, dict) else None
+        if not isinstance(text, str) or not text.strip():
+            await self._send_cochat_error(
+                "Co-chat messages must include non-empty text."
+            )
+            return
+
+        await self.channel_layer.group_send(
+            _player_group_name(self.join_code, target_player_id),
+            {
+                "type": "room.server_event",
+                "event": {
+                    "type": "cochat.message",
+                    "payload": {
+                        "round_id": round_id,
+                        "sender_player_id": self.player.id,
+                        "sender_nickname": self.player.display_name,
+                        "text": text,
+                        "server_timestamp": timezone.now().isoformat(),
+                    },
+                },
+            },
+        )
+
+    async def _send_cochat_error(self, message: str) -> None:
+        """Emit a server-side co-chat rejection event to the sending socket."""
+
+        await self.send_json({
+            "type": "cochat.error",
+            "payload": {
+                "message": message,
+                "server_timestamp": timezone.now().isoformat(),
+            },
+        })
+
+    @database_sync_to_async
+    def _get_cochat_target(self) -> tuple[int | None, int | None]:
+        """Return the paired drawer recipient for a co-chat send, if allowed."""
+
+        turn_state = game_redis.get_turn_state(get_redis_client(), self.join_code)
+        if turn_state.get("phase") != "round":
+            return None, None
+
+        round_id = _parse_int(turn_state.get("round_id"))
+        drawer_participant_id = _parse_int(turn_state.get("drawer_participant_id"))
+        second_drawer_participant_id = _parse_int(
+            turn_state.get("second_drawer_participant_id")
+        )
+        if (
+            round_id is None
+            or drawer_participant_id is None
+            or second_drawer_participant_id is None
+        ):
+            return None, None
+
+        if not Player.objects.filter(
+            pk=self.player.id,
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+        ).exists():
+            return None, None
+
+        if not Round.objects.filter(
+            pk=round_id,
+            status__isnull=True,
+            game__game_mode=RoomGameMode.DUO,
+        ).exists():
+            return None, None
+
+        if self.player.id == drawer_participant_id:
+            return second_drawer_participant_id, round_id
+        if self.player.id == second_drawer_participant_id:
+            return drawer_participant_id, round_id
+
+        return None, None
 
     @database_sync_to_async
     def _is_active_drawer(self) -> bool:

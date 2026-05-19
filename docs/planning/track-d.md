@@ -118,14 +118,14 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 - Hard rejection of `cochat.message` traffic in `normal`-mode rounds
 - Runtime-only chat state with no persistence and no inclusion in canvas snapshots
 
-- [ ] Accept `cochat.message` only from participants who are the current drawer or second drawer for the active duo round.
-- [ ] Route accepted messages only to the other drawer in the pair; the sender may echo locally without involving the server.
-- [ ] Reject `cochat.message` submissions from guessers, spectators, and disconnected drawers with a server-side error event.
-- [ ] Reject `cochat.message` submissions in `normal`-mode rounds with the same error event.
-- [ ] Keep chat content out of any persistent storage and out of the canvas snapshot.
-- [ ] Clear any in-memory co-chat state when the round or game ends.
-- [ ] Add consumer tests for routing isolation, non-drawer rejection, normal-mode rejection, and round-end cleanup.
-- [ ] Verification gate: the drawer pair can chat live and no guesser client ever receives a `cochat.message` event.
+- [x] Accept `cochat.message` only from participants who are the current drawer or second drawer for the active duo round.
+- [x] Route accepted messages only to the other drawer in the pair; the sender may echo locally without involving the server.
+- [x] Reject `cochat.message` submissions from guessers, spectators, and disconnected drawers with a server-side error event.
+- [x] Reject `cochat.message` submissions in `normal`-mode rounds with the same error event.
+- [x] Keep chat content out of any persistent storage and out of the canvas snapshot.
+- [x] Clear any in-memory co-chat state when the round or game ends.
+- [x] Add consumer tests for routing isolation, non-drawer rejection, normal-mode rejection, and round-end cleanup.
+- [x] Verification gate: the drawer pair can chat live and no guesser client ever receives a `cochat.message` event.
 
 ---
 

@@ -34,10 +34,12 @@ from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 
 from config.routing import websocket_urlpatterns
+from games import redis as game_redis
 from games import runtime as game_runtime
 from games.models import Round
 from games.services import evaluate_guess_for_round, start_game_for_room
 from rooms.consumers import _room_group_name
+from rooms import redis as room_redis
 from rooms.models import Player, Room, RoomGameMode
 from rooms.services import leave_participant
 from words.models import Word, WordPack, WordPackEntry
@@ -116,11 +118,22 @@ def _end_round_by_correct_guess(round_id: int) -> None:
             created_at__lte=round.started_at,
         )
         .exclude(pk=round.drawer_participant_id)
+        .exclude(pk=round.second_drawer_participant_id)
         .order_by("created_at", "id")
         .first()
     )
     assert guesser is not None
     evaluate_guess_for_round(round, guesser, round.selected_game_word.text)
+
+
+@database_sync_to_async
+def _submit_correct_guess_for_player(round_id: int, player_id: int) -> bool:
+    """Evaluate one correct guess for a specific participant."""
+
+    round = Round.objects.select_related("selected_game_word").get(pk=round_id)
+    player = Player.objects.get(pk=player_id)
+    result = evaluate_guess_for_round(round, player, round.selected_game_word.text)
+    return result.round_completed
 
 
 @database_sync_to_async
@@ -412,6 +425,71 @@ class RoomConsumerConnectTests(TransactionTestCase):
         room_state = await self._receive_until_type(communicator, "room.state")
         self.assertEqual(room_state["payload"]["room"]["join_code"], self.room.join_code)
         return room_state
+
+    async def _set_room_game_mode(self, game_mode: str) -> None:
+        await database_sync_to_async(Room.objects.filter(pk=self.room.pk).update)(
+            game_mode=game_mode,
+        )
+
+    async def _start_round_with_connected_players(
+        self,
+        *,
+        game_mode: str,
+        extra_names: list[str],
+    ) -> tuple[int, dict, dict[int, WebsocketCommunicator], dict[int, str]]:
+        await self._set_room_game_mode(game_mode)
+
+        session_keys_by_player_id = {self.player.id: self.session_key}
+        for display_name in extra_names:
+            session_key = await _create_room_member(self.room.id, display_name)
+            player = await database_sync_to_async(Player.objects.get)(
+                room=self.room,
+                session_key=session_key,
+            )
+            session_keys_by_player_id[player.id] = session_key
+
+        communicators_by_player_id: dict[int, WebsocketCommunicator] = {}
+        for player_id, session_key in session_keys_by_player_id.items():
+            communicator = WebsocketCommunicator(
+                _TEST_APP,
+                _ws_url(self.room.join_code),
+                headers=_session_headers(session_key),
+            )
+            communicators_by_player_id[player_id] = communicator
+            await _connect_and_receive_initial_room_state(
+                communicator,
+                self.room.join_code,
+            )
+
+        for communicator in communicators_by_player_id.values():
+            await _drain_output_queue_safe(communicator)
+
+        round_id = await _start_game(self.room.id)
+        first_communicator = next(iter(communicators_by_player_id.values()))
+        round_started = await self._receive_until_type(first_communicator, "round.started")
+
+        await asyncio.sleep(0.05)
+        for communicator in communicators_by_player_id.values():
+            await _drain_output_queue_safe(communicator)
+
+        return (
+            round_id,
+            round_started,
+            communicators_by_player_id,
+            session_keys_by_player_id,
+        )
+
+    async def _disconnect_communicators(
+        self,
+        communicators_by_player_id: dict[int, WebsocketCommunicator],
+    ) -> None:
+        for communicator in communicators_by_player_id.values():
+            try:
+                await communicator.disconnect()
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                continue
 
     async def test_connect_accepts_valid_room_member(self):
         communicator = WebsocketCommunicator(
@@ -1395,6 +1473,285 @@ class RoomConsumerConnectTests(TransactionTestCase):
         )
 
         await reconnect_socket.disconnect()
+
+    @override_settings(
+        SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True,
+        SKETCHIT_ROUND_DURATION_SECONDS=60,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=10,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=60,
+    )
+    async def test_duo_cochat_routes_only_to_partner_and_skips_snapshot_storage(self):
+        (
+            round_id,
+            round_started,
+            communicators,
+            _session_keys,
+        ) = await self._start_round_with_connected_players(
+            game_mode=RoomGameMode.DUO,
+            extra_names=["Bob", "Charlie"],
+        )
+
+        try:
+            sender_id = round_started["payload"]["drawer_participant_id"]
+            recipient_id = round_started["payload"]["second_drawer_participant_id"]
+            self.assertIsNotNone(sender_id)
+            self.assertIsNotNone(recipient_id)
+
+            guesser_id = next(
+                player_id
+                for player_id in communicators
+                if player_id not in {sender_id, recipient_id}
+            )
+
+            await communicators[sender_id].send_json_to({
+                "type": "cochat.message",
+                "payload": {"text": "Draw the fins bigger."},
+            })
+
+            recipient_message = await communicators[recipient_id].receive_json_from(timeout=1)
+            self.assertEqual(recipient_message["type"], "cochat.message")
+            self.assertEqual(recipient_message["payload"]["round_id"], round_id)
+            self.assertEqual(recipient_message["payload"]["sender_player_id"], sender_id)
+            self.assertEqual(
+                recipient_message["payload"]["sender_nickname"],
+                round_started["payload"]["drawer_nickname"],
+            )
+            self.assertEqual(
+                recipient_message["payload"]["text"],
+                "Draw the fins bigger.",
+            )
+            self.assertTrue(recipient_message["payload"]["server_timestamp"])
+
+            self.assertTrue(await communicators[sender_id].receive_nothing(timeout=0.2))
+            self.assertTrue(await communicators[guesser_id].receive_nothing(timeout=0.2))
+            self.assertEqual(
+                room_redis.get_canvas_snapshot(self.fake_redis, self.room.join_code),
+                [],
+            )
+            self.assertEqual(
+                list(self.fake_redis.scan_iter(match=f"room:{self.room.join_code}:*cochat*")),
+                [],
+            )
+        finally:
+            await self._disconnect_communicators(communicators)
+
+    @override_settings(
+        SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True,
+        SKETCHIT_ROUND_DURATION_SECONDS=60,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=10,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=60,
+    )
+    async def test_duo_cochat_rejects_guessers_and_spectators(self):
+        (
+            _round_id,
+            round_started,
+            communicators,
+            _session_keys,
+        ) = await self._start_round_with_connected_players(
+            game_mode=RoomGameMode.DUO,
+            extra_names=["Bob", "Charlie"],
+        )
+        spectator_socket = None
+
+        @database_sync_to_async
+        def _create_spectator_session_and_player() -> tuple[str, int]:
+            spectator_session = SessionStore()
+            spectator_session.save()
+            spectator = Player.objects.create(
+                room=self.room,
+                session_key=spectator_session.session_key,
+                display_name="Spectator",
+                participation_status=Player.ParticipationStatus.SPECTATING,
+                session_expires_at=spectator_session.get_expiry_date(),
+            )
+            return spectator_session.session_key, spectator.id
+
+        try:
+            drawer_ids = {
+                round_started["payload"]["drawer_participant_id"],
+                round_started["payload"]["second_drawer_participant_id"],
+            }
+            guesser_id = next(
+                player_id
+                for player_id in communicators
+                if player_id not in drawer_ids
+            )
+
+            await communicators[guesser_id].send_json_to({
+                "type": "cochat.message",
+                "payload": {"text": "I should not be able to send this."},
+            })
+            guesser_error = await communicators[guesser_id].receive_json_from(timeout=1)
+            self.assertEqual(guesser_error["type"], "cochat.error")
+            self.assertEqual(
+                guesser_error["payload"]["message"],
+                "Co-chat is only available to the active drawer pair during a duo round.",
+            )
+
+            spectator_session_key, spectator_id = await _create_spectator_session_and_player()
+            spectator_socket = WebsocketCommunicator(
+                _TEST_APP,
+                _ws_url(self.room.join_code),
+                headers=_session_headers(spectator_session_key),
+            )
+            communicators[spectator_id] = spectator_socket
+            await _connect_and_drain_initial_sync(
+                spectator_socket,
+                self.room.join_code,
+                expects_game_active=True,
+            )
+            for player_id, communicator in communicators.items():
+                if player_id == spectator_id:
+                    continue
+                await _drain_output_queue_safe(communicator)
+
+            await spectator_socket.send_json_to({
+                "type": "cochat.message",
+                "payload": {"text": "Spectators cannot chat either."},
+            })
+            spectator_error = await spectator_socket.receive_json_from(timeout=1)
+            self.assertEqual(spectator_error["type"], "cochat.error")
+            self.assertEqual(
+                spectator_error["payload"]["message"],
+                "Co-chat is only available to the active drawer pair during a duo round.",
+            )
+
+            for drawer_id in drawer_ids:
+                self.assertTrue(await communicators[drawer_id].receive_nothing(timeout=0.2))
+        finally:
+            await self._disconnect_communicators(communicators)
+
+    @override_settings(
+        SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True,
+        SKETCHIT_ROUND_DURATION_SECONDS=60,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=10,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=60,
+    )
+    async def test_normal_round_cochat_rejects_active_drawer(self):
+        (
+            _round_id,
+            round_started,
+            communicators,
+            _session_keys,
+        ) = await self._start_round_with_connected_players(
+            game_mode=RoomGameMode.NORMAL,
+            extra_names=["Bob"],
+        )
+
+        try:
+            drawer_id = round_started["payload"]["drawer_participant_id"]
+            guesser_id = next(
+                player_id
+                for player_id in communicators
+                if player_id != drawer_id
+            )
+
+            await communicators[drawer_id].send_json_to({
+                "type": "cochat.message",
+                "payload": {"text": "Normal mode should reject this."},
+            })
+            error = await communicators[drawer_id].receive_json_from(timeout=1)
+            self.assertEqual(error["type"], "cochat.error")
+            self.assertEqual(
+                error["payload"]["message"],
+                "Co-chat is only available to the active drawer pair during a duo round.",
+            )
+            self.assertTrue(await communicators[guesser_id].receive_nothing(timeout=0.2))
+        finally:
+            await self._disconnect_communicators(communicators)
+
+    @override_settings(
+        SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True,
+        SKETCHIT_ROUND_DURATION_SECONDS=60,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=10,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=60,
+    )
+    async def test_duo_cochat_is_not_replayed_after_round_end_and_is_rejected_in_intermission(self):
+        (
+            round_id,
+            round_started,
+            communicators,
+            session_keys,
+        ) = await self._start_round_with_connected_players(
+            game_mode=RoomGameMode.DUO,
+            extra_names=["Bob", "Charlie"],
+        )
+        reconnect_socket = None
+
+        try:
+            sender_id = round_started["payload"]["drawer_participant_id"]
+            recipient_id = round_started["payload"]["second_drawer_participant_id"]
+            self.assertIsNotNone(sender_id)
+            self.assertIsNotNone(recipient_id)
+            drawer_ids = {sender_id, recipient_id}
+            guesser_id = next(
+                player_id
+                for player_id in communicators
+                if player_id not in drawer_ids
+            )
+
+            await communicators[sender_id].send_json_to({
+                "type": "cochat.message",
+                "payload": {"text": "Let us split the wings."},
+            })
+            first_delivery = await communicators[recipient_id].receive_json_from(timeout=1)
+            self.assertEqual(first_delivery["type"], "cochat.message")
+            self.assertEqual(first_delivery["payload"]["text"], "Let us split the wings.")
+
+            # D-06 has not landed yet, so the current duo runtime still treats
+            # the second drawer as part of the eligible-guesser set. Drive the
+            # round to completion using the behavior that exists today so this
+            # test can focus on D-05 cleanup semantics.
+            self.assertFalse(await _submit_correct_guess_for_player(round_id, guesser_id))
+            self.assertTrue(await _submit_correct_guess_for_player(round_id, recipient_id))
+            entered_intermission = False
+            for _ in range(40):
+                turn_state = game_redis.get_turn_state(self.fake_redis, self.room.join_code)
+                if (
+                    turn_state.get("phase") == "intermission"
+                    and turn_state.get("round_id") == str(round_id)
+                ):
+                    entered_intermission = True
+                    break
+                await asyncio.sleep(0.05)
+            self.assertTrue(entered_intermission)
+
+            await communicators[recipient_id].disconnect()
+            communicators.pop(recipient_id)
+
+            reconnect_socket = WebsocketCommunicator(
+                _TEST_APP,
+                _ws_url(self.room.join_code),
+                headers=_session_headers(session_keys[recipient_id]),
+            )
+            reconnect_events = await _connect_and_drain_initial_sync(
+                reconnect_socket,
+                self.room.join_code,
+                expects_game_active=True,
+            )
+            self.assertFalse(
+                any(event.get("type") == "cochat.message" for event in reconnect_events)
+            )
+
+            await reconnect_socket.send_json_to({
+                "type": "cochat.message",
+                "payload": {"text": "This should fail after the round ends."},
+            })
+            intermission_error = await reconnect_socket.receive_json_from(timeout=1)
+            self.assertEqual(intermission_error["type"], "cochat.error")
+            self.assertEqual(
+                intermission_error["payload"]["message"],
+                "Co-chat is only available to the active drawer pair during a duo round.",
+            )
+        finally:
+            if reconnect_socket is not None:
+                try:
+                    await reconnect_socket.disconnect()
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+            await self._disconnect_communicators(communicators)
 
     async def test_spectator_cannot_submit_guess(self):
         # A-07: a mid-game joiner (SPECTATING) must receive a guess.error with
