@@ -215,6 +215,77 @@ class IsPresentTests(SimpleTestCase):
         self.assertFalse(room_redis.is_present(client, JOIN_CODE, SESSION_A))
 
 
+class IsConnectionPresentTests(SimpleTestCase):
+    def test_is_connection_present_returns_true_for_registered_socket(self):
+        client = make_client()
+        room_redis.add_presence(
+            client,
+            JOIN_CODE,
+            SESSION_A,
+            connection_id="chan-1",
+        )
+
+        self.assertTrue(
+            room_redis.is_connection_present(
+                client,
+                JOIN_CODE,
+                SESSION_A,
+                "chan-1",
+            )
+        )
+
+    def test_is_connection_present_returns_false_for_stale_socket(self):
+        client = make_client()
+        room_redis.add_presence(
+            client,
+            JOIN_CODE,
+            SESSION_A,
+            connection_id="chan-1",
+        )
+        room_redis.add_presence(
+            client,
+            JOIN_CODE,
+            SESSION_A,
+            connection_id="chan-2",
+        )
+        room_redis.remove_presence(
+            client,
+            JOIN_CODE,
+            SESSION_A,
+            connection_id="chan-1",
+        )
+
+        self.assertTrue(room_redis.is_present(client, JOIN_CODE, SESSION_A))
+        self.assertFalse(
+            room_redis.is_connection_present(
+                client,
+                JOIN_CODE,
+                SESSION_A,
+                "chan-1",
+            )
+        )
+        self.assertTrue(
+            room_redis.is_connection_present(
+                client,
+                JOIN_CODE,
+                SESSION_A,
+                "chan-2",
+            )
+        )
+
+    def test_is_connection_present_returns_false_when_session_absent(self):
+        client = make_client()
+
+        self.assertFalse(
+            room_redis.is_connection_present(
+                client,
+                JOIN_CODE,
+                SESSION_A,
+                "chan-1",
+            )
+        )
+
+
 class ClearPresenceTests(SimpleTestCase):
     def test_clear_presence_removes_the_entire_set(self):
         client = make_client()
