@@ -51,26 +51,21 @@ class UpdateLobbySettingsForm(forms.Form):
     visibility = forms.ChoiceField(choices=Room.Visibility.choices, required=False)
     game_mode = forms.ChoiceField(choices=RoomGameMode.choices, required=False)
 
-    def clean_name(self):
-        name = self.cleaned_data["name"]
-        if "name" in self.data and not name:
-            raise forms.ValidationError("This field is required.", code="required")
-        return name
-
-    def clean_visibility(self):
-        visibility = self.cleaned_data["visibility"]
-        if "visibility" in self.data and not visibility:
-            raise forms.ValidationError("This field is required.", code="required")
-        return visibility
-
-    def clean_game_mode(self):
-        game_mode = self.cleaned_data["game_mode"]
-        if "game_mode" in self.data and not game_mode:
-            raise forms.ValidationError("This field is required.", code="required")
-        return game_mode
+    def clean(self):
+        cleaned_data = super().clean()
+        for field_name in self.fields:
+            if field_name in self.data and not cleaned_data.get(field_name):
+                if field_name not in self._errors:
+                    self.add_error(
+                        field_name,
+                        forms.ValidationError(
+                            "This field is required.", code="required"
+                        ),
+                    )
+        return cleaned_data
 
 
-LOBBY_SETTINGS_FIELDS = frozenset({"name", "visibility", "game_mode"})
+LOBBY_SETTINGS_FIELDS = frozenset(UpdateLobbySettingsForm.base_fields)
 
 
 def _get_room_runtime_redis_client() -> redis.Redis:
@@ -114,14 +109,20 @@ def _parse_json_payload(request):
     return payload, None
 
 
+_LOBBY_FIELD_ERROR_CODES = {
+    field: f"invalid_{field}" for field in LOBBY_SETTINGS_FIELDS
+}
+
+
 def _build_form_error_response(form):
     error_codes = {}
     for field_name, errors in form.errors.as_data().items():
+        canonical_code = _LOBBY_FIELD_ERROR_CODES.get(field_name)
         error_codes[field_name] = [
             (
-                "invalid_game_mode"
-                if field_name == "game_mode"
-                and error.code in {"invalid_choice", "required"}
+                canonical_code
+                if canonical_code is not None
+                and error.code in {"invalid_choice", "required", "min_length", "max_length"}
                 else error.code
             )
             for error in errors
@@ -626,18 +627,12 @@ def update_lobby_settings(request, join_code):
                 setattr(room, field_name, new_value)
                 update_fields.append(field_name)
 
-    if not update_fields:
-        return _build_settings_error_response(
-            code="empty_settings_update",
-            message="At least one room setting must change.",
+    if update_fields:
+        room.save(update_fields=[*update_fields, "updated_at"])
+        schedule_room_state_broadcast_after_commit(
+            join_code=room.join_code,
+            room_id=room.id,
         )
-
-    room.save(update_fields=[*update_fields, "updated_at"])
-
-    schedule_room_state_broadcast_after_commit(
-        join_code=room.join_code,
-        room_id=room.id,
-    )
 
     return _build_room_lobby_state_response(room)
 

@@ -1669,7 +1669,7 @@ class UpdateLobbySettingsTests(TestCase):
             ["no_settings_fields"],
         )
 
-    def test_noop_settings_payload_returns_clear_error_code(self):
+    def test_noop_settings_payload_succeeds_idempotently(self):
         response = self.post_update_settings(
             self.host_client,
             {
@@ -1679,11 +1679,11 @@ class UpdateLobbySettingsTests(TestCase):
             },
         )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(
-            response.json()["error_codes"]["settings"],
-            ["empty_settings_update"],
-        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["room"]["name"], self.room.name)
+        self.assertEqual(body["room"]["visibility"], self.room.visibility)
+        self.assertEqual(body["room"]["game_mode"], self.room.game_mode)
 
     @override_settings(
         CHANNEL_LAYERS={
@@ -1725,15 +1725,10 @@ class UpdateLobbySettingsTests(TestCase):
         },
     )
     def test_noop_settings_payload_does_not_mutate_or_broadcast(self):
-        response = self._assert_rejected_update_does_not_broadcast(
+        self._assert_rejected_update_does_not_broadcast(
             self.host_client,
             {"game_mode": self.room.game_mode},
-            expected_status=400,
-        )
-
-        self.assertEqual(
-            response.json()["error_codes"]["settings"],
-            ["empty_settings_update"],
+            expected_status=200,
         )
 
     def test_member_cannot_update_game_mode(self):
