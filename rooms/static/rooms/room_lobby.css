@@ -34,6 +34,54 @@ body {
     box-sizing: border-box;
     max-width: 1800px;          /* wider container → bigger 1fr canvas column */
     padding: 9rem 2rem 1.5rem;  /* top clears fixed header */
+    height: 100vh;              /* lock to viewport so canvas/feed can't push content under fixed header */
+    max-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.lobby-container.game-active .game-main {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.lobby-container.game-active .game-grid {
+    flex: 1;
+    min-height: 0;
+    grid-template-rows: 1fr;
+}
+
+/* In viewport-fit mode, canvas sizes by available height instead of 4:3 aspect.
+   Coordinates are normalized 0..1 on the wire (see resizeDrawingCanvas) so all
+   clients still see strokes in matching relative positions. */
+.lobby-container.game-active .game-center {
+    align-self: stretch;
+    height: 100%;
+    min-height: 0;
+}
+
+.lobby-container.game-active .canvas-container {
+    aspect-ratio: auto;
+    flex: 1;
+    min-height: 0;
+    height: auto;
+}
+
+/* Mobile / narrow viewports fall back to natural scroll — explicit override
+   so the 100vh lock above doesn't squash content on small screens. */
+@media (max-width: 1024px) {
+    .lobby-container.game-active {
+        height: auto;
+        max-height: none;
+        overflow: visible;
+    }
+    .lobby-container.game-active .canvas-container {
+        aspect-ratio: 4 / 3;
+        flex: 0 0 auto;
+    }
 }
 
 .lobby-header {
@@ -305,16 +353,23 @@ body {
     }
 }
 
-/* Guess Feed */
+/* Guess Feed — outer column hosts two stacked card panels (Guesses + Drawer Chat). */
 .game-feed {
     display: flex;
     flex-direction: column;
     gap: 1rem;
+    min-height: 0;   /* lets grid constrain height; enables overflow-y scroll chain */
+}
+
+.feed-card {
     background: var(--card-bg);
     border-radius: var(--radius);
     box-shadow: var(--shadow);
     overflow: hidden;
-    min-height: 0;   /* lets grid constrain height; enables overflow-y scroll chain */
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    min-height: 0;
 }
 
 .feed-container {
@@ -323,6 +378,7 @@ body {
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    min-height: 0;
 }
 
 .feed-container h3 {
@@ -954,19 +1010,31 @@ body {
     font-weight: 500;
 }
 
+/* Drawer-only chat panel: rendered as a sibling card under Guesses inside .game-feed.
+   Card styling mirrors .feed-card so both panels look identical and split the
+   feed column 50/50 when visible. */
 .cochat-panel {
-    border-top: 1px solid #f1f2f6;
-    padding: 1rem 1.5rem;
-    background: #fdf4ff;
-    display: flex;
+    background: var(--card-bg);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    display: none;
     flex-direction: column;
-    gap: 0.5rem;
-    max-height: 220px;
+    flex: 1 1 0;
+    min-height: 0;
+}
+
+/* Author-level override of UA [hidden]{display:none}: required because the
+   base rule above sets display:none already, but if any future style sets
+   display:flex on .cochat-panel directly, the :not([hidden]) gate keeps the
+   `hidden` attribute authoritative for guesser-side visibility. */
+.cochat-panel:not([hidden]) {
+    display: flex;
 }
 
 .cochat-panel h3 {
-    margin: 0;
-    font-size: 0.95rem;
+    margin: 0 0 0.5rem;
+    font-size: 1.1rem;
     color: var(--accent-primary);
 }
 
@@ -979,7 +1047,7 @@ body {
     display: flex;
     flex-direction: column;
     gap: 0.25rem;
-    max-height: 120px;
+    min-height: 0;
 }
 
 .cochat-message {
@@ -1000,13 +1068,16 @@ body {
 }
 
 .cochat-input-group {
+    padding: 1.5rem;
+    background: #fafafa;
+    border-top: 1px solid #f1f2f6;
     display: flex;
     gap: 0.5rem;
 }
 
 .cochat-input-group input {
     flex-grow: 1;
-    padding: 0.5rem;
+    padding: 0.75rem;
     border: 1px solid #dfe6e9;
     border-radius: 8px;
     font-family: inherit;

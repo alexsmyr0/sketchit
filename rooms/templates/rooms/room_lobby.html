@@ -180,25 +180,30 @@
                 </div>
 
                 <aside class="game-feed">
-                    <div class="feed-container">
-                        <h3>Guesses</h3>
-                        <ul id="guess-history" class="guess-history">
-                            <!-- Populated by JS -->
-                        </ul>
+                    <div class="feed-card">
+                        <div class="feed-container">
+                            <h3>Guesses</h3>
+                            <ul id="guess-history" class="guess-history">
+                                <!-- Populated by JS -->
+                            </ul>
+                        </div>
+
+                        <div id="guess-input-container" class="guess-input-group">
+                            <input id="guess-input" type="text" placeholder="Type your guess here..." autocomplete="off">
+                            <button id="submit-guess-button" class="icon-button">Send</button>
+                        </div>
                     </div>
 
                     <div id="cochat-panel" class="cochat-panel" hidden>
-                        <h3>Drawer Chat</h3>
-                        <ul id="cochat-history" class="cochat-history"></ul>
+                        <div class="feed-container">
+                            <h3>Drawer Chat</h3>
+                            <ul id="cochat-history" class="cochat-history"></ul>
+                        </div>
+
                         <div id="cochat-input-group" class="cochat-input-group">
                             <input id="cochat-input" type="text" maxlength="280" placeholder="Chat with your fellow drawer..." autocomplete="off">
                             <button id="cochat-send-button" type="button" class="icon-button">Send</button>
                         </div>
-                    </div>
-
-                    <div id="guess-input-container" class="guess-input-group">
-                        <input id="guess-input" type="text" placeholder="Type your guess here..." autocomplete="off">
-                        <button id="submit-guess-button" class="icon-button">Send</button>
                     </div>
                 </aside>
             </div>
