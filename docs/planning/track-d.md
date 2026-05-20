@@ -190,14 +190,14 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 - Drawer-only co-chat panel rendered only for participants who are one of the two current drawers
 - Shared canvas surface that accepts input from the local client whenever it is either of the two current drawers
 
-- [ ] Add a host-only `game_mode` dropdown to the lobby settings UI with `normal` and `duo` options.
-- [ ] Disable the dropdown for non-host participants and outside `lobby` status.
-- [ ] Render the currently selected mode for all participants in the lobby and update it live on `room.state` events.
-- [ ] In duo rounds, label both drawers in the gameplay HUD and treat both as active drawing roles in the UI.
-- [ ] Render the drawer-only co-chat panel only for participants who are either current drawer in a duo round and hide it for everyone else.
-- [ ] Wire client-side `cochat.message` send and receive over the existing room socket.
-- [ ] Ensure the canvas surface accepts local input whenever the local client is one of the two current drawers.
-- [ ] Add front-end coverage for the lobby dropdown gating rule and the co-chat panel visibility rule.
+- [x] Add a host-only `game_mode` dropdown to the lobby settings UI with `normal` and `duo` options.
+- [x] Disable the dropdown for non-host participants and outside `lobby` status.
+- [x] Render the currently selected mode for all participants in the lobby and update it live on `room.state` events.
+- [x] In duo rounds, label both drawers in the gameplay HUD and treat both as active drawing roles in the UI.
+- [x] Render the drawer-only co-chat panel only for participants who are either current drawer in a duo round and hide it for everyone else.
+- [x] Wire client-side `cochat.message` send and receive over the existing room socket.
+- [x] Ensure the canvas surface accepts local input whenever the local client is one of the two current drawers.
+- [x] Add front-end coverage for the lobby dropdown gating rule and the co-chat panel visibility rule.
 - [ ] Verification gate: in a live test session, two drawers see and use the co-chat panel and shared canvas while guessers see only the shared canvas and never the chat.
 
 ---

@@ -19,6 +19,9 @@ class LobbyClient {
             settingsForm: document.getElementById('settings-form'),
             editRoomName: document.getElementById('edit-room-name'),
             editVisibility: document.getElementById('edit-visibility'),
+            editGameMode: document.getElementById('edit-game-mode'),
+            lobbyModeDisplay: document.getElementById('lobby-mode-display'),
+            lobbyModeValue: document.getElementById('lobby-mode-value'),
             startGameButton: document.getElementById('start-game-button'),
             leaveRoomButton: document.getElementById('leave-room-button'),
             minPlayersHint: document.getElementById('min-players-hint'),
@@ -37,6 +40,7 @@ class LobbyClient {
             gameParticipantList: document.getElementById('game-participant-list'),
             wordDisplay: document.getElementById('word-display'),
             drawerHint: document.getElementById('drawer-hint'),
+            drawerPairLabel: document.getElementById('drawer-pair-label'),
             canvasContainer: document.querySelector('.canvas-container'),
             drawingCanvas: document.getElementById('drawing-canvas'),
             drawingToolbar: document.getElementById('drawing-toolbar'),
@@ -49,6 +53,12 @@ class LobbyClient {
             guessInput: document.getElementById('guess-input'),
             guessInputContainer: document.getElementById('guess-input-container'),
             submitGuessButton: document.getElementById('submit-guess-button'),
+
+            // Drawer-pair co-chat (duo mode only)
+            cochatPanel: document.getElementById('cochat-panel'),
+            cochatHistory: document.getElementById('cochat-history'),
+            cochatInput: document.getElementById('cochat-input'),
+            cochatSendButton: document.getElementById('cochat-send-button'),
 
             // Invite widget (hidden in game mode — game-top-bar takes over)
             inviteWidget: document.getElementById('invite-widget'),
@@ -88,6 +98,11 @@ class LobbyClient {
         this.isAwaitingStartRoomState = false;
         this.isDrawer = false;
         this.isSpectator = false;
+        this.currentGameMode = 'normal';
+        this.primaryDrawerId = null;
+        this.primaryDrawerName = null;
+        this.secondDrawerId = null;
+        this.secondDrawerName = null;
         this.activeRoundId = null;
         this.currentPhase = null;
         this.roundDuration = null;
@@ -153,6 +168,18 @@ class LobbyClient {
             this.elements.intermissionReturnButton.addEventListener('click', () => {
                 window.location.href = '/';
             });
+        }
+
+        if (this.elements.cochatInput) {
+            this.elements.cochatInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    this.sendCochatMessage();
+                }
+            });
+        }
+        if (this.elements.cochatSendButton) {
+            this.elements.cochatSendButton.addEventListener('click', () => this.sendCochatMessage());
         }
     }
 
@@ -590,6 +617,12 @@ class LobbyClient {
             case 'scoreboard.state':
                 this.handleScoreboardState(event.payload);
                 break;
+            case 'cochat.message':
+                this.handleCochatMessage(event.payload);
+                break;
+            case 'cochat.error':
+                this.handleCochatError(event.payload);
+                break;
             default:
                 break;
         }
@@ -636,6 +669,8 @@ class LobbyClient {
             : [];
         this.currentHostId = host ? host.id : null;
         this.currentRoomStatus = room.status;
+        this.currentGameMode = room.game_mode || this.currentGameMode || 'normal';
+        this.renderLobbyModeDisplay();
 
         if (this.elements.roomNameDisplay) {
             this.elements.roomNameDisplay.textContent = room.name;
@@ -656,6 +691,8 @@ class LobbyClient {
         this.syncRoomMode();
         this.syncGuessComposer();
         this.syncDrawingControls();
+        this.renderDrawerPairLabel();
+        this.syncCochatPanel();
 
         if (previousHostId !== null && previousHostId !== this.currentHostId) {
             this.showStatus('Room host changed', { autoHideMs: 3000 });
@@ -781,6 +818,9 @@ class LobbyClient {
         const shouldSyncVisibility = force
             || !this.isCurrentPlayerHost()
             || document.activeElement !== this.elements.editVisibility;
+        const shouldSyncMode = force
+            || !this.isCurrentPlayerHost()
+            || document.activeElement !== this.elements.editGameMode;
 
         if (shouldSyncName) {
             this.elements.editRoomName.value = room.name;
@@ -789,6 +829,20 @@ class LobbyClient {
         if (shouldSyncVisibility) {
             this.elements.editVisibility.value = room.visibility;
         }
+
+        if (shouldSyncMode && this.elements.editGameMode && room.game_mode) {
+            this.elements.editGameMode.value = room.game_mode;
+        }
+    }
+
+    renderLobbyModeDisplay() {
+        if (!this.elements.lobbyModeValue) {
+            return;
+        }
+        const label = this.currentGameMode === 'duo'
+            ? 'Duo (2 drawers)'
+            : 'Normal (1 drawer)';
+        this.elements.lobbyModeValue.textContent = label;
     }
 
     syncLobbyLockState(roomStatus) {
@@ -924,9 +978,16 @@ class LobbyClient {
         this.activeRoundId = null;
         this.isDrawer = false;
         this.isSpectator = false;
+        this.primaryDrawerId = null;
+        this.primaryDrawerName = null;
+        this.secondDrawerId = null;
+        this.secondDrawerName = null;
         this.roundDuration = null;
         this.intermissionDuration = null;
         this.hideIntermissionOverlay();
+        this.resetCochatHistory();
+        this.renderDrawerPairLabel();
+        this.syncCochatPanel();
 
         if (this.elements.wordDisplay) {
             this.elements.wordDisplay.textContent = '_ _ _ _';
@@ -1115,8 +1176,18 @@ class LobbyClient {
         this.currentPhase = 'round';
         this.activeRoundId = payload.round_id || null;
         this.roundDuration = payload.duration_seconds || this.roundDuration;
-        this.isDrawer = payload.role === 'drawer' || payload.drawer_participant_id === this.currentPlayerId;
+        this.primaryDrawerId = payload.drawer_participant_id ?? null;
+        this.primaryDrawerName = payload.drawer_nickname ?? null;
+        this.secondDrawerId = payload.second_drawer_participant_id ?? null;
+        this.secondDrawerName = payload.second_drawer_nickname ?? null;
+        this.isDrawer = payload.role === 'drawer'
+            || this.primaryDrawerId === this.currentPlayerId
+            || (this.secondDrawerId !== null && this.secondDrawerId === this.currentPlayerId);
         this.isSpectator = false;
+
+        if (this.activeRoundId && this.activeRoundId !== previousRoundId) {
+            this.resetCochatHistory();
+        }
 
         if (this.elements.roundNumber && payload.sequence_number) {
             this.elements.roundNumber.textContent = `Round ${payload.sequence_number}`;
@@ -1132,8 +1203,10 @@ class LobbyClient {
         }
         this.setTimerProgress(this.roundDuration || 0);
         this.hideIntermissionOverlay();
+        this.renderDrawerPairLabel();
         this.syncGuessComposer();
         this.syncDrawingControls();
+        this.syncCochatPanel();
     }
 
     handleRoundTimer(payload) {
@@ -1147,7 +1220,16 @@ class LobbyClient {
     handleRoundState(payload) {
         this.currentPhase = payload.phase || this.currentPhase;
         this.activeRoundId = payload.round_id || this.activeRoundId;
-        this.isDrawer = payload.drawer_participant_id === this.currentPlayerId;
+        if (payload.drawer_participant_id !== undefined) {
+            this.primaryDrawerId = payload.drawer_participant_id;
+        }
+        if (payload.second_drawer_participant_id !== undefined) {
+            this.secondDrawerId = payload.second_drawer_participant_id;
+        }
+        this.isDrawer = (
+            this.primaryDrawerId === this.currentPlayerId
+            || (this.secondDrawerId !== null && this.secondDrawerId === this.currentPlayerId)
+        );
         this.isSpectator = this.getCurrentParticipant()?.participation_status === 'spectating';
 
         if (payload.phase === 'intermission') {
@@ -1161,8 +1243,10 @@ class LobbyClient {
             this.hideIntermissionOverlay();
         }
 
+        this.renderDrawerPairLabel();
         this.syncGuessComposer();
         this.syncDrawingControls();
+        this.syncCochatPanel();
     }
 
     handleIntermissionStarted(payload) {
@@ -1174,8 +1258,11 @@ class LobbyClient {
             leaderboard: this.currentParticipants,
             countdownVisible: true,
         });
+        this.resetCochatHistory();
+        this.renderDrawerPairLabel();
         this.syncGuessComposer();
         this.syncDrawingControls();
+        this.syncCochatPanel();
     }
 
     handleIntermissionTimer(payload) {
@@ -1234,6 +1321,13 @@ class LobbyClient {
         this.activeRoundId = null;
         this.isDrawer = false;
         this.isSpectator = false;
+        this.primaryDrawerId = null;
+        this.primaryDrawerName = null;
+        this.secondDrawerId = null;
+        this.secondDrawerName = null;
+        this.resetCochatHistory();
+        this.renderDrawerPairLabel();
+        this.syncCochatPanel();
 
         const winnerHeading = payload.winner
             ? `<p><strong>Winner:</strong> ${payload.winner.display_name}</p>`
@@ -1326,6 +1420,9 @@ class LobbyClient {
 
         const name = this.elements.editRoomName.value.trim();
         const visibility = this.elements.editVisibility.value;
+        const gameMode = this.elements.editGameMode
+            ? this.elements.editGameMode.value
+            : null;
 
         if (!name || name.length > 255) {
             this.showError('Room name must be between 1 and 255 characters.');
@@ -1337,6 +1434,11 @@ class LobbyClient {
         this.syncLobbyLockState(this.currentRoomStatus);
         this.showStatus('Saving settings...');
 
+        const requestPayload = { name, visibility };
+        if (gameMode === 'normal' || gameMode === 'duo') {
+            requestPayload.game_mode = gameMode;
+        }
+
         try {
             const response = await fetch(`/rooms/${this.joinCode}/settings/`, {
                 method: 'POST',
@@ -1344,7 +1446,7 @@ class LobbyClient {
                     'Content-Type': 'application/json',
                     'X-CSRFToken': this.getCsrfToken(),
                 },
-                body: JSON.stringify({ name, visibility }),
+                body: JSON.stringify(requestPayload),
             });
 
             const data = await this.readResponseData(response);
@@ -1557,6 +1659,143 @@ class LobbyClient {
             clearTimeout(this.errorTimeout);
             this.errorTimeout = null;
         }
+    }
+
+    isDuoRound() {
+        return this.currentGameMode === 'duo'
+            && this.primaryDrawerId !== null
+            && this.secondDrawerId !== null;
+    }
+
+    canUseCochat() {
+        return this.currentRoomStatus === 'in_progress'
+            && this.currentPhase === 'round'
+            && this.isDuoRound()
+            && (
+                this.primaryDrawerId === this.currentPlayerId
+                || this.secondDrawerId === this.currentPlayerId
+            )
+            && !!this.socket
+            && this.socket.readyState === WebSocket.OPEN;
+    }
+
+    syncCochatPanel() {
+        if (!this.elements.cochatPanel) {
+            return;
+        }
+        const visible = this.canUseCochat();
+        this.elements.cochatPanel.hidden = !visible;
+
+        if (this.elements.cochatInput) {
+            this.elements.cochatInput.disabled = !visible;
+        }
+        if (this.elements.cochatSendButton) {
+            this.elements.cochatSendButton.disabled = !visible;
+        }
+    }
+
+    renderDrawerPairLabel() {
+        if (!this.elements.drawerPairLabel) {
+            return;
+        }
+        if (!this.isDuoRound() || this.currentPhase !== 'round') {
+            this.elements.drawerPairLabel.hidden = true;
+            this.elements.drawerPairLabel.textContent = '';
+            return;
+        }
+        const primary = this.primaryDrawerName || this.lookupDisplayName(this.primaryDrawerId) || 'Drawer 1';
+        const second = this.secondDrawerName || this.lookupDisplayName(this.secondDrawerId) || 'Drawer 2';
+        this.elements.drawerPairLabel.hidden = false;
+        this.elements.drawerPairLabel.textContent = `Drawers: ${primary} & ${second}`;
+    }
+
+    lookupDisplayName(playerId) {
+        if (!playerId) {
+            return null;
+        }
+        const match = this.currentParticipants.find((p) => p.id === playerId);
+        return match ? match.display_name : null;
+    }
+
+    resetCochatHistory() {
+        if (this.elements.cochatHistory) {
+            this.elements.cochatHistory.innerHTML = '';
+        }
+        if (this.elements.cochatInput) {
+            this.elements.cochatInput.value = '';
+        }
+    }
+
+    appendCochatLine({ sender, text, isSelf = false, isError = false }) {
+        if (!this.elements.cochatHistory) {
+            return;
+        }
+        const item = document.createElement('li');
+        item.className = 'cochat-message';
+        if (isSelf) {
+            item.dataset.self = 'true';
+        }
+        if (isError) {
+            item.dataset.error = 'true';
+        }
+        const name = document.createElement('span');
+        name.className = 'cochat-sender';
+        name.textContent = `${sender}: `;
+        const body = document.createElement('span');
+        body.className = 'cochat-text';
+        body.textContent = text;
+        item.appendChild(name);
+        item.appendChild(body);
+        this.elements.cochatHistory.appendChild(item);
+    }
+
+    sendCochatMessage() {
+        if (!this.canUseCochat() || !this.elements.cochatInput) {
+            return;
+        }
+        const text = this.elements.cochatInput.value.trim();
+        if (!text) {
+            return;
+        }
+        this.socket.send(JSON.stringify({
+            type: 'cochat.message',
+            payload: { text },
+        }));
+        this.appendCochatLine({ sender: 'You', text, isSelf: true });
+        this.elements.cochatInput.value = '';
+    }
+
+    handleCochatMessage(payload) {
+        if (!payload || typeof payload !== 'object') {
+            return;
+        }
+        // Defensive guard: server already filters non-drawers (D-05), but a
+        // stray event must never render for a guesser/spectator client.
+        const localIsInDrawerPair = (
+            this.primaryDrawerId === this.currentPlayerId
+            || (this.secondDrawerId !== null && this.secondDrawerId === this.currentPlayerId)
+        );
+        if (!localIsInDrawerPair || this.currentGameMode !== 'duo') {
+            return;
+        }
+        if (payload.sender_player_id === this.currentPlayerId) {
+            return;
+        }
+        const sender = payload.sender_nickname
+            || this.lookupDisplayName(payload.sender_player_id)
+            || 'Drawer';
+        const text = typeof payload.text === 'string' ? payload.text : '';
+        if (!text) {
+            return;
+        }
+        this.appendCochatLine({ sender, text });
+    }
+
+    handleCochatError(payload) {
+        const message = payload && typeof payload.message === 'string'
+            ? payload.message
+            : 'Co-chat message could not be sent.';
+        this.appendCochatLine({ sender: 'Server', text: message, isError: true });
     }
 }
 
