@@ -95,13 +95,13 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 - Browser handling for `drawing.stroke`, `drawing.end_stroke`, and `drawing.clear`
 - Viewer-side drawing replay and reconnect snapshot rendering
 
-- [ ] Render a drawing surface on the gameplay page for the active drawer.
-- [ ] Send `drawing.stroke`, `drawing.end_stroke`, and `drawing.clear` over the room socket in the format expected by the backend.
-- [ ] Render inbound `drawing.stroke`, `drawing.end_stroke`, and `drawing.clear` events for non-drawer viewers.
-- [ ] Restore the current drawing snapshot when a participant reconnects or opens the page mid-round.
-- [ ] Prevent non-drawers from sending drawing events through the UI.
-- [ ] Add frontend tests for role-aware drawing UI behavior where practical.
-- [ ] Verification gate: the active drawer can draw live and all other participants can see the drawing update in the browser.
+- [x] Render a drawing surface on the gameplay page for the active drawer.
+- [x] Send `drawing.stroke`, `drawing.end_stroke`, and `drawing.clear` over the room socket in the format expected by the backend.
+- [x] Render inbound `drawing.stroke`, `drawing.end_stroke`, and `drawing.clear` events for non-drawer viewers.
+- [x] Restore the current drawing snapshot when a participant reconnects or opens the page mid-round.
+- [x] Prevent non-drawers from sending drawing events through the UI.
+- [x] Add frontend tests for role-aware drawing UI behavior where practical.
+- [x] Verification gate: the active drawer can draw live and all other participants can see the drawing update in the browser.
 
 ---
 
