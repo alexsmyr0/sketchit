@@ -1,3 +1,4 @@
+import builtins
 import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -426,16 +427,29 @@ def _drawer_ids_for_round(
     return drawer_ids
 
 
-def _get_round_eligible_guesser_ids(round: Round) -> list[int]:
-    return list(
-        Player.objects.filter(
-            room_id=round.game.room_id,
-            participation_status=Player.ParticipationStatus.PLAYING,
-            created_at__lte=round.started_at,
+def _active_drawer_ids_for_round(round: Round) -> set[int]:
+    return {
+        participant_id
+        for participant_id in (
+            round.drawer_participant_id,
+            round.second_drawer_participant_id,
         )
-        .exclude(pk=round.drawer_participant_id)
-        .order_by("created_at", "id")
-        .values_list("id", flat=True)
+        if participant_id is not None
+    }
+
+
+def _get_round_eligible_guesser_ids(round: Round) -> list[int]:
+    active_drawer_ids = _active_drawer_ids_for_round(round)
+    eligible_players = Player.objects.filter(
+        room_id=round.game.room_id,
+        participation_status=Player.ParticipationStatus.PLAYING,
+        created_at__lte=round.started_at,
+    )
+    if active_drawer_ids:
+        eligible_players = eligible_players.exclude(pk__in=active_drawer_ids)
+
+    return list(
+        eligible_players.order_by("created_at", "id").values_list("id", flat=True)
     )
 
 
@@ -882,8 +896,9 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
 
     normalized_guess_text = guess.normalized_text
     normalized_target_text = _normalize_guess_text(locked_round.selected_game_word.text)
+    active_drawer_ids = _active_drawer_ids_for_round(locked_round)
 
-    if locked_round.drawer_participant_id == guessing_player.id:
+    if guessing_player.id in active_drawer_ids:
         # SDS §Guess Evaluation Rules — the drawer cannot score from guessing
         # their own word, but the outcome shape (correct / duplicate /
         # near_match / incorrect) still reflects what they typed. Evaluate
@@ -947,9 +962,17 @@ def evaluate_guess_for_round(round: Round, player: Player, guess_text: str) -> G
         score_deltas_by_participant_id = {
             guessing_player.id: guesser_points,
         }
-        drawer_participant_id = locked_round.drawer_participant_id
-        if drawer_participant_id is not None and drawer_participant_id != guessing_player.id:
-            score_deltas_by_participant_id[drawer_participant_id] = drawer_bonus
+        if len(active_drawer_ids) > 1:
+            split_drawer_bonus = int(builtins.round(drawer_bonus / 2))
+            for drawer_participant_id in sorted(active_drawer_ids):
+                if drawer_participant_id != guessing_player.id:
+                    score_deltas_by_participant_id[drawer_participant_id] = (
+                        split_drawer_bonus
+                    )
+        else:
+            for drawer_participant_id in sorted(active_drawer_ids):
+                if drawer_participant_id != guessing_player.id:
+                    score_deltas_by_participant_id[drawer_participant_id] = drawer_bonus
 
         for participant_id, score_delta in score_deltas_by_participant_id.items():
             Player.objects.filter(pk=participant_id).update(

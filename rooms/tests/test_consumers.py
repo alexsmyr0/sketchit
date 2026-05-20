@@ -1698,12 +1698,10 @@ class RoomConsumerConnectTests(TransactionTestCase):
             self.assertEqual(first_delivery["type"], "cochat.message")
             self.assertEqual(first_delivery["payload"]["text"], "Let us split the wings.")
 
-            # D-06 has not landed yet, so the current duo runtime still treats
-            # the second drawer as part of the eligible-guesser set. Drive the
-            # round to completion using the behavior that exists today so this
-            # test can focus on D-05 cleanup semantics.
-            self.assertFalse(await _submit_correct_guess_for_player(round_id, guesser_id))
-            self.assertTrue(await _submit_correct_guess_for_player(round_id, recipient_id))
+            # With D-06 in place, the lone non-drawer guesser should complete
+            # the duo round immediately while co-chat state still cleans up
+            # correctly for the former drawers during intermission.
+            self.assertTrue(await _submit_correct_guess_for_player(round_id, guesser_id))
             entered_intermission = False
             for _ in range(40):
                 turn_state = game_redis.get_turn_state(self.fake_redis, self.room.join_code)

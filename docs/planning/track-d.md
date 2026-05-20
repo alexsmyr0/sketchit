@@ -142,13 +142,13 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 - Self-guess prevention extended to both drawers in a duo round
 - Eligible non-drawer guesser set updated to exclude both drawers
 
-- [ ] On every correct guess in a duo round, credit both drawers using the split-bonus formula `round(drawer_bonus / 2)`.
-- [ ] Prevent either drawer in a duo round from guessing their own word for score.
-- [ ] Exclude both drawers from the eligible non-drawer guesser set used by early-finish checks.
-- [ ] Keep `guesser_points` unchanged for correct non-drawer guessers.
-- [ ] Keep score totals on the participant record consistent with the existing single-drawer model.
-- [ ] Add service tests for split-bonus payouts, drawer self-guess rejection for both drawers, and eligible guesser set integrity.
-- [ ] Verification gate: duo round scoring is deterministic and the total drawer payout per correct guess is within `1` point of the single-drawer formula.
+- [x] On every correct guess in a duo round, credit both drawers using the split-bonus formula `round(drawer_bonus / 2)`.
+- [x] Prevent either drawer in a duo round from guessing their own word for score.
+- [x] Exclude both drawers from the eligible non-drawer guesser set used by early-finish checks.
+- [x] Keep `guesser_points` unchanged for correct non-drawer guessers.
+- [x] Keep score totals on the participant record consistent with the existing single-drawer model.
+- [x] Add service tests for split-bonus payouts, drawer self-guess rejection for both drawers, and eligible guesser set integrity.
+- [x] Verification gate: duo round scoring is deterministic and the total drawer payout per correct guess is within `1` point of the single-drawer formula.
 
 ---
 

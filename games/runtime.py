@@ -877,15 +877,24 @@ def _is_player_spectating(player_id: int) -> bool:
 
 
 def _eligible_guesser_ids_for_round(round: Round) -> list[int]:
-    return list(
-        Player.objects.filter(
-            room_id=round.game.room_id,
-            participation_status=Player.ParticipationStatus.PLAYING,
-            created_at__lte=round.started_at,
+    drawer_ids = {
+        participant_id
+        for participant_id in (
+            round.drawer_participant_id,
+            round.second_drawer_participant_id,
         )
-        .exclude(pk=round.drawer_participant_id)
-        .order_by("created_at", "id")
-        .values_list("id", flat=True)
+        if participant_id is not None
+    }
+    eligible_players = Player.objects.filter(
+        room_id=round.game.room_id,
+        participation_status=Player.ParticipationStatus.PLAYING,
+        created_at__lte=round.started_at,
+    )
+    if drawer_ids:
+        eligible_players = eligible_players.exclude(pk__in=drawer_ids)
+
+    return list(
+        eligible_players.order_by("created_at", "id").values_list("id", flat=True)
     )
 
 
