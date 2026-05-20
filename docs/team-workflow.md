@@ -57,7 +57,8 @@ This short comment step is important. It catches misunderstandings before code i
 
 - AI can help draft code, tests, and refactors.
 - AI should not make product-scope decisions on its own.
-- You MUST give AI proper context before letting it assist you in implementation. This means giving it `mvp-spec.md`, `progress-context.md`, the issue at hand, and any conversation about it.
+- AI should NOT be a tool for mindlesly generating code. Use it sparingly and not for production code.
+- You MUST give AI proper context before letting it assist you in implementation. This means giving it `mvp-spec.md`, `sds.md`, the issue at hand, and any conversation about it.
 
 Minimum context to include in any AI prompt:
 
@@ -75,9 +76,3 @@ Update `docs/mvp-spec.md` when:
 - someone asked a question that revealed important hidden context for implementation
 - an issue cannot be specified cleanly without referencing the same context again
 - AI keeps making the same wrong assumption
-
-Update `docs/progress-context.md` when:
-
-- the implementation state changes in a way that affects planning
-- a previously missing system now exists
-- the current snapshot would otherwise become misleading
