@@ -16,9 +16,10 @@ which WebsocketCommunicator omits by default).
 """
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 import asyncio
+from unittest.mock import patch
 
 import fakeredis
 from asgiref.sync import async_to_sync
@@ -183,6 +184,14 @@ def _update_room_settings_via_http(
     return response.status_code, response.content
 
 
+@database_sync_to_async
+def _start_game_via_http(*, join_code: str, session_key: str) -> tuple[int, bytes]:
+    client = Client()
+    client.cookies[settings.SESSION_COOKIE_NAME] = session_key
+    response = client.post(f"/rooms/{join_code}/start-game/")
+    return response.status_code, response.content
+
+
 async def _receive_until_type(communicator, event_type: str, attempts: int = 50):
     """Wait for and return a specific JSON event type, ignoring others (safe version)."""
     import asyncio, json
@@ -334,6 +343,23 @@ async def _connect_and_drain_initial_sync(
             _append_and_validate(message)
 
     return messages
+
+
+@database_sync_to_async
+def _get_round_word_and_started_at(round_id: int) -> tuple[str, datetime]:
+    round = Round.objects.select_related("selected_game_word").get(pk=round_id)
+    return round.selected_game_word.text, round.started_at
+
+
+@database_sync_to_async
+def _get_player_scores(player_ids: list[int]) -> dict[int, int]:
+    return {
+        row["id"]: row["current_score"]
+        for row in Player.objects.filter(pk__in=player_ids).values(
+            "id",
+            "current_score",
+        )
+    }
 
 
 
@@ -1051,6 +1077,189 @@ class RoomConsumerConnectTests(TransactionTestCase):
         )
 
         await member_socket.disconnect()
+
+    @override_settings(
+        SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True,
+        SKETCHIT_ROUND_DURATION_SECONDS=60,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=10,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=60,
+    )
+    async def test_d09_duo_round_e2e_covers_mode_draw_pair_canvas_cochat_and_scoring(self):
+        member_session_keys = [
+            await _create_room_member(self.room.id, "Bob"),
+            await _create_room_member(self.room.id, "Charlie"),
+            await _create_room_member(self.room.id, "Dana"),
+        ]
+        session_keys = [self.session_key, *member_session_keys]
+        communicators_by_player_id: dict[int, WebsocketCommunicator] = {}
+
+        for session_key in session_keys:
+            player = await database_sync_to_async(Player.objects.get)(
+                room=self.room,
+                session_key=session_key,
+            )
+            communicator = WebsocketCommunicator(
+                _TEST_APP,
+                _ws_url(self.room.join_code),
+                headers=_session_headers(session_key),
+            )
+            communicators_by_player_id[player.id] = communicator
+            await _connect_and_receive_initial_room_state(
+                communicator,
+                self.room.join_code,
+            )
+
+        try:
+            for communicator in communicators_by_player_id.values():
+                await _drain_output_queue_safe(communicator)
+
+            status_code, response_content = await _update_room_settings_via_http(
+                join_code=self.room.join_code,
+                session_key=self.session_key,
+                payload={"game_mode": RoomGameMode.DUO},
+            )
+            self.assertEqual(status_code, 200, response_content)
+
+            live_mode_state = await _receive_until_type(
+                next(iter(communicators_by_player_id.values())),
+                "room.state",
+            )
+            self.assertEqual(
+                live_mode_state["payload"]["room"]["game_mode"],
+                RoomGameMode.DUO,
+            )
+            for communicator in communicators_by_player_id.values():
+                await _drain_output_queue_safe(communicator)
+
+            start_status, start_response_content = await _start_game_via_http(
+                join_code=self.room.join_code,
+                session_key=self.session_key,
+            )
+            self.assertEqual(start_status, 201, start_response_content)
+            round_id = json.loads(start_response_content)["round_id"]
+            first_socket = next(iter(communicators_by_player_id.values()))
+            round_started = await _receive_until_type(first_socket, "round.started")
+            drawer_id = round_started["payload"]["drawer_participant_id"]
+            second_drawer_id = round_started["payload"]["second_drawer_participant_id"]
+            self.assertIsNotNone(drawer_id)
+            self.assertIsNotNone(second_drawer_id)
+            self.assertNotEqual(drawer_id, second_drawer_id)
+
+            drawer_ids = {drawer_id, second_drawer_id}
+            guesser_ids = [
+                player_id
+                for player_id in communicators_by_player_id
+                if player_id not in drawer_ids
+            ]
+            self.assertGreaterEqual(len(guesser_ids), 2)
+            guesser_id = guesser_ids[0]
+
+            drawer_word = await _receive_until_type(
+                communicators_by_player_id[drawer_id],
+                "round.drawer_word",
+            )
+            second_drawer_word = await _receive_until_type(
+                communicators_by_player_id[second_drawer_id],
+                "round.drawer_word",
+            )
+            self.assertEqual(drawer_word["payload"]["round_id"], round_id)
+            self.assertEqual(second_drawer_word["payload"]["round_id"], round_id)
+            for non_drawer_id in guesser_ids:
+                queued = await _drain_output_queue_safe(
+                    communicators_by_player_id[non_drawer_id]
+                )
+                self.assertFalse(
+                    any(event.get("type") == "round.drawer_word" for event in queued)
+                )
+
+            for communicator in communicators_by_player_id.values():
+                await _drain_output_queue_safe(communicator)
+
+            primary_stroke = {
+                "stroke_id": "d09-primary",
+                "points": [{"x": 10, "y": 12}, {"x": 20, "y": 22}],
+            }
+            await communicators_by_player_id[drawer_id].send_json_to(
+                {"type": "drawing.stroke", "payload": primary_stroke}
+            )
+            second_receives_primary = await _receive_until_type(
+                communicators_by_player_id[second_drawer_id],
+                "drawing.stroke",
+            )
+            guesser_receives_primary = await _receive_until_type(
+                communicators_by_player_id[guesser_id],
+                "drawing.stroke",
+            )
+            self.assertEqual(second_receives_primary["payload"], primary_stroke)
+            self.assertEqual(guesser_receives_primary["payload"], primary_stroke)
+
+            secondary_stroke = {
+                "stroke_id": "d09-secondary",
+                "points": [{"x": 30, "y": 32}, {"x": 40, "y": 42}],
+            }
+            await communicators_by_player_id[second_drawer_id].send_json_to(
+                {"type": "drawing.stroke", "payload": secondary_stroke}
+            )
+            primary_receives_secondary = await _receive_until_type(
+                communicators_by_player_id[drawer_id],
+                "drawing.stroke",
+            )
+            guesser_receives_secondary = await _receive_until_type(
+                communicators_by_player_id[guesser_id],
+                "drawing.stroke",
+            )
+            self.assertEqual(primary_receives_secondary["payload"], secondary_stroke)
+            self.assertEqual(guesser_receives_secondary["payload"], secondary_stroke)
+
+            canvas_snapshot = room_redis.get_canvas_snapshot(
+                self.fake_redis,
+                self.room.join_code,
+            )
+            snapshot_payloads = [
+                json.loads(snapshot_entry.decode())["payload"]
+                for snapshot_entry in canvas_snapshot
+            ]
+            self.assertIn(primary_stroke, snapshot_payloads)
+            self.assertIn(secondary_stroke, snapshot_payloads)
+
+            for communicator in communicators_by_player_id.values():
+                await _drain_output_queue_safe(communicator)
+
+            await communicators_by_player_id[drawer_id].send_json_to({
+                "type": "cochat.message",
+                "payload": {"text": "I will handle the left side."},
+            })
+            cochat_delivery = await _receive_until_type(
+                communicators_by_player_id[second_drawer_id],
+                "cochat.message",
+            )
+            self.assertEqual(cochat_delivery["payload"]["sender_player_id"], drawer_id)
+            self.assertEqual(
+                cochat_delivery["payload"]["text"],
+                "I will handle the left side.",
+            )
+            self.assertTrue(
+                await communicators_by_player_id[guesser_id].receive_nothing(timeout=0.2)
+            )
+
+            word, round_started_at = await _get_round_word_and_started_at(round_id)
+            accepted_at = round_started_at + timedelta(seconds=30)
+            with patch("games.services.timezone.now", return_value=accepted_at):
+                await communicators_by_player_id[guesser_id].send_json_to({
+                    "type": "guess.submit",
+                    "payload": {"text": word},
+                })
+                guess_result = await _receive_until_type(first_socket, "guess.result")
+
+            self.assertEqual(guess_result["payload"]["outcome"], "correct")
+            self.assertTrue(guess_result["payload"]["is_correct"])
+            scores = await _get_player_scores([drawer_id, second_drawer_id, guesser_id])
+            self.assertEqual(scores[guesser_id], 60)
+            self.assertEqual(scores[drawer_id], 15)
+            self.assertEqual(scores[second_drawer_id], 15)
+            self.assertEqual(scores[drawer_id] + scores[second_drawer_id], 30)
+        finally:
+            await self._disconnect_communicators(communicators_by_player_id)
 
     async def test_http_join_broadcasts_room_state_to_connected_peers(self):
         communicator = WebsocketCommunicator(
