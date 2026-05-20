@@ -18,7 +18,7 @@ which WebsocketCommunicator omits by default).
 import asyncio
 from datetime import datetime, timedelta
 import json
-import asyncio
+import threading
 from unittest.mock import patch
 
 import fakeredis
@@ -37,7 +37,7 @@ from django.utils import timezone
 from config.routing import websocket_urlpatterns
 from games import redis as game_redis
 from games import runtime as game_runtime
-from games.models import Round
+from games.models import Game, Round, RoundStatus
 from games.services import evaluate_guess_for_round, start_game_for_room
 from rooms.consumers import _room_group_name
 from rooms import redis as room_redis
@@ -1260,6 +1260,203 @@ class RoomConsumerConnectTests(TransactionTestCase):
             self.assertEqual(scores[drawer_id] + scores[second_drawer_id], 30)
         finally:
             await self._disconnect_communicators(communicators_by_player_id)
+
+    @override_settings(
+        SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True,
+        SKETCHIT_ROUND_DURATION_SECONDS=60,
+        SKETCHIT_INTERMISSION_DURATION_SECONDS=10,
+        SKETCHIT_TIMER_TICK_INTERVAL_SECONDS=60,
+        SKETCHIT_DRAWER_DISCONNECT_GRACE_SECONDS=15,
+    )
+    async def test_d09_duo_drawer_disconnect_single_keeps_round_dual_grace_expires_round(self):
+        member_session_keys = [
+            await _create_room_member(self.room.id, "Bob"),
+            await _create_room_member(self.room.id, "Charlie"),
+            await _create_room_member(self.room.id, "Dana"),
+        ]
+        session_keys = [self.session_key, *member_session_keys]
+        communicators_by_player_id: dict[int, WebsocketCommunicator] = {}
+
+        for session_key in session_keys:
+            player = await database_sync_to_async(Player.objects.get)(
+                room=self.room,
+                session_key=session_key,
+            )
+            communicator = WebsocketCommunicator(
+                _TEST_APP,
+                _ws_url(self.room.join_code),
+                headers=_session_headers(session_key),
+            )
+            communicators_by_player_id[player.id] = communicator
+            await _connect_and_receive_initial_room_state(
+                communicator,
+                self.room.join_code,
+            )
+
+        try:
+            for communicator in communicators_by_player_id.values():
+                await _drain_output_queue_safe(communicator)
+
+            status_code, _ = await _update_room_settings_via_http(
+                join_code=self.room.join_code,
+                session_key=self.session_key,
+                payload={"game_mode": RoomGameMode.DUO},
+            )
+            self.assertEqual(status_code, 200)
+            for communicator in communicators_by_player_id.values():
+                await _drain_output_queue_safe(communicator)
+
+            with patch("games.runtime._start_drawer_disconnect_timer") as start_timer:
+                start_status, start_content = await _start_game_via_http(
+                    join_code=self.room.join_code,
+                    session_key=self.session_key,
+                )
+                self.assertEqual(start_status, 201, start_content)
+                round_id = json.loads(start_content)["round_id"]
+
+                first_socket = next(iter(communicators_by_player_id.values()))
+                round_started = await _receive_until_type(first_socket, "round.started")
+                drawer_id = round_started["payload"]["drawer_participant_id"]
+                second_drawer_id = round_started["payload"]["second_drawer_participant_id"]
+                self.assertIsNotNone(drawer_id)
+                self.assertIsNotNone(second_drawer_id)
+
+                for communicator in communicators_by_player_id.values():
+                    await _drain_output_queue_safe(communicator)
+
+                await communicators_by_player_id[drawer_id].disconnect()
+                del communicators_by_player_id[drawer_id]
+
+                turn_state_single = game_redis.get_turn_state(
+                    self.fake_redis, self.room.join_code,
+                )
+                self.assertEqual(turn_state_single.get("status"), "drawing")
+                self.assertFalse(
+                    turn_state_single.get("drawer_disconnect_deadline_at")
+                )
+                start_timer.assert_not_called()
+
+                await communicators_by_player_id[second_drawer_id].disconnect()
+                del communicators_by_player_id[second_drawer_id]
+
+                turn_state_dual = game_redis.get_turn_state(
+                    self.fake_redis, self.room.join_code,
+                )
+                self.assertEqual(
+                    turn_state_dual.get("status"), "drawer_disconnected_grace",
+                )
+                self.assertTrue(
+                    turn_state_dual.get("drawer_disconnect_deadline_at")
+                )
+                start_timer.assert_called_once_with(
+                    join_code=self.room.join_code,
+                    round_id=round_id,
+                )
+
+            game_redis.update_turn_state_fields(
+                self.fake_redis,
+                self.room.join_code,
+                {
+                    "drawer_disconnect_deadline_at": (
+                        timezone.now() - timedelta(seconds=1)
+                    ).isoformat(),
+                },
+            )
+            with patch("games.runtime.broadcast_room_event"), patch(
+                "games.runtime._start_intermission_timer"
+            ):
+                await database_sync_to_async(
+                    game_runtime._drawer_disconnect_timer_worker
+                )(
+                    join_code=self.room.join_code,
+                    round_id=round_id,
+                    stop_event=threading.Event(),
+                )
+
+            round_row = await database_sync_to_async(Round.objects.get)(pk=round_id)
+            self.assertEqual(round_row.status, RoundStatus.DRAWER_DISCONNECTED)
+            self.assertIsNotNone(round_row.ended_at)
+        finally:
+            await self._disconnect_communicators(communicators_by_player_id)
+
+    async def test_d09_duo_to_normal_mode_revert_starts_normal_game(self):
+        peer_session_key = await _create_room_member(self.room.id, "Bob")
+
+        host_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(self.session_key),
+        )
+        peer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(peer_session_key),
+        )
+        await _connect_and_receive_initial_room_state(host_socket, self.room.join_code)
+        await _connect_and_receive_initial_room_state(peer_socket, self.room.join_code)
+
+        try:
+            await _drain_output_queue_safe(host_socket)
+            await _drain_output_queue_safe(peer_socket)
+
+            duo_status, _ = await _update_room_settings_via_http(
+                join_code=self.room.join_code,
+                session_key=self.session_key,
+                payload={"game_mode": RoomGameMode.DUO},
+            )
+            self.assertEqual(duo_status, 200)
+            host_duo_state = await _receive_until_type(host_socket, "room.state")
+            peer_duo_state = await _receive_until_type(peer_socket, "room.state")
+            self.assertEqual(
+                host_duo_state["payload"]["room"]["game_mode"], RoomGameMode.DUO,
+            )
+            self.assertEqual(
+                peer_duo_state["payload"]["room"]["game_mode"], RoomGameMode.DUO,
+            )
+            await _drain_output_queue_safe(host_socket)
+            await _drain_output_queue_safe(peer_socket)
+
+            normal_status, _ = await _update_room_settings_via_http(
+                join_code=self.room.join_code,
+                session_key=self.session_key,
+                payload={"game_mode": RoomGameMode.NORMAL},
+            )
+            self.assertEqual(normal_status, 200)
+            host_normal_state = await _receive_until_type(host_socket, "room.state")
+            peer_normal_state = await _receive_until_type(peer_socket, "room.state")
+            self.assertEqual(
+                host_normal_state["payload"]["room"]["game_mode"],
+                RoomGameMode.NORMAL,
+            )
+            self.assertEqual(
+                peer_normal_state["payload"]["room"]["game_mode"],
+                RoomGameMode.NORMAL,
+            )
+
+            start_status, start_content = await _start_game_via_http(
+                join_code=self.room.join_code,
+                session_key=self.session_key,
+            )
+            self.assertEqual(start_status, 201, start_content)
+            start_payload = json.loads(start_content)
+            game = await database_sync_to_async(Game.objects.get)(
+                pk=start_payload["game_id"],
+            )
+            self.assertEqual(game.game_mode, RoomGameMode.NORMAL)
+            round_row = await database_sync_to_async(Round.objects.get)(
+                pk=start_payload["round_id"],
+            )
+            self.assertIsNone(round_row.second_drawer_participant_id)
+            self.assertIsNone(round_row.second_drawer_nickname)
+        finally:
+            try:
+                await host_socket.disconnect()
+            except Exception:
+                pass
+            try:
+                await peer_socket.disconnect()
+            except Exception:
+                pass
 
     async def test_http_join_broadcasts_room_state_to_connected_peers(self):
         communicator = WebsocketCommunicator(
