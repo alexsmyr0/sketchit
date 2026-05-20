@@ -112,7 +112,7 @@ Use this as the default claim order for the next wave of work:
 - [x] **D-05** P2 - Drawer Pair Private Chat | Drawer-only `cochat.message` event routed solely between the two current drawers in duo rounds. (Depends on: N-02; D-03) | Blocks: D-08; D-09
 - [ ] **D-06** P3 - Scoring Adaptation For Duo Rounds | Split drawer bonus across both drawers and exclude both from the eligible guesser set. (Depends on: K-05; D-03) | Blocks: D-09
 - [ ] **D-07** P3 - Duo Drawer Disconnect Handling | Single-drawer continuation rule and `15`-second grace only when both drawers are disconnected. (Depends on: K-07; D-03; D-06) | Blocks: D-09
-- [x] **D-08** P4 - Duo Mode Browser Experience | Host-only mode dropdown, dual-drawer HUD, drawer-only co-chat panel, and shared-canvas input UI. (Depends on: G-02; G-03; G-04; D-02; D-04; D-05) | Blocks: D-09
+- [ ] **D-08** P4 - Duo Mode Browser Experience | Host-only mode dropdown, dual-drawer HUD, drawer-only co-chat panel, and shared-canvas input UI. (Depends on: G-02; G-03; G-04; D-02; D-04; D-05) | Blocks: D-09
 - [ ] **D-09** P4 - Duo Mode End-To-End Verification | Multi-client manual run, automated baseline integration test, and bug-fix sweep for duo mode. (Depends on: D-04; D-05; D-06; D-07; D-08) | Blocks: None
 
 ## Cross-Document References

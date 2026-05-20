@@ -198,7 +198,7 @@ Source backlog: `docs/planning/tickets-by-topic.md`
 - [x] Wire client-side `cochat.message` send and receive over the existing room socket.
 - [x] Ensure the canvas surface accepts local input whenever the local client is one of the two current drawers.
 - [x] Add front-end coverage for the lobby dropdown gating rule and the co-chat panel visibility rule.
-- [x] Verification gate: in a live test session, two drawers see and use the co-chat panel and shared canvas while guessers see only the shared canvas and never the chat.
+- [ ] Verification gate: in a live test session, two drawers see and use the co-chat panel and shared canvas while guessers see only the shared canvas and never the chat.
 
 ---
 

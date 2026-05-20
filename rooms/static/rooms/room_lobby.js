@@ -1769,6 +1769,15 @@ class LobbyClient {
         if (!payload || typeof payload !== 'object') {
             return;
         }
+        // Defensive guard: server already filters non-drawers (D-05), but a
+        // stray event must never render for a guesser/spectator client.
+        const localIsInDrawerPair = (
+            this.primaryDrawerId === this.currentPlayerId
+            || (this.secondDrawerId !== null && this.secondDrawerId === this.currentPlayerId)
+        );
+        if (!localIsInDrawerPair || this.currentGameMode !== 'duo') {
+            return;
+        }
         if (payload.sender_player_id === this.currentPlayerId) {
             return;
         }

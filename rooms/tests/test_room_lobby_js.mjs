@@ -1313,3 +1313,194 @@ test("D-08 cochat resets and hides when the round ends or game finishes", async 
     assert.equal(harness.elementsById.get("cochat-history").children.length, 0);
 });
 
+
+test("D-08 cochat panel stays hidden for spectators in a duo round", async () => {
+    // Spectator joined mid-game and is not eligible to draw or chat.
+    const harness = await loadRoomLobbyScript({ currentPlayerId: 55 });
+    harness.client.updateLobbyUI(buildRoomState({
+        roomStatus: "in_progress",
+        gameMode: "duo",
+        participants: [
+            { id: 7, display_name: "Host Alex", connection_status: "connected", participation_status: "playing" },
+            { id: 42, display_name: "Casey", connection_status: "connected", participation_status: "playing" },
+            { id: 55, display_name: "Late Joiner", connection_status: "connected", participation_status: "spectating" },
+        ],
+    }));
+
+    harness.client.handleServerEvent({
+        type: "round.started",
+        payload: {
+            round_id: 1,
+            role: "guesser",
+            drawer_participant_id: 7,
+            second_drawer_participant_id: 42,
+            duration_seconds: 90,
+            sequence_number: 1,
+            masked_word: "_____",
+        },
+    });
+
+    assert.equal(harness.elementsById.get("cochat-panel").hidden, true);
+    assert.equal(harness.client.canUseCochat(), false);
+});
+
+
+test("D-08 stray cochat.message arriving at a non-drawer client is dropped", async () => {
+    // Defensive: server filters per D-05, but the client must also drop
+    // anything that somehow slips through so guesser UIs never render chat.
+    const harness = await loadRoomLobbyScript({ currentPlayerId: 9 });
+    harness.client.updateLobbyUI(buildRoomState({
+        roomStatus: "in_progress",
+        gameMode: "duo",
+    }));
+    harness.client.handleServerEvent({
+        type: "round.started",
+        payload: {
+            round_id: 1,
+            role: "guesser",
+            drawer_participant_id: 7,
+            second_drawer_participant_id: 42,
+            duration_seconds: 90,
+            sequence_number: 1,
+            masked_word: "_____",
+        },
+    });
+
+    harness.client.handleServerEvent({
+        type: "cochat.message",
+        payload: {
+            sender_player_id: 7,
+            sender_nickname: "Host Alex",
+            text: "secret coordination",
+        },
+    });
+
+    assert.equal(harness.elementsById.get("cochat-history").children.length, 0);
+    assert.equal(harness.elementsById.get("cochat-panel").hidden, true);
+});
+
+
+test("D-08 primary drawer also sees and uses the co-chat panel", async () => {
+    // First test only covered the SECOND drawer. Confirm symmetry: the
+    // primary drawer is just as much a drawer-pair participant.
+    const harness = await loadRoomLobbyScript({ currentPlayerId: 7 });
+    harness.client.updateLobbyUI(buildRoomState({
+        roomStatus: "in_progress",
+        gameMode: "duo",
+    }));
+    harness.client.handleServerEvent({
+        type: "round.started",
+        payload: {
+            round_id: 1,
+            role: "drawer",
+            drawer_participant_id: 7,
+            second_drawer_participant_id: 42,
+            duration_seconds: 90,
+            sequence_number: 1,
+            masked_word: "_____",
+        },
+    });
+
+    assert.equal(harness.elementsById.get("cochat-panel").hidden, false);
+    assert.equal(harness.client.canUseCochat(), true);
+    assert.equal(harness.client.canSendDrawingEvents(), true);
+});
+
+
+test("D-08 game_mode dropdown is disabled once the room leaves lobby", async () => {
+    const harness = await loadRoomLobbyScript();
+    harness.client.updateLobbyUI(buildRoomState({ roomStatus: "lobby" }));
+    assert.equal(harness.elementsById.get("edit-game-mode").disabled, false);
+
+    harness.client.updateLobbyUI(buildRoomState({ roomStatus: "in_progress" }));
+    assert.equal(harness.elementsById.get("edit-game-mode").disabled, true);
+});
+
+
+test("D-08 cochat.error renders a server error line in the chat history", async () => {
+    const harness = await loadRoomLobbyScript({ currentPlayerId: 7 });
+    harness.client.updateLobbyUI(buildRoomState({
+        roomStatus: "in_progress",
+        gameMode: "duo",
+    }));
+    harness.client.handleServerEvent({
+        type: "round.started",
+        payload: {
+            round_id: 1,
+            role: "drawer",
+            drawer_participant_id: 7,
+            second_drawer_participant_id: 42,
+            duration_seconds: 90,
+            sequence_number: 1,
+            masked_word: "_____",
+        },
+    });
+
+    harness.client.handleServerEvent({
+        type: "cochat.error",
+        payload: { message: "Co-chat unavailable outside a duo round." },
+    });
+
+    const history = harness.elementsById.get("cochat-history");
+    assert.equal(history.children.length, 1);
+    assert.equal(history.children[0].dataset.error, "true");
+});
+
+
+test("D-08 normal-mode round does not show cochat panel for the single drawer", async () => {
+    // Regression: duo plumbing must not bleed into single-drawer rounds.
+    const harness = await loadRoomLobbyScript({ currentPlayerId: 7 });
+    harness.client.updateLobbyUI(buildRoomState({
+        roomStatus: "in_progress",
+        gameMode: "normal",
+    }));
+
+    harness.client.handleServerEvent({
+        type: "round.started",
+        payload: {
+            round_id: 1,
+            role: "drawer",
+            drawer_participant_id: 7,
+            second_drawer_participant_id: null,
+            second_drawer_nickname: null,
+            duration_seconds: 90,
+            sequence_number: 1,
+            masked_word: "_____",
+        },
+    });
+
+    assert.equal(harness.elementsById.get("cochat-panel").hidden, true);
+    assert.equal(harness.client.canUseCochat(), false);
+    // Single drawer still controls the canvas.
+    assert.equal(harness.client.canSendDrawingEvents(), true);
+    // Drawer pair label must not appear in normal mode.
+    assert.equal(harness.elementsById.get("drawer-pair-label").hidden, true);
+});
+
+
+test("D-08 guesser_payload never carries the full word for non-drawer clients", async () => {
+    // Sanity check on the contract the server promises: the round.started
+    // payload received by a guesser must never include the full word.
+    const harness = await loadRoomLobbyScript({ currentPlayerId: 9 });
+    harness.client.updateLobbyUI(buildRoomState({
+        roomStatus: "in_progress",
+        gameMode: "duo",
+    }));
+
+    harness.client.handleServerEvent({
+        type: "round.started",
+        payload: {
+            round_id: 1,
+            role: "guesser",
+            drawer_participant_id: 7,
+            second_drawer_participant_id: 42,
+            duration_seconds: 90,
+            sequence_number: 1,
+            masked_word: "______",
+        },
+    });
+
+    const display = harness.elementsById.get("word-display").textContent;
+    // No alphabetic character may slip through into the masked guesser view.
+    assert.equal(/[a-zA-Z]/.test(display), false);
+});
