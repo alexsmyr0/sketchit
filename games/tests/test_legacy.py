@@ -2737,6 +2737,31 @@ class GuessServiceIntegrationTests(TestCase):
             sequence_number=1,
         )
 
+    def _create_playing_participant(self, *, session_key: str, display_name: str) -> Player:
+        session_expires_at = timezone.now() + timedelta(hours=1)
+        return Player.objects.create(
+            room=self.room,
+            session_key=session_key,
+            display_name=display_name,
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=session_expires_at,
+        )
+
+    def _configure_duo_round(self, *, second_drawer_display_name: str = "Second Drawer") -> Player:
+        second_drawer = self._create_playing_participant(
+            session_key="second-drawer-session",
+            display_name=second_drawer_display_name,
+        )
+        self.game.game_mode = RoomGameMode.DUO
+        self.game.save(update_fields=("game_mode", "updated_at"))
+        self.round.second_drawer_participant = second_drawer
+        self.round.second_drawer_nickname = second_drawer.display_name
+        self.round.save(
+            update_fields=("second_drawer_participant", "second_drawer_nickname", "updated_at")
+        )
+        return second_drawer
+
     def _set_round_start(self, started_at):
         self.round.started_at = started_at
         self.round.save(update_fields=("started_at", "updated_at"))
@@ -2956,6 +2981,218 @@ class GuessServiceIntegrationTests(TestCase):
         self.assertEqual(self.guesser.current_score, 100)
         self.assertEqual(self.drawer.current_score, 0)
         self.assertEqual(self._score_map(result), {self.guesser.id: 100})
+
+    @override_settings(SKETCHIT_ROUND_DURATION_SECONDS=90)
+    def test_duo_correct_guess_splits_drawer_bonus_between_both_drawers(self):
+        second_drawer = self._configure_duo_round()
+        round_start = timezone.now()
+        self._set_round_start(round_start)
+        accepted_at = round_start + timedelta(seconds=47)
+
+        with patch("games.services.timezone.now", return_value=accepted_at):
+            result = evaluate_guess_for_round(self.round, self.guesser, "rocket")
+
+        self.drawer.refresh_from_db()
+        second_drawer.refresh_from_db()
+        self.guesser.refresh_from_db()
+
+        self.assertTrue(result.is_correct)
+        self.assertTrue(result.round_completed_now)
+        self.assertEqual(self.guesser.current_score, 58)
+        self.assertEqual(self.drawer.current_score, 14)
+        self.assertEqual(second_drawer.current_score, 14)
+        self.assertEqual(
+            self._score_map(result),
+            {
+                self.guesser.id: 58,
+                self.drawer.id: 14,
+                second_drawer.id: 14,
+            },
+        )
+        self.assertLessEqual(
+            abs((self.drawer.current_score + second_drawer.current_score) - 29),
+            1,
+        )
+
+    @override_settings(SKETCHIT_ROUND_DURATION_SECONDS=90)
+    def test_duo_correct_guess_splits_even_drawer_bonus_exactly_between_both_drawers(self):
+        second_drawer = self._configure_duo_round()
+        round_start = timezone.now()
+        self._set_round_start(round_start)
+        accepted_at = round_start + timedelta(seconds=45)
+
+        with patch("games.services.timezone.now", return_value=accepted_at):
+            result = evaluate_guess_for_round(self.round, self.guesser, "rocket")
+
+        self.drawer.refresh_from_db()
+        second_drawer.refresh_from_db()
+        self.guesser.refresh_from_db()
+
+        self.assertTrue(result.is_correct)
+        self.assertTrue(result.round_completed_now)
+        self.assertEqual(self.guesser.current_score, 60)
+        self.assertEqual(self.drawer.current_score, 15)
+        self.assertEqual(second_drawer.current_score, 15)
+        self.assertEqual(
+            self._score_map(result),
+            {
+                self.guesser.id: 60,
+                self.drawer.id: 15,
+                second_drawer.id: 15,
+            },
+        )
+        self.assertEqual(self.drawer.current_score + second_drawer.current_score, 30)
+
+    def test_duo_drawers_cannot_score_from_guessing_their_own_word(self):
+        second_drawer = self._configure_duo_round()
+
+        for guessing_player in (self.drawer, second_drawer):
+            with self.subTest(player_id=guessing_player.id):
+                result = evaluate_guess_for_round(
+                    self.round,
+                    guessing_player,
+                    self.game_word.text,
+                )
+                persisted_guess = Guess.objects.get(
+                    round=self.round,
+                    player=guessing_player,
+                )
+                self.drawer.refresh_from_db()
+                second_drawer.refresh_from_db()
+                self.guesser.refresh_from_db()
+
+                self.assertEqual(result.outcome, game_services.GuessOutcome.CORRECT)
+                self.assertFalse(result.is_correct)
+                self.assertFalse(result.round_completed)
+                self.assertFalse(result.round_completed_now)
+                self.assertEqual(result.score_updates, ())
+                self.assertFalse(persisted_guess.is_correct)
+                self.assertEqual(self.drawer.current_score, 0)
+                self.assertEqual(second_drawer.current_score, 0)
+                self.assertEqual(self.guesser.current_score, 0)
+
+    def test_duo_eligible_guesser_set_excludes_both_drawers_for_early_finish(self):
+        second_drawer = self._configure_duo_round()
+        other_guesser = self._create_playing_participant(
+            session_key="other-guesser-session",
+            display_name="Other Guesser",
+        )
+        round_start = timezone.now()
+        self._set_round_start(round_start)
+
+        eligible_guesser_ids = set(game_services._get_round_eligible_guesser_ids(self.round))
+        self.assertEqual(eligible_guesser_ids, {self.guesser.id, other_guesser.id})
+        self.assertNotIn(self.drawer.id, eligible_guesser_ids)
+        self.assertNotIn(second_drawer.id, eligible_guesser_ids)
+
+        with patch("games.services.timezone.now", return_value=round_start + timedelta(seconds=10)):
+            first_result = evaluate_guess_for_round(self.round, self.guesser, "rocket")
+        self.round.refresh_from_db()
+        self.assertFalse(first_result.round_completed_now)
+        self.assertIsNone(self.round.status)
+
+        with patch("games.services.timezone.now", return_value=round_start + timedelta(seconds=20)):
+            second_result = evaluate_guess_for_round(self.round, other_guesser, "rocket")
+        self.round.refresh_from_db()
+
+        self.assertTrue(second_result.round_completed_now)
+        self.assertEqual(self.round.status, RoundStatus.COMPLETED)
+
+    @override_settings(SKETCHIT_ROUND_DURATION_SECONDS=90)
+    def test_duo_duplicate_correct_guess_does_not_double_credit_drawers(self):
+        second_drawer = self._configure_duo_round()
+        second_guesser = self._create_playing_participant(
+            session_key="second-guesser-session",
+            display_name="Second Guesser",
+        )
+        round_start = timezone.now()
+        self._set_round_start(round_start)
+
+        with patch("games.services.timezone.now", return_value=round_start + timedelta(seconds=45)):
+            first_result = evaluate_guess_for_round(self.round, self.guesser, "rocket")
+        self.round.refresh_from_db()
+        self.drawer.refresh_from_db()
+        second_drawer.refresh_from_db()
+        self.guesser.refresh_from_db()
+        second_guesser.refresh_from_db()
+
+        self.assertTrue(first_result.is_correct)
+        self.assertFalse(first_result.round_completed_now)
+        self.assertEqual(self.guesser.current_score, 60)
+        self.assertEqual(second_guesser.current_score, 0)
+        self.assertEqual(self.drawer.current_score, 15)
+        self.assertEqual(second_drawer.current_score, 15)
+
+        with patch("games.services.timezone.now", return_value=round_start + timedelta(seconds=46)):
+            repeat_result = evaluate_guess_for_round(self.round, self.guesser, "  ROCKET  ")
+        self.round.refresh_from_db()
+        self.drawer.refresh_from_db()
+        second_drawer.refresh_from_db()
+        self.guesser.refresh_from_db()
+        second_guesser.refresh_from_db()
+
+        self.assertEqual(repeat_result.outcome, game_services.GuessOutcome.DUPLICATE)
+        self.assertFalse(repeat_result.is_correct)
+        self.assertFalse(repeat_result.round_completed_now)
+        self.assertEqual(repeat_result.score_updates, ())
+        self.assertIsNone(self.round.status)
+        self.assertEqual(self.guesser.current_score, 60)
+        self.assertEqual(second_guesser.current_score, 0)
+        self.assertEqual(self.drawer.current_score, 15)
+        self.assertEqual(second_drawer.current_score, 15)
+        self.assertEqual(
+            Guess.objects.filter(round=self.round, player=self.guesser, is_correct=True).count(),
+            1,
+        )
+
+    @override_settings(SKETCHIT_ROUND_DURATION_SECONDS=90)
+    def test_duo_multiple_correct_guessers_accumulate_split_bonus_for_both_drawers(self):
+        second_drawer = self._configure_duo_round()
+        second_guesser = self._create_playing_participant(
+            session_key="second-guesser-session",
+            display_name="Second Guesser",
+        )
+        round_start = timezone.now()
+        self._set_round_start(round_start)
+
+        with patch("games.services.timezone.now", return_value=round_start + timedelta(seconds=45)):
+            first_result = evaluate_guess_for_round(self.round, self.guesser, "rocket")
+        self.round.refresh_from_db()
+
+        self.assertTrue(first_result.is_correct)
+        self.assertFalse(first_result.round_completed_now)
+        self.assertEqual(
+            self._score_map(first_result),
+            {
+                self.guesser.id: 60,
+                self.drawer.id: 15,
+                second_drawer.id: 15,
+            },
+        )
+
+        with patch("games.services.timezone.now", return_value=round_start + timedelta(seconds=63)):
+            second_result = evaluate_guess_for_round(self.round, second_guesser, "rocket")
+        self.round.refresh_from_db()
+        self.drawer.refresh_from_db()
+        second_drawer.refresh_from_db()
+        self.guesser.refresh_from_db()
+        second_guesser.refresh_from_db()
+
+        self.assertTrue(second_result.is_correct)
+        self.assertTrue(second_result.round_completed_now)
+        self.assertEqual(self.guesser.current_score, 60)
+        self.assertEqual(second_guesser.current_score, 44)
+        self.assertEqual(self.drawer.current_score, 26)
+        self.assertEqual(second_drawer.current_score, 26)
+        self.assertEqual(
+            self._score_map(second_result),
+            {
+                second_guesser.id: 44,
+                self.drawer.id: 26,
+                second_drawer.id: 26,
+            },
+        )
+        self.assertEqual(self.round.status, RoundStatus.COMPLETED)
 
     def test_evaluate_guess_incorrect_payload(self):
         result = evaluate_guess_for_round(self.round, self.guesser, "wrong")

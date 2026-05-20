@@ -450,23 +450,19 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
 
     @database_sync_to_async
     def _is_active_drawer(self) -> bool:
-        """Return True if the connected player is the active drawer.
-
-        This preserves the existing single active drawer role used by
-        non-drawing rules such as guess rejection.
-        """
-        # 1. Match player ID against Redis turn state
+        """Return True if the connected player is one of the active drawers."""
         client = get_redis_client()
         turn_state = game_redis.get_turn_state(client, self.join_code)
 
-        # turn_state is only populated when a round is active.
-        # Drawer authorization field name from K-03 architecture: drawer_participant_id
-        drawer_participant_id = turn_state.get("drawer_participant_id")
-
-        if not drawer_participant_id:
-            return False
-
-        return self.player.id == int(drawer_participant_id)
+        drawing_participant_ids = {
+            int(raw_id)
+            for raw_id in (
+                turn_state.get("drawer_participant_id"),
+                turn_state.get("second_drawer_participant_id"),
+            )
+            if raw_id
+        }
+        return self.player.id in drawing_participant_ids
 
     @database_sync_to_async
     def _can_send_drawing_event(self) -> bool:

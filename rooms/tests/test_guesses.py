@@ -10,7 +10,7 @@ from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 
 from games import services as game_services
-from rooms.models import Player, Room
+from rooms.models import Player, Room, RoomGameMode
 from rooms.tests.test_consumers import (
     _ws_url, _session_headers, _create_room_member, _TEST_APP,
     _receive_until_type,
@@ -39,6 +39,28 @@ def _set_round_target_word(round_id: int, target_word: str) -> None:
     round = Round.objects.select_related("selected_game_word").get(pk=round_id)
     round.selected_game_word.text = target_word
     round.selected_game_word.save(update_fields=("text", "updated_at"))
+
+
+@database_sync_to_async
+def _configure_duo_round(
+    *,
+    game_id: int,
+    round_id: int,
+    second_drawer_id: int,
+    second_drawer_name: str,
+) -> None:
+    Game.objects.filter(pk=game_id).update(game_mode=RoomGameMode.DUO)
+    round = Round.objects.get(pk=round_id)
+    round.second_drawer_participant_id = second_drawer_id
+    round.second_drawer_nickname = second_drawer_name
+    round.save(
+        update_fields=("second_drawer_participant", "second_drawer_nickname", "updated_at")
+    )
+
+
+@database_sync_to_async
+def _count_guesses(round_id: int, player_id: int) -> int:
+    return Guess.objects.filter(round_id=round_id, player_id=player_id).count()
 
 
 def _assert_active_connect_messages(
@@ -134,7 +156,7 @@ class GuessPipelineTests(TransactionTestCase):
 
         # Tests that need an active round should call _seed_active_round_state.
 
-    def _seed_active_round_state(self, *, deadline_at=None):
+    def _seed_active_round_state(self, *, deadline_at=None, second_drawer_id=None):
         state = {
             "phase": "round",
             "round_id": str(self.round.id),
@@ -144,6 +166,8 @@ class GuessPipelineTests(TransactionTestCase):
                 deadline_at or (timezone.now() + timedelta(seconds=60))
             ).isoformat(),
         }
+        if second_drawer_id is not None:
+            state["second_drawer_participant_id"] = str(second_drawer_id)
         game_redis.set_turn_state(self.fake_redis, self.room.join_code, state)
 
     def tearDown(self):
@@ -368,6 +392,46 @@ class GuessPipelineTests(TransactionTestCase):
         self.assertIn("Drawers cannot submit guesses", response["payload"]["message"])
 
         await drawer_socket.disconnect()
+
+    async def test_second_drawer_cannot_guess_in_duo_round(self):
+        second_drawer_key = await _create_room_member(self.room.id, "Second Drawer")
+        second_drawer_player = await database_sync_to_async(Player.objects.get)(
+            room=self.room,
+            session_key=second_drawer_key,
+        )
+        await _configure_duo_round(
+            game_id=self.game.id,
+            round_id=self.round.id,
+            second_drawer_id=second_drawer_player.id,
+            second_drawer_name=second_drawer_player.display_name,
+        )
+        self._seed_active_round_state(second_drawer_id=second_drawer_player.id)
+
+        second_drawer_socket = WebsocketCommunicator(
+            _TEST_APP,
+            _ws_url(self.room.join_code),
+            headers=_session_headers(second_drawer_key),
+        )
+        await _connect_and_assert_active_handshake(
+            self,
+            second_drawer_socket,
+            self.room.join_code,
+        )
+
+        await second_drawer_socket.send_json_to({
+            "type": "guess.submit",
+            "payload": {"text": self.secret_word_text}
+        })
+
+        response = await _receive_until_type(second_drawer_socket, "guess.error")
+        self.assertEqual(response["type"], "guess.error")
+        self.assertIn("Drawers cannot submit guesses", response["payload"]["message"])
+        self.assertEqual(
+            await _count_guesses(self.round.id, second_drawer_player.id),
+            0,
+        )
+
+        await second_drawer_socket.disconnect()
 
     async def test_service_validation_error_becomes_guess_error(self):
         self._seed_active_round_state()
