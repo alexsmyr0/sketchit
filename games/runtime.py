@@ -27,7 +27,7 @@ from redis.exceptions import RedisError, WatchError
 
 from games import redis as game_redis
 from games.models import Round
-from rooms.models import Player, Room
+from rooms.models import Player, Room, RoomGameMode
 from rooms import redis as room_redis
 
 
@@ -121,6 +121,45 @@ def _parse_iso_datetime(raw_value: str | None) -> datetime | None:
         return datetime.fromisoformat(raw_value)
     except ValueError:
         return None
+
+
+def _active_drawer_ids_from_turn_state(turn_state: dict[str, str]) -> set[int]:
+    return {
+        drawer_id
+        for drawer_id in (
+            _parse_int(turn_state.get("drawer_participant_id")),
+            _parse_int(turn_state.get("second_drawer_participant_id")),
+        )
+        if drawer_id is not None
+    }
+
+
+def _turn_state_is_duo_round(*, turn_state: dict[str, str], round_id: int) -> bool:
+    """Return True only for persisted duo rounds with a runtime drawer pair."""
+
+    if _parse_int(turn_state.get("second_drawer_participant_id")) is None:
+        return False
+
+    return Round.objects.filter(
+        pk=round_id,
+        game__game_mode=RoomGameMode.DUO,
+    ).exists()
+
+
+def _connected_player_ids(player_ids: set[int]) -> set[int]:
+    if not player_ids:
+        return set()
+
+    return set(
+        Player.objects.filter(
+            pk__in=player_ids,
+            connection_status=Player.ConnectionStatus.CONNECTED,
+        ).values_list("id", flat=True)
+    )
+
+
+def _all_drawers_disconnected(drawer_ids: set[int]) -> bool:
+    return bool(drawer_ids) and not _connected_player_ids(drawer_ids)
 
 
 def _decode_leaderboard_entries(
@@ -821,6 +860,22 @@ def _drawer_disconnect_timer_worker(
         # Deadline moved forward unexpectedly; caller should own any re-arm.
         return
 
+    latest_drawer_ids = _active_drawer_ids_from_turn_state(latest_turn_state)
+    if _turn_state_is_duo_round(
+        turn_state=latest_turn_state,
+        round_id=round_id,
+    ) and not _all_drawers_disconnected(latest_drawer_ids):
+        game_redis.update_turn_state_fields(
+            client,
+            join_code,
+            {
+                "status": "drawing",
+                "drawer_disconnect_deadline_at": "",
+            },
+        )
+        _broadcast_round_state_from_turn_state(join_code)
+        return
+
     from games.services import complete_round_due_to_drawer_disconnect
 
     complete_round_due_to_drawer_disconnect(round_id)
@@ -1202,7 +1257,7 @@ def get_sync_events_for_player(join_code: str, player_id: int) -> list[dict]:
 
 
 def handle_participant_disconnected(*, join_code: str, participant_id: int) -> None:
-    """Start drawer-disconnect grace when the active drawer disconnects."""
+    """Start drawer-disconnect grace when every active drawer is disconnected."""
     if not _runtime_enabled():
         return
 
@@ -1216,13 +1271,17 @@ def handle_participant_disconnected(*, join_code: str, participant_id: int) -> N
         return
 
     round_id = _parse_int(turn_state.get("round_id"))
-    drawer_participant_id = _parse_int(turn_state.get("drawer_participant_id"))
-    if round_id is None or drawer_participant_id is None:
+    drawer_ids = _active_drawer_ids_from_turn_state(turn_state)
+    if round_id is None or not drawer_ids:
         return
-    if drawer_participant_id != participant_id:
+    if participant_id not in drawer_ids:
         return
     if turn_state.get("drawer_disconnect_deadline_at"):
         return
+
+    if _turn_state_is_duo_round(turn_state=turn_state, round_id=round_id):
+        if not _all_drawers_disconnected(drawer_ids):
+            return
 
     grace_deadline = timezone.now() + timedelta(seconds=_drawer_disconnect_grace_seconds())
     game_redis.update_turn_state_fields(
@@ -1241,7 +1300,7 @@ def handle_participant_disconnected(*, join_code: str, participant_id: int) -> N
 
 
 def handle_participant_reconnected(*, join_code: str, participant_id: int) -> None:
-    """Resume an active round if the disconnected drawer reconnects in time."""
+    """Resume an active round if a disconnected drawer reconnects in time."""
     if not _runtime_enabled():
         return
 
@@ -1254,11 +1313,16 @@ def handle_participant_reconnected(*, join_code: str, participant_id: int) -> No
     if turn_state.get("phase") != "round":
         return
 
-    drawer_participant_id = _parse_int(turn_state.get("drawer_participant_id"))
-    if drawer_participant_id is None or drawer_participant_id != participant_id:
+    round_id = _parse_int(turn_state.get("round_id"))
+    drawer_ids = _active_drawer_ids_from_turn_state(turn_state)
+    if round_id is None or participant_id not in drawer_ids:
         return
     if not turn_state.get("drawer_disconnect_deadline_at"):
         return
+
+    if _turn_state_is_duo_round(turn_state=turn_state, round_id=round_id):
+        if _all_drawers_disconnected(drawer_ids):
+            return
 
     game_redis.update_turn_state_fields(
         client,

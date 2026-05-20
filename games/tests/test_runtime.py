@@ -7,6 +7,7 @@ TestCase transaction rollback, so each test starts with a clean slate.
 """
 
 import json
+import threading
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -16,7 +17,8 @@ from django.utils import timezone
 
 from games import redis as game_redis
 from games import runtime as game_runtime
-from games.models import Game, GameStatus, GameWord, Round
+from games import services as game_services
+from games.models import Game, GameStatus, GameWord, Round, RoundStatus
 from rooms.models import Player, Room, RoomGameMode
 
 
@@ -228,3 +230,268 @@ class StartRoundRuntimeTurnStateTests(TestCase):
         self.assertNotIn(drawer.id, json.loads(turn_state["eligible_guesser_ids"]))
         self.assertNotIn(second_drawer.id, json.loads(turn_state["eligible_guesser_ids"]))
         self.assertNotIn(late_joiner.id, json.loads(turn_state["eligible_guesser_ids"]))
+
+
+@override_settings(
+    SKETCHIT_ENABLE_RUNTIME_COORDINATOR=True,
+    SKETCHIT_ROUND_DURATION_SECONDS=90,
+    SKETCHIT_DRAWER_DISCONNECT_GRACE_SECONDS=15,
+)
+class DuoDrawerDisconnectRuntimeTests(TestCase):
+    def setUp(self):
+        game_runtime.reset_runtime_state_for_tests()
+        self.fake_redis = _make_fake_redis()
+        game_runtime._redis_client = self.fake_redis
+        self._original_services_redis_client = game_services._redis_client
+        game_services._redis_client = self.fake_redis
+
+        self.room = _make_room(status=Room.Status.IN_PROGRESS)
+        self.room.game_mode = RoomGameMode.DUO
+        self.room.save(update_fields=("game_mode", "updated_at"))
+        session_expires_at = timezone.now() + timedelta(hours=1)
+        self.primary_drawer = self._create_player("primary-drawer", "Primary")
+        self.second_drawer = self._create_player("second-drawer", "Second")
+        self.guesser = self._create_player("guesser", "Guesser")
+        self.other_guesser = self._create_player("other-guesser", "Other Guesser")
+        for player in (
+            self.primary_drawer,
+            self.second_drawer,
+            self.guesser,
+            self.other_guesser,
+        ):
+            player.session_expires_at = session_expires_at
+            player.save(update_fields=("session_expires_at", "updated_at"))
+
+        self.game = Game.objects.create(
+            room=self.room,
+            status=GameStatus.IN_PROGRESS,
+            game_mode=RoomGameMode.DUO,
+        )
+        self.game_word = GameWord.objects.create(game=self.game, text="apple")
+        self.round = Round.objects.create(
+            game=self.game,
+            drawer_participant=self.primary_drawer,
+            drawer_nickname=self.primary_drawer.display_name,
+            second_drawer_participant=self.second_drawer,
+            second_drawer_nickname=self.second_drawer.display_name,
+            selected_game_word=self.game_word,
+            sequence_number=1,
+        )
+
+        with patch("games.runtime._start_round_timer"), patch(
+            "games.runtime.broadcast_room_event"
+        ), patch("games.runtime.broadcast_player_event"):
+            game_runtime.start_round_runtime(self.round.id)
+
+    def tearDown(self):
+        game_services._redis_client = self._original_services_redis_client
+        game_runtime.reset_runtime_state_for_tests()
+
+    def _create_player(self, session_key: str, display_name: str) -> Player:
+        return Player.objects.create(
+            room=self.room,
+            session_key=session_key,
+            display_name=display_name,
+            connection_status=Player.ConnectionStatus.CONNECTED,
+            participation_status=Player.ParticipationStatus.PLAYING,
+            session_expires_at=timezone.now() + timedelta(hours=1),
+        )
+
+    def _set_connected(self, player: Player, connected: bool) -> None:
+        Player.objects.filter(pk=player.id).update(
+            connection_status=(
+                Player.ConnectionStatus.CONNECTED
+                if connected
+                else Player.ConnectionStatus.DISCONNECTED
+            ),
+            updated_at=timezone.now(),
+        )
+
+    def _disconnect_player(self, player: Player) -> None:
+        self._set_connected(player, False)
+        game_runtime.handle_participant_disconnected(
+            join_code=self.room.join_code,
+            participant_id=player.id,
+        )
+
+    def _reconnect_player(self, player: Player) -> None:
+        self._set_connected(player, True)
+        game_runtime.handle_participant_reconnected(
+            join_code=self.room.join_code,
+            participant_id=player.id,
+        )
+
+    def _turn_state(self) -> dict[str, str]:
+        return game_redis.get_turn_state(self.fake_redis, self.room.join_code)
+
+    def assertNoDrawerGrace(self) -> None:
+        turn_state = self._turn_state()
+        self.assertEqual(turn_state.get("status"), "drawing")
+        self.assertFalse(turn_state.get("drawer_disconnect_deadline_at"))
+        self.assertFalse(
+            game_runtime.get_timer_status_for_tests(
+                self.room.join_code,
+            )["drawer_disconnect_timer_running"]
+        )
+        self.round.refresh_from_db()
+        self.assertIsNone(self.round.status)
+        self.assertIsNone(self.round.ended_at)
+
+    def test_primary_drawer_disconnect_alone_keeps_duo_round_active_without_grace(self):
+        self._disconnect_player(self.primary_drawer)
+
+        self.assertNoDrawerGrace()
+
+    def test_second_drawer_disconnect_alone_keeps_duo_round_active_without_grace(self):
+        self._disconnect_player(self.second_drawer)
+
+        self.assertNoDrawerGrace()
+
+    def test_dual_drawer_disconnect_primary_then_second_starts_one_grace_timer(self):
+        with patch("games.runtime._start_drawer_disconnect_timer") as start_timer:
+            self._disconnect_player(self.primary_drawer)
+            self.assertNoDrawerGrace()
+
+            self._disconnect_player(self.second_drawer)
+
+        turn_state = self._turn_state()
+        self.assertEqual(turn_state.get("status"), "drawer_disconnected_grace")
+        self.assertTrue(turn_state.get("drawer_disconnect_deadline_at"))
+        start_timer.assert_called_once_with(
+            join_code=self.room.join_code,
+            round_id=self.round.id,
+        )
+
+    def test_dual_drawer_disconnect_second_then_primary_starts_one_grace_timer(self):
+        with patch("games.runtime._start_drawer_disconnect_timer") as start_timer:
+            self._disconnect_player(self.second_drawer)
+            self.assertNoDrawerGrace()
+
+            self._disconnect_player(self.primary_drawer)
+
+        turn_state = self._turn_state()
+        self.assertEqual(turn_state.get("status"), "drawer_disconnected_grace")
+        self.assertTrue(turn_state.get("drawer_disconnect_deadline_at"))
+        start_timer.assert_called_once_with(
+            join_code=self.room.join_code,
+            round_id=self.round.id,
+        )
+
+    def test_primary_reconnect_during_dual_disconnect_grace_clears_timer(self):
+        with patch("games.runtime._start_drawer_disconnect_timer"):
+            self._disconnect_player(self.primary_drawer)
+            self._disconnect_player(self.second_drawer)
+
+        self._reconnect_player(self.primary_drawer)
+
+        self.assertNoDrawerGrace()
+
+    def test_second_drawer_reconnect_during_dual_disconnect_grace_clears_timer(self):
+        with patch("games.runtime._start_drawer_disconnect_timer"):
+            self._disconnect_player(self.primary_drawer)
+            self._disconnect_player(self.second_drawer)
+
+        self._reconnect_player(self.second_drawer)
+
+        self.assertNoDrawerGrace()
+
+    def test_dual_disconnect_grace_expiry_ends_round_as_drawer_disconnected(self):
+        self._set_connected(self.primary_drawer, False)
+        self._set_connected(self.second_drawer, False)
+        game_redis.update_turn_state_fields(
+            self.fake_redis,
+            self.room.join_code,
+            {
+                "status": "drawer_disconnected_grace",
+                "drawer_disconnect_deadline_at": (
+                    timezone.now() - timedelta(seconds=1)
+                ).isoformat(),
+            },
+        )
+
+        with patch("games.runtime.broadcast_room_event"), patch(
+            "games.runtime._start_intermission_timer"
+        ):
+            game_runtime._drawer_disconnect_timer_worker(
+                join_code=self.room.join_code,
+                round_id=self.round.id,
+                stop_event=threading.Event(),
+            )
+
+        self.round.refresh_from_db()
+        self.assertEqual(self.round.status, RoundStatus.DRAWER_DISCONNECTED)
+        self.assertIsNotNone(self.round.ended_at)
+
+    def test_dual_disconnect_grace_expiry_does_not_end_if_either_drawer_returned(self):
+        self._set_connected(self.primary_drawer, True)
+        self._set_connected(self.second_drawer, False)
+        game_redis.update_turn_state_fields(
+            self.fake_redis,
+            self.room.join_code,
+            {
+                "status": "drawer_disconnected_grace",
+                "drawer_disconnect_deadline_at": (
+                    timezone.now() - timedelta(seconds=1)
+                ).isoformat(),
+            },
+        )
+
+        with patch("games.runtime.broadcast_room_event"):
+            game_runtime._drawer_disconnect_timer_worker(
+                join_code=self.room.join_code,
+                round_id=self.round.id,
+                stop_event=threading.Event(),
+            )
+
+        self.round.refresh_from_db()
+        self.assertIsNone(self.round.status)
+        self.assertIsNone(self.round.ended_at)
+        self.assertNoDrawerGrace()
+
+    def test_single_drawer_round_disconnect_still_starts_grace(self):
+        self.round.second_drawer_participant = None
+        self.round.second_drawer_nickname = None
+        self.round.game.game_mode = RoomGameMode.NORMAL
+        self.round.game.save(update_fields=("game_mode", "updated_at"))
+        self.round.save(
+            update_fields=(
+                "second_drawer_participant",
+                "second_drawer_nickname",
+                "updated_at",
+            )
+        )
+        game_redis.update_turn_state_fields(
+            self.fake_redis,
+            self.room.join_code,
+            {"second_drawer_participant_id": ""},
+        )
+
+        with patch("games.runtime._start_drawer_disconnect_timer") as start_timer:
+            self._disconnect_player(self.primary_drawer)
+
+        turn_state = self._turn_state()
+        self.assertEqual(turn_state.get("status"), "drawer_disconnected_grace")
+        self.assertTrue(turn_state.get("drawer_disconnect_deadline_at"))
+        start_timer.assert_called_once_with(
+            join_code=self.room.join_code,
+            round_id=self.round.id,
+        )
+
+    def test_single_drawer_continuation_preserves_d06_split_scoring(self):
+        self._disconnect_player(self.second_drawer)
+        accepted_at = self.round.started_at + timedelta(seconds=45)
+
+        with patch("games.services.timezone.now", return_value=accepted_at):
+            result = game_services.evaluate_guess_for_round(
+                self.round,
+                self.guesser,
+                self.game_word.text,
+            )
+
+        self.assertTrue(result.is_correct)
+        self.primary_drawer.refresh_from_db()
+        self.second_drawer.refresh_from_db()
+        self.guesser.refresh_from_db()
+        self.assertEqual(self.guesser.current_score, 60)
+        self.assertEqual(self.primary_drawer.current_score, 15)
+        self.assertEqual(self.second_drawer.current_score, 15)
