@@ -63,6 +63,8 @@ async function loadRoomEntryScript({
         JSON,
         Promise,
         URL,
+        URLSearchParams,
+        encodeURIComponent,
         document: {
             querySelector(selector) {
                 if (selector === '[name="csrfmiddlewaretoken"]') {
@@ -82,6 +84,7 @@ async function loadRoomEntryScript({
         },
         window: {
             location: {
+                search: "",
                 assign(url) {
                     redirects.push(url);
                 },
